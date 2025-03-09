@@ -1,0 +1,119 @@
+/*
+  # Create settings table and initial data
+
+  1. New Table
+    - `settings` table for storing global application settings
+      - `id` (integer, primary key, always 1)
+      - `company_name` (text)
+      - `siret` (text)
+      - `training_number` (text)
+      - `address` (text)
+      - `city` (text)
+      - `postal_code` (text)
+      - `country` (text)
+      - `email` (text)
+      - `phone` (text)
+      - `website` (text)
+      - `logo_path` (text)
+      - `signature_path` (text)
+      - `internal_rules_path` (text)
+      - `created_at` (timestamptz)
+      - `updated_at` (timestamptz)
+
+  2. Security
+    - Enable RLS
+    - Add policy for admin users to manage settings
+    - Add policy for authenticated users to read settings
+
+  3. Trigger
+    - Add trigger to update updated_at timestamp
+*/
+
+-- Create settings table
+CREATE TABLE IF NOT EXISTS public.settings (
+  id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  company_name TEXT NOT NULL,
+  siret TEXT,
+  training_number TEXT,
+  address TEXT,
+  city TEXT,
+  postal_code TEXT,
+  country TEXT,
+  email TEXT,
+  phone TEXT,
+  website TEXT,
+  logo_path TEXT,
+  signature_path TEXT,
+  internal_rules_path TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Enable RLS
+ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
+
+-- Create policy for admin users to manage settings
+CREATE POLICY "Admin users can manage settings"
+  ON public.settings
+  FOR ALL
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.user_profiles
+      WHERE id = auth.uid()
+      AND is_admin = true
+    )
+  );
+
+-- Create trigger function for updating updated_at
+CREATE OR REPLACE FUNCTION update_settings_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create trigger
+CREATE TRIGGER update_settings_updated_at
+  BEFORE UPDATE ON public.settings
+  FOR EACH ROW
+  EXECUTE FUNCTION update_settings_updated_at();
+
+-- Insert initial settings
+INSERT INTO public.settings (
+  id,
+  company_name,
+  siret,
+  training_number,
+  address,
+  city,
+  postal_code,
+  country,
+  email,
+  phone,
+  website
+) VALUES (
+  1,
+  'PETITMAKER',
+  '928 386 044 00012',
+  '32 59 13116 59',
+  '2 rue Héraclès',
+  'Villeneuve-d''Ascq',
+  '59650',
+  'France',
+  'nicolas.cleton@petitmaker.fr',
+  '07 60 17 72 67',
+  'https://petitmaker.fr'
+) ON CONFLICT (id) DO UPDATE SET
+  company_name = EXCLUDED.company_name,
+  siret = EXCLUDED.siret,
+  training_number = EXCLUDED.training_number,
+  address = EXCLUDED.address,
+  city = EXCLUDED.city,
+  postal_code = EXCLUDED.postal_code,
+  country = EXCLUDED.country,
+  email = EXCLUDED.email,
+  phone = EXCLUDED.phone,
+  website = EXCLUDED.website,
+  updated_at = now();

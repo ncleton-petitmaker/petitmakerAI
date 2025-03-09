@@ -1,0 +1,180 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Poppins', sans-serif;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-black text-white;
+  }
+
+  /* Calendly styling */
+  .calendly-inline-widget {
+    @apply !bg-transparent;
+  }
+
+  .calendly-inline-widget iframe {
+    @apply !bg-transparent;
+  }
+  
+  /* Amélioration du contraste pour la lisibilité */
+  input, textarea, select {
+    @apply text-gray-900;
+  }
+  
+  /* Assurer que le texte dans les modales est lisible */
+  .bg-white {
+    @apply text-gray-900;
+  }
+  
+  /* Assurer que les boutons ont un texte lisible */
+  button {
+    @apply text-white;
+  }
+  
+  /* Exceptions pour les boutons avec fond clair */
+  button.bg-white, button.bg-gray-50, button.bg-gray-100, button.bg-gray-200 {
+    @apply text-gray-900;
+  }
+  
+  /* Améliorer la lisibilité des tableaux */
+  table th, table td {
+    @apply text-gray-900;
+  }
+  
+  /* Assurer que le texte dans les éléments de formulaire est lisible */
+  .text-gray-700, .text-gray-800, .text-gray-900 {
+    @apply text-opacity-100;
+  }
+}
+
+/* Enhanced glow effect with smoother transition */
+.glow {
+  text-shadow: 0 0 15px rgba(255, 255, 255, 0.2),
+               0 0 25px rgba(255, 255, 255, 0.1),
+               0 0 35px rgba(59, 130, 246, 0.1);
+  transition: text-shadow 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.neon-border {
+  box-shadow: 0 0 5px theme('colors.blue.400'),
+              0 0 10px theme('colors.blue.300'),
+              0 0 15px theme('colors.blue.200');
+}
+
+/* Enhanced parallax container with better performance */
+.parallax-container {
+  perspective: 1500px;
+  transform-style: preserve-3d;
+  will-change: transform;
+  backface-visibility: hidden;
+  -webkit-font-smoothing: subpixel-antialiased;
+}
+
+.parallax-element {
+  will-change: transform;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+  transition: transform 0.1s linear;
+}
+
+/* Hide scrollbar but keep functionality */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Carousel cursor styles */
+.carousel-container {
+  cursor: grab;
+}
+
+.carousel-container:active {
+  cursor: grabbing;
+}
+
+.carousel-card {
+  cursor: grab;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+  will-change: transform, filter;
+}
+
+.carousel-card:active {
+  cursor: grabbing;
+}
+
+.carousel-image {
+  transition: filter 0.3s ease-out;
+  will-change: filter;
+}
+
+.carousel-gradient {
+  background: linear-gradient(
+    to top,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 0.7) 50%,
+    rgba(0, 0, 0, 0) 100%
+  );
+  transition: opacity 0.3s ease-out;
+  will-change: opacity;
+}
+
+.carousel-content {
+  transform: translateZ(20px);
+  will-change: transform, opacity;
+}
+
+/* Improved scroll snap with better performance */
+.scroll-container {
+  scroll-snap-type: y proximity;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.scroll-section {
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+  transform: translateZ(0);
+}
+
+/* Add smooth reveal animation */
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(20px) translateZ(0);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) translateZ(0);
+  }
+}
+
+.reveal {
+  animation: reveal 0.8s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  backface-visibility: hidden;
+  will-change: transform, opacity;
+}
+
+/* Optimize animations for reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .parallax-element,
+  .card-hover,
+  .fade-up,
+  .reveal {
+    transition: none !important;
+    animation: none !important;
+    transform: none !important;
+  }
+}

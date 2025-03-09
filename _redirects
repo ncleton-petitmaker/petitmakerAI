@@ -1,0 +1,2 @@
+# Redirect all HTTP traffic to HTTPS
+/* https://:splat 301!

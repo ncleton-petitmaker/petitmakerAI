@@ -1,0 +1,24 @@
+# https://petitmaker.fr/robots.txt
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://petitmaker.fr/sitemap.xml
+
+# Interdire l'accès aux pages d'administration (si existantes dans le futur)
+Disallow: /admin/
+Disallow: /wp-admin/
+
+# Autoriser les ressources statiques
+Allow: /*.js$
+Allow: /*.css$
+Allow: /*.png$
+Allow: /*.jpg$
+Allow: /*.gif$
+Allow: /*.svg$
+Allow: /*.ico$
+Allow: /*.woff$
+Allow: /*.woff2$
+
+# Paramètres de crawl
+Crawl-delay: 10
