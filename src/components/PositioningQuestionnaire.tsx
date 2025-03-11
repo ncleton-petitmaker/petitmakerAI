@@ -54,12 +54,12 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
         
         // Si nous avons des données d'admin, utiliser ces données directement
         if (adminResponseData) {
-          console.log('🔍 [DEBUG] Using admin response data');
+          console.log('🔍 [DEBUG] Using admin response data:', adminResponseData);
           
           // Récupérer les questions depuis les données admin
           const { data: templateData, error: templateError } = await supabase
             .from('questionnaire_templates')
-            .select('id, questions')
+            .select('id')
             .eq('id', adminResponseData.template_id)
             .single();
             
@@ -68,12 +68,28 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
             throw templateError;
           }
           
-          if (!templateData || !templateData.questions) {
+          if (!templateData) {
             console.error('🔍 [DEBUG] No template found for admin data');
             throw new Error('No template found');
           }
+
+          // Récupérer les questions associées au template
+          const { data: questionData, error: questionsError } = await supabase
+            .from('questionnaire_questions')
+            .select('*')
+            .eq('template_id', templateData.id)
+            .order('order_index');
+
+          if (questionsError) {
+            console.error('🔍 [DEBUG] Error fetching questions:', questionsError);
+            throw questionsError;
+          }
+
+          if (!questionData || questionData.length === 0) {
+            console.error('🔍 [DEBUG] No questions found for template:', templateData.id);
+            throw new Error('No questions found');
+          }
           
-          const questionData = templateData.questions;
           console.log('🔍 [DEBUG] Loaded', questionData.length, 'questions for template from admin data');
           setQuestions(questionData);
 
@@ -87,6 +103,29 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
           
           console.log('🔍 [DEBUG] Correct answers:', correctAnswersMap);
           setCorrectAnswers(correctAnswersMap);
+          
+          // Extraire les réponses de l'utilisateur
+          let userResponses = adminResponseData.responses;
+          
+          // Si les réponses sont une chaîne, les parser en JSON
+          if (typeof userResponses === 'string') {
+            try {
+              userResponses = JSON.parse(userResponses);
+              console.log('🔍 [DEBUG] Parsed responses from string:', userResponses);
+            } catch (e) {
+              console.error('🔍 [DEBUG] Error parsing responses:', e);
+              userResponses = {};
+            }
+          }
+          
+          console.log('🔍 [DEBUG] Setting answers from admin data:', userResponses);
+          setAnswers(userResponses || {});
+          
+          // Définir le score si disponible
+          if (adminResponseData.score !== undefined && adminResponseData.score !== null) {
+            console.log('🔍 [DEBUG] Setting score from admin data:', adminResponseData.score);
+            setScore(adminResponseData.score);
+          }
 
           setIsLoading(false);
           return;
@@ -622,7 +661,11 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
           <div className="mx-6 mt-4 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg flex items-center justify-between">
             <div>
               <h3 className="text-lg font-semibold text-white">Score {type === 'initial' ? 'initial' : type === 'final' ? 'final' : 'de positionnement'}</h3>
-              <p className="text-blue-400">{score}% de bonnes réponses</p>
+              <p className="text-blue-400">
+                {type === 'initial' || type === 'final' 
+                  ? `${score}% de bonnes réponses` 
+                  : `${score}% de correspondance avec les réponses attendues`}
+              </p>
             </div>
             <Trophy className="w-10 h-10 text-blue-500" />
           </div>
@@ -666,18 +709,25 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
                         const isUserAnswer = answers[questions[currentStep].id] === option;
                         const isCorrectAnswer = correctAnswers[questions[currentStep].id] === option;
                         const showCorrectAnswer = type === 'final' && readOnly;
+                        const isEvaluation = type === 'initial' || type === 'final';
                         
                         return (
                           <label
                             key={option}
                             className={`flex items-center space-x-3 p-4 rounded-lg border ${
-                              isUserAnswer && isCorrectAnswer
-                                ? 'bg-green-500/20 border-green-500/50'
-                                : isUserAnswer && !isCorrectAnswer
-                                ? 'bg-red-500/20 border-red-500/50'
-                                : showCorrectAnswer && isCorrectAnswer
-                                ? 'bg-green-500/10 border-green-500/50'
-                                : 'border-gray-800 hover:border-gray-700'
+                              isEvaluation ? (
+                                isUserAnswer && isCorrectAnswer
+                                  ? 'bg-green-500/20 border-green-500/50'
+                                  : isUserAnswer && !isCorrectAnswer
+                                  ? 'bg-red-500/20 border-red-500/50'
+                                  : showCorrectAnswer && isCorrectAnswer
+                                  ? 'bg-green-500/10 border-green-500/50'
+                                  : 'border-gray-800 hover:border-gray-700'
+                              ) : (
+                                isUserAnswer 
+                                  ? 'bg-blue-500/20 border-blue-500/50'
+                                  : 'border-gray-800 hover:border-gray-700'
+                              )
                             } cursor-pointer transition-colors`}
                             onClick={() => !readOnly && handleAnswer(questions[currentStep].id, option)}
                           >
@@ -691,13 +741,19 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
                             />
                             <div
                               className={`w-4 h-4 rounded-full border ${
-                                isUserAnswer
-                                  ? isCorrectAnswer
+                                isEvaluation ? (
+                                  isUserAnswer
+                                    ? isCorrectAnswer
+                                      ? 'border-green-500 bg-green-500'
+                                      : 'border-red-500 bg-red-500'
+                                    : showCorrectAnswer && isCorrectAnswer
                                     ? 'border-green-500 bg-green-500'
-                                    : 'border-red-500 bg-red-500'
-                                  : showCorrectAnswer && isCorrectAnswer
-                                  ? 'border-green-500 bg-green-500'
-                                  : 'border-gray-600'
+                                    : 'border-gray-600'
+                                ) : (
+                                  isUserAnswer
+                                    ? 'border-blue-500 bg-blue-500'
+                                    : 'border-gray-600'
+                                )
                               }`}
                             >
                               {(isUserAnswer || (showCorrectAnswer && isCorrectAnswer)) && (
@@ -735,6 +791,7 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
                         const isUserAnswer = answers[questions[currentStep].id] === value;
                         const isCorrectAnswer = correctAnswers[questions[currentStep].id] === value;
                         const showCorrectAnswer = type === 'final' && readOnly;
+                        const isEvaluation = type === 'initial' || type === 'final';
                         
                         return (
                           <button
@@ -743,13 +800,19 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
                             disabled={readOnly}
                             onClick={() => handleAnswer(questions[currentStep].id, value)}
                             className={`px-6 py-3 rounded-lg font-medium ${
-                              isUserAnswer && isCorrectAnswer
-                                ? 'bg-green-500 text-white'
-                                : isUserAnswer && !isCorrectAnswer
-                                ? 'bg-red-500 text-white'
-                                : showCorrectAnswer && isCorrectAnswer
-                                ? 'bg-green-500/50 text-white'
-                                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                              isEvaluation ? (
+                                isUserAnswer && isCorrectAnswer
+                                  ? 'bg-green-500 text-white'
+                                  : isUserAnswer && !isCorrectAnswer
+                                  ? 'bg-red-500 text-white'
+                                  : showCorrectAnswer && isCorrectAnswer
+                                  ? 'bg-green-500/50 text-white'
+                                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                              ) : (
+                                isUserAnswer
+                                  ? 'bg-blue-500 text-white'
+                                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                              )
                             }`}
                           >
                             <div className="flex flex-col items-center">
@@ -771,20 +834,23 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
 
                   {questions[currentStep]?.question_type === 'rating' && (
                     <div className="flex justify-between items-center">
-                      {[1, 2, 3, 4, 5].map((value) => (
-                        <button
-                          key={value}
-                          onClick={() => handleAnswer(questions[currentStep].id, value)}
-                          disabled={readOnly}
-                          className={`w-12 h-12 rounded-full flex items-center justify-center text-lg font-medium ${
-                            answers[questions[currentStep].id] === value
-                              ? 'bg-blue-500 text-white'
-                              : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-                          }`}
-                        >
-                          {value}
-                        </button>
-                      ))}
+                      {[1, 2, 3, 4, 5].map((value) => {
+                        const isEvaluation = type === 'initial' || type === 'final';
+                        return (
+                          <button
+                            key={value}
+                            onClick={() => handleAnswer(questions[currentStep].id, value)}
+                            disabled={readOnly}
+                            className={`w-12 h-12 rounded-full flex items-center justify-center text-lg font-medium ${
+                              answers[questions[currentStep].id] === value
+                                ? isEvaluation ? 'bg-green-500 text-white' : 'bg-blue-500 text-white'
+                                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                            }`}
+                          >
+                            {value}
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
 
