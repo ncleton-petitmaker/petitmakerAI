@@ -115,8 +115,8 @@ export const InternalRulesModal: React.FC<InternalRulesModalProps> = ({ onClose,
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-100 flex items-center justify-center z-[100] overflow-hidden">
-      <div className="relative bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col m-4">
+    <div className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-[100] overflow-hidden">
+      <div className="relative bg-white rounded-lg shadow-xl max-w-5xl w-[95%] max-h-[95vh] flex flex-col m-2">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b">
           <h2 className="text-xl font-semibold text-gray-800 flex items-center">
@@ -147,21 +147,25 @@ export const InternalRulesModal: React.FC<InternalRulesModalProps> = ({ onClose,
             </div>
           ) : pdfUrl ? (
             <div className="h-full flex flex-col">
-              <div className="mb-4 flex justify-end">
+              <div className="mb-4 flex justify-between items-center">
+                <p className="text-gray-600 text-sm">
+                  Si le document ne s'affiche pas correctement, vous pouvez le télécharger et l'ouvrir avec votre lecteur PDF.
+                </p>
                 <a
                   href={pdfUrl}
                   download={fileName}
                   className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                 >
                   <Download className="mr-2 h-4 w-4" />
-                  Télécharger
+                  Télécharger le PDF
                 </a>
               </div>
-              <div className="flex-1 min-h-[500px]">
+              <div className="flex-1 min-h-[70vh]">
                 <iframe
-                  src={`${pdfUrl}#toolbar=0`}
+                  src={`${pdfUrl}#toolbar=1&navpanes=1&scrollbar=1&view=FitH`}
                   className="w-full h-full border-0"
                   title="Règlement Intérieur"
+                  style={{ minHeight: '70vh' }}
                 />
               </div>
             </div>
