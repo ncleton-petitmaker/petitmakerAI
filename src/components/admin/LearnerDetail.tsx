@@ -123,13 +123,15 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
         supabase
           .from('questionnaire_responses')
           .select('*')
-          .eq('user_id', id),
+          .eq('user_id', id)
+          .eq('type', 'positioning'),
         
         // 2. Évaluations initiale et finale
         supabase
-          .from('evaluation_responses')
+          .from('questionnaire_responses')
           .select('*')
-          .eq('user_id', id),
+          .eq('user_id', id)
+          .eq('type', 'initial_final_evaluation'),
         
         // 3. Questionnaire de satisfaction
         supabase
@@ -156,41 +158,66 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
       const evaluationData = evaluationResponse.data;
       const satisfactionData = satisfactionResponse.data;
       
+      console.log("Positioning data:", positioningData);
+      console.log("Evaluation data:", evaluationData);
+      console.log("Satisfaction data:", satisfactionData);
+      
+      // Vérifier si la colonne sous_type existe
+      const hasSousTypeColumn = evaluationData && evaluationData.length > 0 && 'sous_type' in evaluationData[0];
+      console.log("Has sous_type column:", hasSousTypeColumn);
+      
       // Mettre à jour les statuts des questionnaires en fonction des données trouvées
       const hasPositioning = positioningData && positioningData.length > 0;
-      const hasInitial = evaluationData && evaluationData.some(item => item.type === 'initial');
-      const hasFinal = evaluationData && evaluationData.some(item => item.type === 'final');
+      
+      let hasInitial, hasFinal;
+      if (hasSousTypeColumn) {
+        // Si la colonne sous_type existe, filtrer par sous_type
+        hasInitial = evaluationData && evaluationData.some(item => item.sous_type === 'initial');
+        hasFinal = evaluationData && evaluationData.some(item => item.sous_type === 'final');
+      } else {
+        // Sinon, on ne peut pas distinguer initial de final
+        // On suppose que s'il y a des données d'évaluation, les deux sont complétés
+        hasInitial = evaluationData && evaluationData.length > 0;
+        hasFinal = evaluationData && evaluationData.length > 1;
+      }
+      
       const hasSatisfaction = satisfactionData && satisfactionData.length > 0;
       
       // Récupérer les scores des évaluations
       let initialScore = null;
       let finalScore = null;
       
-      if (evaluationData && evaluationData.length > 0) {
-        const initialEval = evaluationData.find(item => item.type === 'initial');
-        const finalEval = evaluationData.find(item => item.type === 'final');
-        
-        if (initialEval) initialScore = initialEval.score;
-        if (finalEval) finalScore = finalEval.score;
+      // Organiser les données d'évaluation
+      let initialEval, finalEval;
+      
+      if (hasSousTypeColumn) {
+        // Si la colonne sous_type existe, filtrer par sous_type
+        initialEval = evaluationData?.find(item => item.sous_type === 'initial');
+        finalEval = evaluationData?.find(item => item.sous_type === 'final');
+      } else {
+        // Sinon, on ne peut pas distinguer initial de final, donc on prend les deux premiers (si existants)
+        initialEval = evaluationData && evaluationData.length > 0 ? evaluationData[0] : null;
+        finalEval = evaluationData && evaluationData.length > 1 ? evaluationData[1] : null;
       }
+      
+      if (initialEval) initialScore = initialEval.score;
+      if (finalEval) finalScore = finalEval.score;
 
       // Stocker les réponses complètes des questionnaires
       const positioningResponse1 = hasPositioning && positioningData.length > 0 ? positioningData[0] : null;
-      const initialResponse = hasInitial ? evaluationData.find(item => item.type === 'initial') : null;
-      const finalResponse = hasFinal ? evaluationData.find(item => item.type === 'final') : null;
       const satisfactionResponse1 = hasSatisfaction && satisfactionData.length > 0 ? satisfactionData[0] : null;
       
       setQuestionnaireResponses({
         positioning: positioningResponse1,
-        initial: initialResponse,
-        final: finalResponse,
+        initial: initialEval,
+        final: finalEval,
         satisfaction: satisfactionResponse1
       });
 
       console.log("Questionnaire responses:", {
         positioning: positioningResponse1,
-        initial: initialResponse,
-        final: finalResponse,
+        initial: initialEval,
+        final: finalEval,
         satisfaction: satisfactionResponse1
       });
 
@@ -910,7 +937,6 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
           onClose={() => setShowQuestionnaire(null)} 
           readOnly={true}
           type={null}
-          userId={learner.id}
           adminResponseData={prepareQuestionnaireData(questionnaireResponses.positioning)}
           onSubmitSuccess={fetchLearnerDetails}
         />
@@ -921,7 +947,6 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
           onClose={() => setShowQuestionnaire(null)} 
           readOnly={true}
           type="initial"
-          userId={learner.id}
           adminResponseData={prepareQuestionnaireData(questionnaireResponses.initial)}
           onSubmitSuccess={fetchLearnerDetails}
         />
@@ -932,7 +957,6 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
           onClose={() => setShowQuestionnaire(null)} 
           readOnly={true}
           type="final"
-          userId={learner.id}
           adminResponseData={prepareQuestionnaireData(questionnaireResponses.final)}
           onSubmitSuccess={fetchLearnerDetails}
         />
@@ -942,7 +966,6 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
         <SatisfactionQuestionnaire 
           onClose={() => setShowQuestionnaire(null)} 
           readOnly={true}
-          userId={learner.id}
           adminResponseData={prepareQuestionnaireData(questionnaireResponses.satisfaction)}
           onSubmitSuccess={fetchLearnerDetails}
         />
