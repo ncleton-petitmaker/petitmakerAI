@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { FileText, Eye } from 'lucide-react';
 import { StudentTrainingAgreement } from './StudentTrainingAgreement';
 import { supabase } from '../lib/supabase';
@@ -30,6 +31,7 @@ export const StudentTrainingAgreementButton: React.FC<StudentTrainingAgreementBu
   const [participant, setParticipant] = useState<any>(null);
   const [hasSigned, setHasSigned] = useState(false);
   const [signedDocumentUrl, setSignedDocumentUrl] = useState<string | null>(null);
+  const [portalElement, setPortalElement] = useState<HTMLElement | null>(null);
 
   const fetchSignedDocument = async () => {
     try {
@@ -136,48 +138,44 @@ export const StudentTrainingAgreementButton: React.FC<StudentTrainingAgreementBu
         
         if (conventions.length > 0) {
           console.log('🔍 [DEBUG] Détails des conventions:', JSON.stringify(conventions, null, 2));
+          
+          // S'il y a des conventions, définir l'URL du document signé
+          if (conventions[0].file_url) {
+            setSignedDocumentUrl(conventions[0].file_url);
+            setHasSigned(true);
+          }
+          
+          return;
         }
+      }
+      
+      // Si aucun document n'est trouvé, vérifier les documents de l'utilisateur et de la formation
+      console.log('🔍 [DEBUG] Aucun document trouvé pour cet utilisateur et cette formation');
+      
+      // Vérifier tous les documents de l'utilisateur
+      const { data: userDocs, error: userDocsError } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('user_id', userId);
+        
+      if (userDocsError) {
+        console.error('🔍 [DEBUG] Erreur lors de la récupération des documents de l\'utilisateur:', userDocsError);
       } else {
-        console.log('🔍 [DEBUG] Aucun document trouvé dans la table documents');
+        console.log('🔍 [DEBUG] Documents de l\'utilisateur:', userDocs?.length || 0);
+      }
+      
+      // Vérifier tous les documents de la formation
+      const { data: trainingDocs, error: trainingDocsError } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('training_id', trainingId);
         
-        // Vérifier si la table documents existe et sa structure
-        const { data: tableInfo, error: tableError } = await supabase
-          .rpc('get_table_info', { table_name: 'documents' });
-          
-        if (tableError) {
-          console.error('🔍 [DEBUG] Erreur lors de la vérification de la structure de la table:', tableError);
-        } else {
-          console.log('🔍 [DEBUG] Structure de la table documents:', tableInfo);
-        }
-        
-        // Vérifier tous les documents de l'utilisateur
-        const { data: userDocs, error: userDocsError } = await supabase
-          .from('documents')
-          .select('*')
-          .eq('user_id', userId);
-          
-        if (userDocsError) {
-          console.error('🔍 [DEBUG] Erreur lors de la récupération des documents de l\'utilisateur:', userDocsError);
-        } else {
-          console.log('🔍 [DEBUG] Documents de l\'utilisateur:', userDocs?.length || 0);
-          if (userDocs && userDocs.length > 0) {
-            console.log('🔍 [DEBUG] Détails des documents de l\'utilisateur:', JSON.stringify(userDocs, null, 2));
-          }
-        }
-        
-        // Vérifier tous les documents de la formation
-        const { data: trainingDocs, error: trainingDocsError } = await supabase
-          .from('documents')
-          .select('*')
-          .eq('training_id', trainingId);
-          
-        if (trainingDocsError) {
-          console.error('🔍 [DEBUG] Erreur lors de la récupération des documents de la formation:', trainingDocsError);
-        } else {
-          console.log('🔍 [DEBUG] Documents de la formation:', trainingDocs?.length || 0);
-          if (trainingDocs && trainingDocs.length > 0) {
-            console.log('🔍 [DEBUG] Détails des documents de la formation:', JSON.stringify(trainingDocs, null, 2));
-          }
+      if (trainingDocsError) {
+        console.error('🔍 [DEBUG] Erreur lors de la récupération des documents de la formation:', trainingDocsError);
+      } else {
+        console.log('🔍 [DEBUG] Documents de la formation:', trainingDocs?.length || 0);
+        if (trainingDocs && trainingDocs.length > 0) {
+          console.log('🔍 [DEBUG] Détails des documents de la formation:', JSON.stringify(trainingDocs, null, 2));
         }
       }
     } catch (error) {
@@ -258,177 +256,97 @@ export const StudentTrainingAgreementButton: React.FC<StudentTrainingAgreementBu
 
         // Vérifier si l'utilisateur a déjà signé la convention
         const signatureData = await checkSignatureStatus();
-        if (!signatureData) {
-          throw new Error("Impossible de vérifier le statut de signature");
-        }
-
-        // Si l'utilisateur a signé, récupérer l'URL du document PDF
-        let documentUrl = null;
-        if (signatureData.has_signed_agreement) {
-          console.log('🔍 [DEBUG] L\'utilisateur a signé, récupération du document');
-          documentUrl = await fetchSignedDocument();
-        } else {
+        
+        // Si l'URL du document signé n'a pas déjà été défini par checkDocumentsTable
+        if (!hasSigned && signatureData?.has_signed_agreement && signatureData?.agreement_signature_url) {
+          console.log('🔍 [DEBUG] L\'utilisateur a déjà signé la convention');
+          setHasSigned(true);
+          setSignedDocumentUrl(signatureData.agreement_signature_url);
+        } else if (!hasSigned) {
           console.log('🔍 [DEBUG] L\'utilisateur n\'a pas encore signé');
         }
 
+        // Mettre à jour les states
         setTraining(trainingData);
         setParticipant(userProfileData);
-        setHasSigned(signatureData.has_signed_agreement || false);
-        setSignedDocumentUrl(documentUrl);
-        
-        console.log('🔍 [DEBUG] État final après chargement:', {
-          hasSigned: signatureData.has_signed_agreement || false,
-          signedDocumentUrl: documentUrl
-        });
+        console.log('🔍 [DEBUG] État final après chargement:', { hasSigned, signedDocumentUrl });
+
+        // Créer ou trouver l'élément portal-root
+        let element = document.getElementById('portal-root');
+        if (!element) {
+          element = document.createElement('div');
+          element.id = 'portal-root';
+          element.style.position = 'fixed';
+          element.style.zIndex = '9999';
+          element.style.top = '0';
+          element.style.left = '0';
+          element.style.width = '100%';
+          element.style.height = '100%';
+          element.style.pointerEvents = 'none';
+          document.body.appendChild(element);
+        }
+        setPortalElement(element);
+
+        setLoading(false);
       } catch (error) {
-        console.error('Erreur lors de la récupération des données:', error);
-        setError('Erreur lors du chargement des données');
-      } finally {
+        console.error('🔍 [DEBUG] Erreur lors du chargement des données:', error);
+        setError("Erreur lors du chargement des données");
         setLoading(false);
       }
     };
 
     fetchData();
-  }, [trainingId, userId]);
+  }, [trainingId, userId, hasSigned]);
 
   const handleOpenAgreement = (e: React.MouseEvent) => {
-    console.log('🔍 [DEBUG] handleOpenAgreement - START');
-    console.log('🔍 [DEBUG] Event type:', e.type);
-    console.log('🔍 [DEBUG] Event target:', e.target);
-    console.log('🔍 [DEBUG] Event currentTarget:', e.currentTarget);
-    
-    try {
+    if (e) {
       e.preventDefault();
       e.stopPropagation();
-      console.log('🔍 [DEBUG] preventDefault and stopPropagation called');
-      
-      console.log('🔍 [DEBUG] handleOpenAgreement called');
-      console.log('🔍 [DEBUG] Current document state before update:', showAgreement);
-      setShowAgreement(true);
-      setShowSignedDocument(false);
-      console.log('🔍 [DEBUG] Document state updated to:', true);
-      
-      // Log the z-index of the timeline elements
-      setTimeout(() => {
-        const timelineElements = document.querySelectorAll('.relative.z-10, .relative.z-20, .relative.z-50');
-        console.log('🔍 [DEBUG] Timeline elements with z-index:', timelineElements);
-        
-        const documentElement = document.querySelector('.fixed.inset-0.bg-black');
-        console.log('🔍 [DEBUG] Document element:', documentElement);
-        if (documentElement) {
-          console.log('🔍 [DEBUG] Document z-index:', window.getComputedStyle(documentElement).zIndex);
-        }
-      }, 100);
-      
-      console.log('🔍 [DEBUG] handleOpenAgreement - END');
-    } catch (error) {
-      console.error('🔍 [DEBUG] Error in handleOpenAgreement:', error);
+    }
+    
+    console.log('🔍 [DEBUG] Ouverture de la convention de formation');
+    setShowAgreement(true);
+    setShowSignedDocument(false);
+    
+    // Informer le parent que le document a été ouvert
+    if (onDocumentOpen) {
+      console.log('🔍 [DEBUG] Calling onDocumentOpen');
+      onDocumentOpen();
     }
   };
 
   const handleViewSignedDocument = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     
-    console.log('🔍 [DEBUG] Viewing signed document:', signedDocumentUrl);
-    console.log('🔍 [DEBUG] Current hasSigned state:', hasSigned);
-    
-    // Vérifier à nouveau le statut de signature
-    checkSignatureStatus();
+    console.log('🔍 [DEBUG] Affichage du document signé');
     
     if (signedDocumentUrl) {
-      console.log('🔍 [DEBUG] URL du document disponible, ouverture dans un nouvel onglet:', signedDocumentUrl);
-      
-      // Ouvrir le document dans un nouvel onglet
-      window.open(signedDocumentUrl, '_blank');
+      console.log('🔍 [DEBUG] URL du document signé:', signedDocumentUrl);
+      setShowSignedDocument(true);
       
       // Informer le parent que le document a été ouvert
       if (onDocumentOpen) {
+        console.log('🔍 [DEBUG] Calling onDocumentOpen');
         onDocumentOpen();
       }
     } else {
-      // Si l'URL n'est pas disponible, essayer de récupérer le document
-      console.log('🔍 [DEBUG] URL du document non disponible, tentative de récupération');
-      fetchSignedDocument().then(url => {
-        if (url) {
-          console.log('🔍 [DEBUG] Document récupéré avec succès:', url);
-          setSignedDocumentUrl(url);
-          
-          // Ouvrir le document dans un nouvel onglet
-          window.open(url, '_blank');
-          
-          // Informer le parent que le document a été ouvert
-          if (onDocumentOpen) {
-            onDocumentOpen();
-          }
-        } else {
-          console.log('🔍 [DEBUG] Document non trouvé, ouverture du formulaire de convention');
-          // Si toujours pas disponible, ouvrir le formulaire de convention
-          handleOpenAgreement(e);
-        }
-      });
+      console.error('🔍 [DEBUG] URL du document signé non disponible');
     }
   };
 
-  const handleCloseAgreement = async () => {
-    console.log('🔍 [DEBUG] handleCloseAgreement - START');
-    console.log('🔍 [DEBUG] Current document state before update:', showAgreement);
+  const handleCloseAgreement = () => {
+    console.log('🔍 [DEBUG] Fermeture de la convention de formation');
     setShowAgreement(false);
     setShowSignedDocument(false);
-    console.log('🔍 [DEBUG] Document state updated to:', false);
     
-    // Vérifier si la convention a été signée après la fermeture
-    try {
-      console.log('🔍 [DEBUG] Checking signature status');
-      const signatureData = await checkSignatureStatus();
-      
-      if (signatureData) {
-        console.log('🔍 [DEBUG] Signature status after close:', {
-          has_signed_agreement: signatureData.has_signed_agreement,
-          agreement_signature_url: signatureData.agreement_signature_url,
-          agreement_signature_date: signatureData.agreement_signature_date
-        });
-        
-        const wasSignedBefore = hasSigned;
-        const isSignedNow = signatureData.has_signed_agreement || false;
-        
-        console.log('🔍 [DEBUG] Changement de statut de signature:', {
-          wasSignedBefore,
-          isSignedNow
-        });
-        
-        // Si le document vient d'être signé, récupérer l'URL du document
-        if (isSignedNow && (!wasSignedBefore || !signedDocumentUrl)) {
-          console.log('🔍 [DEBUG] Document nouvellement signé, récupération de l\'URL');
-          
-          // Vérifier la table documents
-          await checkDocumentsTable();
-          
-          const url = await fetchSignedDocument();
-          if (url) {
-            console.log('🔍 [DEBUG] URL du document récupérée:', url);
-            setSignedDocumentUrl(url);
-          } else {
-            console.log('🔍 [DEBUG] Impossible de récupérer l\'URL du document');
-            
-            // Vérifier si l'URL est dans le localStorage
-            const localStorageKey = `document_${trainingId}_${userId}_convention`;
-            const localStorageUrl = localStorage.getItem(localStorageKey);
-            
-            if (localStorageUrl) {
-              console.log('🔍 [DEBUG] URL trouvée dans le localStorage:', localStorageUrl);
-              setSignedDocumentUrl(localStorageUrl);
-            }
-          }
-        }
-        
-        setHasSigned(isSignedNow);
-      }
-    } catch (error) {
-      console.error('🔍 [DEBUG] Error checking signature status:', error);
+    // Informer le parent que le document a été fermé
+    if (onDocumentClose) {
+      console.log('🔍 [DEBUG] Calling onDocumentClose');
+      onDocumentClose();
     }
-    
-    console.log('🔍 [DEBUG] handleCloseAgreement - END');
   };
 
   if (loading) {
@@ -486,6 +404,43 @@ export const StudentTrainingAgreementButton: React.FC<StudentTrainingAgreementBu
       buttonStyle = hasSigned ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white';
   }
 
+  // Créer le contenu du modal pour le document signé
+  const signedDocumentModal = showSignedDocument && signedDocumentUrl && (
+    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[9999] overflow-hidden" style={{ pointerEvents: 'auto' }}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col m-4">
+        <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+          <h3 className="text-lg font-medium text-gray-900">
+            Convention de formation signée
+          </h3>
+          <div className="flex space-x-2">
+            <button
+              onClick={() => window.open(signedDocumentUrl, '_blank')}
+              className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            >
+              <FileText className="h-4 w-4 mr-1.5" />
+              Ouvrir dans un nouvel onglet
+            </button>
+            <button
+              onClick={handleCloseAgreement}
+              className="inline-flex items-center px-2 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            >
+              <Eye className="h-4 w-4" />
+              Fermer
+            </button>
+          </div>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto p-6">
+          <iframe 
+            src={signedDocumentUrl} 
+            className="w-full h-full border-0" 
+            title="Convention de formation signée"
+          />
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <>
       <button
@@ -522,57 +477,12 @@ export const StudentTrainingAgreementButton: React.FC<StudentTrainingAgreementBu
           training={training}
           participant={participant}
           onCancel={handleCloseAgreement}
+          onDocumentOpen={onDocumentOpen}
+          onDocumentClose={onDocumentClose}
         />
       )}
 
-      {showSignedDocument && signedDocumentUrl && (
-        <div className="fixed inset-0 bg-black bg-opacity-100 flex items-center justify-center z-[9999] overflow-hidden">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col m-4">
-            <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-              <h3 className="text-lg font-medium text-gray-900">
-                Convention de formation signée
-              </h3>
-              <div className="flex space-x-2">
-                <button
-                  onClick={() => window.open(signedDocumentUrl, '_blank')}
-                  className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                >
-                  <FileText className="h-4 w-4 mr-1.5" />
-                  Ouvrir dans un nouvel onglet
-                </button>
-                <button
-                  onClick={handleCloseAgreement}
-                  className="inline-flex items-center px-2 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                >
-                  <FileText className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-            
-            <div className="flex-1 overflow-y-auto p-6 flex items-center justify-center">
-              {signedDocumentUrl.endsWith('.pdf') ? (
-                <iframe 
-                  src={signedDocumentUrl} 
-                  className="w-full h-full border-0" 
-                  title="Document signé"
-                />
-              ) : (
-                <div className="text-center">
-                  <p className="mb-4">Le document signé n'est pas disponible au format PDF.</p>
-                  <a 
-                    href={signedDocumentUrl} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700"
-                  >
-                    Voir la signature
-                  </a>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      {portalElement && signedDocumentModal && createPortal(signedDocumentModal, portalElement)}
     </>
   );
 }; 

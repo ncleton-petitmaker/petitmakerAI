@@ -15,7 +15,8 @@ import {
   Trophy,
   Star,
   FileText,
-  Award
+  Award,
+  AlertTriangle
 } from 'lucide-react';
 import { PositioningQuestionnaire } from './PositioningQuestionnaire';
 import { QuestionnaireReport } from './QuestionnaireReport';
@@ -252,16 +253,28 @@ export const TrainingTimeline = ({
   const [attendanceSheetSigned, setAttendanceSheetSigned] = useState(false);
   const [trainingAgreementSigned, setTrainingAgreementSigned] = useState(false);
   const [completionCertificateSigned, setCompletionCertificateSigned] = useState(false);
+  const [satisfactionData, setSatisfactionData] = useState<any>(null);
+  const [internalRulesAcknowledged, setInternalRulesAcknowledged] = useState(false);
+  const [certificateDownloaded, setCertificateDownloaded] = useState(false);
+  const [companyStatus, setCompanyStatus] = useState<'valid' | 'pending' | 'not_found'>('valid');
+  const [userProfile, setUserProfile] = useState<any>(null);
 
   const fetchQuestionnaireStatus = async () => {
     try {
       console.log('Fetching questionnaire status in TrainingTimeline');
+      
+      // Skip fetching if company is not validated
+      if (companyStatus !== 'valid') {
+        console.log('Company not validated, skipping questionnaire status fetch');
+        return;
+      }
       
       // Get user data
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
       
       const userId = user.id;
+      setUserId(userId);
       
       // Check if user has completed positioning questionnaire
       const { data: positioningResponses, error: positioningError } = await supabase
@@ -400,11 +413,20 @@ export const TrainingTimeline = ({
         satisfaction: profileData?.satisfaction_completed || false
       });
       
-      // Mettre à jour les scores
+      // Update evaluation scores
       setEvaluationScores({
         initial: initialScore,
         final: finalScore
       });
+      
+      // Si le questionnaire de satisfaction est complété, récupérer les données
+      if (profileData?.satisfaction_completed) {
+        // Nous ne récupérons pas les données ici pour éviter de les charger inutilement
+        // Elles seront récupérées uniquement lorsque l'utilisateur cliquera sur la tuile
+        console.log('Satisfaction questionnaire is completed');
+      }
+      
+      setUserId(userId);
       
     } catch (error) {
       console.error('Error in fetchQuestionnaireStatus:', error);
@@ -415,7 +437,6 @@ export const TrainingTimeline = ({
     fetchQuestionnaireStatus();
   }, [refreshTrigger]);
 
-  useEffect(() => {
     const fetchUserData = async () => {
       try {
         console.log("Fetching user data for timeline...");
@@ -425,12 +446,11 @@ export const TrainingTimeline = ({
         console.log("User ID:", user.id);
         setUserId(user.id);
         
-        // Log training data received from props
         console.log("Training data from props:", training);
 
         const { data: userProfileData, error: userProfileError } = await supabase
           .from('user_profiles')
-          .select('*')
+        .select('*, has_signed_certificate, internal_rules_acknowledged')
           .eq('id', user.id)
           .single();
         
@@ -443,7 +463,9 @@ export const TrainingTimeline = ({
         if (userProfileData) {
           console.log("Setting signature states:", {
             attendanceSigned: userProfileData.has_signed_attendance,
-            agreementSigned: userProfileData.has_signed_agreement
+          agreementSigned: userProfileData.has_signed_agreement,
+          certificateSigned: userProfileData.has_signed_certificate,
+          rulesAcknowledged: userProfileData.internal_rules_acknowledged
           });
 
           setAttendanceSheetSigned(
@@ -456,14 +478,27 @@ export const TrainingTimeline = ({
               ? userProfileData.has_signed_agreement 
               : false
           );
+        setCompletionCertificateSigned(
+          userProfileData.has_signed_certificate !== undefined 
+            ? userProfileData.has_signed_certificate 
+            : false
+        );
+        setInternalRulesAcknowledged(
+          userProfileData.internal_rules_acknowledged !== undefined 
+            ? userProfileData.internal_rules_acknowledged 
+            : false
+        );
+        
+        setCertificateDownloaded(
+          userProfileData.has_signed_certificate !== undefined 
+            ? userProfileData.has_signed_certificate 
+              : false
+          );
         }
       } catch (error) {
         console.error('Error fetching user data:', error);
       }
     };
-    
-    fetchUserData();
-  }, [refreshTrigger, training]);
 
   useEffect(() => {
     return () => {
@@ -475,12 +510,19 @@ export const TrainingTimeline = ({
 
   const calculateProgress = () => {
     let completed = 0;
-    let total = 4;
+    let total = 8; // Augmentation du nombre total d'étapes (4 existantes + 4 nouvelles)
 
+    // Étapes existantes
     if (questionnaireCompleted) completed++;
     if (evaluationStatus.initial) completed++;
     if (evaluationStatus.final) completed++;
     if (evaluationStatus.satisfaction) completed++;
+    
+    // Nouvelles étapes
+    if (internalRulesAcknowledged) completed++;
+    if (trainingAgreementSigned) completed++;
+    if (attendanceSheetSigned) completed++;
+    if (certificateDownloaded) completed++;
 
     return Math.round((completed / total) * 100);
   };
@@ -509,20 +551,43 @@ export const TrainingTimeline = ({
     if (item.id === 'satisfaction' && evaluationStatus.satisfaction) {
       return 'completed';
     }
-    if (item.id === 'modules' || item.id === 'exercises') {
-      return evaluationStatus.final ? 'completed' : 'pending';
-    }
-    if (item.id === 'attendance-sheet' && attendanceSheetSigned) {
+    if (item.id === 'internal-rules' && internalRulesAcknowledged) {
       return 'completed';
     }
     if (item.id === 'training-agreement' && trainingAgreementSigned) {
       return 'completed';
     }
-    return item.status;
+    if (item.id === 'attendance-sheet' && attendanceSheetSigned) {
+      return 'completed';
+    }
+    if (item.id === 'completion-certificate' && certificateDownloaded) {
+      return 'completed';
+    }
+    return item.status || 'pending';
   }
 
   const handleItemClick = (item: TimelineItem) => {
     console.log('🔍 [DEBUG] handleItemClick - START', item);
+    
+    // Vérifier si l'élément est un questionnaire ou un document
+    const isQuestionnaire = item.action && (
+      item.action.includes('questionnaire') || 
+      item.action.includes('evaluation') || 
+      item.action === 'satisfaction'
+    );
+    
+    const isDocument = item.action && (
+      item.action === 'completion-certificate' || 
+      item.action === 'attendance-sheet' || 
+      item.action === 'training-agreement' ||
+      item.action === 'internal-rules'
+    );
+    
+    // Si c'est un questionnaire ou un document et que l'entreprise est en attente, bloquer l'action
+    if ((isQuestionnaire || isDocument) && companyStatus !== 'valid') {
+      console.log('🔍 [DEBUG] Blocking action, company status:', companyStatus);
+      return;
+    }
     
     if (!item.action) {
       console.log('🔍 [DEBUG] No action defined for item, returning');
@@ -558,7 +623,14 @@ export const TrainingTimeline = ({
       });
     } else if (item.action === 'satisfaction') {
       console.log('🔍 [DEBUG] Setting showSatisfactionQuestionnaire to true');
+      const isSatisfactionCompleted = evaluationStatus.satisfaction;
+      setReadOnly(isSatisfactionCompleted);
+      
+      if (isSatisfactionCompleted && !satisfactionData) {
+        fetchSatisfactionData();
+      } else {
       setShowSatisfactionQuestionnaire(true);
+      }
     } else if (item.action === 'internal-rules') {
       console.log('🔍 [DEBUG] Setting showInternalRules to true');
       setShowInternalRules(true);
@@ -570,12 +642,19 @@ export const TrainingTimeline = ({
       } else {
         console.log('🔍 [DEBUG] onDocumentOpen is not defined in handleItemClick');
       }
+      
+      setTimeout(() => {
+        console.log('🔍 [DEBUG] Forcing data refresh after document action');
+        fetchQuestionnaireStatus();
+        fetchUserData();
+      }, 1000);
     }
     
     console.log('🔍 [DEBUG] handleItemClick - END');
   };
 
   const getNextStep = () => {
+    // Questionnaire de positionnement (première étape)
     if (!questionnaireCompleted) {
       return {
         text: "Remplir le questionnaire de positionnement",
@@ -585,6 +664,36 @@ export const TrainingTimeline = ({
         }
       };
     }
+    
+    // Règlement intérieur (deuxième étape)
+    if (!internalRulesAcknowledged) {
+      return {
+        text: "Consulter et valider le règlement intérieur",
+        action: () => {
+          setShowInternalRules(true);
+        }
+      };
+    }
+    
+    // Convention de formation (troisième étape)
+    if (!trainingAgreementSigned) {
+      return {
+        text: "Signer la convention de formation",
+        action: () => {
+          // L'action est déjà gérée par le bouton dans la timeline
+          const item = updatedPhases
+            .flatMap(phase => phase.stages)
+            .flatMap(stage => stage.items)
+            .find(item => item.id === 'training-agreement');
+          
+          if (item) {
+            handleItemClick(item);
+          }
+        }
+      };
+    }
+    
+    // Évaluation initiale (quatrième étape)
     if (!evaluationStatus.initial) {
       return {
         text: "Passer l'évaluation initiale",
@@ -595,6 +704,26 @@ export const TrainingTimeline = ({
         }
       };
     }
+    
+    // Feuille d'émargement (cinquième étape)
+    if (!attendanceSheetSigned) {
+      return {
+        text: "Signer la feuille d'émargement",
+        action: () => {
+          // L'action est déjà gérée par le bouton dans la timeline
+          const item = updatedPhases
+            .flatMap(phase => phase.stages)
+            .flatMap(stage => stage.items)
+            .find(item => item.id === 'attendance-sheet');
+          
+          if (item) {
+            handleItemClick(item);
+          }
+        }
+      };
+    }
+    
+    // Évaluation finale (sixième étape)
     if (!evaluationStatus.final) {
       return {
         text: "Passer l'évaluation finale",
@@ -605,6 +734,8 @@ export const TrainingTimeline = ({
         }
       };
     }
+    
+    // Questionnaire de satisfaction (septième étape)
     if (!evaluationStatus.satisfaction) {
       return {
         text: "Remplir le questionnaire de satisfaction",
@@ -613,13 +744,36 @@ export const TrainingTimeline = ({
         }
       };
     }
+    
+    // Attestation de fin de formation (huitième et dernière étape)
+    if (!certificateDownloaded) {
+      return {
+        text: "Télécharger l'attestation de fin de formation",
+        action: () => {
+          // L'action est déjà gérée par le bouton dans la timeline
+          const item = updatedPhases
+            .flatMap(phase => phase.stages)
+            .flatMap(stage => stage.items)
+            .find(item => item.id === 'completion-certificate');
+          
+          if (item) {
+            handleItemClick(item);
+          }
+        }
+      };
+    }
+    
+    // Si toutes les étapes sont complétées
     return null;
   };
 
   const nextStep = getNextStep();
 
   const renderDocumentButton = (item: TimelineItem) => {
+    console.log('🔍 [DEBUG] Rendering document button for item:', item);
+    
     if (!training || !userId) {
+      console.log('🔍 [DEBUG] Missing training or userId:', { training, userId });
       return (
         <button
           disabled
@@ -630,39 +784,282 @@ export const TrainingTimeline = ({
       );
     }
 
+    // Si l'entreprise n'est pas validée, désactiver les boutons de document
+    if (companyStatus !== 'valid') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-md bg-gray-700 text-gray-400 cursor-not-allowed"
+        >
+          <FileText className="h-4 w-4 mr-1.5" />
+          Temporairement indisponible
+        </button>
+      );
+    }
+
+    // Fonction pour gérer le clic sur le lien
+    const handleLinkClick = (e: React.MouseEvent, documentType: string) => {
+      console.log('🔍 [DEBUG] Link clicked for document type:', documentType);
+      
+      // Empêcher la navigation par défaut
+      e.preventDefault();
+      e.stopPropagation();
+      
+      // Empêcher la propagation à tous les niveaux
+      if (e.nativeEvent) {
+        e.nativeEvent.stopImmediatePropagation();
+        e.nativeEvent.preventDefault();
+      }
+      
+      // Informer le parent que le document a été ouvert
+      if (onDocumentOpen) {
+        console.log('🔍 [DEBUG] Calling onDocumentOpen from link click');
+        onDocumentOpen();
+      }
+      
+      // Ouvrir le document approprié
+      switch (documentType) {
+        case 'completion-certificate':
+          console.log('🔍 [DEBUG] Opening completion certificate');
+          // Rechercher d'abord si une URL de document signé existe déjà
+          supabase
+            .from('user_profiles')
+            .select('has_signed_certificate, certificate_signature_url')
+            .eq('id', userId)
+            .single()
+            .then(({ data }) => {
+              if (data && data.has_signed_certificate) {
+                // Vérifier si l'URL est celle d'une signature ou d'un document PDF
+                if (data.certificate_signature_url) {
+                  // Vérifier si l'URL est pour une signature ou un document PDF
+                  if (data.certificate_signature_url.includes('signatures')) {
+                    console.log('🔍 [DEBUG] URL is for signature, need to fetch actual PDF document');
+                    
+                    // Rechercher le document PDF dans la table documents
+                    supabase
+                      .from('documents')
+                      .select('file_url')
+                      .eq('user_id', userId)
+                      .eq('training_id', training.id)
+                      .eq('type', 'certificate')
+                      .single()
+                      .then(({ data: docData, error }) => {
+                        if (error) {
+                          console.error('🔍 [DEBUG] Error fetching document URL:', error);
+                          // Fallback à l'affichage du composant
+                          showCompletionCertificate();
+                        } else if (docData && docData.file_url) {
+                          console.log('🔍 [DEBUG] Found document URL:', docData.file_url);
+                          showSignedDocument(docData.file_url, "Attestation de fin de formation");
+                        } else {
+                          console.log('🔍 [DEBUG] No document found, showing component');
+                          showCompletionCertificate();
+                        }
+                      });
+                  } else {
+                    // C'est déjà un document PDF
+                    console.log('🔍 [DEBUG] URL appears to be a PDF document, displaying it directly');
+                    showSignedDocument(data.certificate_signature_url, "Attestation de fin de formation");
+                  }
+                } else {
+                  console.log('🔍 [DEBUG] No URL found, opening certificate for signing');
+                  showCompletionCertificate();
+                }
+              } else {
+                // Si pas signé, ouvrir le composant pour signature
+                console.log('🔍 [DEBUG] Certificate not signed, opening for signing');
+                showCompletionCertificate();
+              }
+            });
+          break;
+        case 'attendance-sheet':
+          console.log('🔍 [DEBUG] Opening attendance sheet');
+          // Rechercher d'abord si une URL de document signé existe déjà
+          supabase
+            .from('user_profiles')
+            .select('has_signed_attendance, attendance_signature_url')
+            .eq('id', userId)
+            .single()
+            .then(({ data }) => {
+              if (data && data.has_signed_attendance) {
+                // Vérifier si l'URL est celle d'une signature ou d'un document PDF
+                if (data.attendance_signature_url) {
+                  // Vérifier si l'URL est pour une signature ou un document PDF
+                  if (data.attendance_signature_url.includes('signatures')) {
+                    console.log('🔍 [DEBUG] URL is for signature, need to fetch actual PDF document');
+                    
+                    // Rechercher le document PDF dans la table documents
+                    supabase
+                      .from('documents')
+                      .select('file_url')
+                      .eq('user_id', userId)
+                      .eq('training_id', training.id)
+                      .eq('type', 'attestation')
+                      .single()
+                      .then(({ data: docData, error }) => {
+                        if (error) {
+                          console.error('🔍 [DEBUG] Error fetching document URL:', error);
+                          // Fallback à l'affichage du composant
+                          showAttendanceSheet();
+                        } else if (docData && docData.file_url) {
+                          console.log('🔍 [DEBUG] Found document URL:', docData.file_url);
+                          showSignedDocument(docData.file_url, "Feuille d'émargement");
+                        } else {
+                          console.log('🔍 [DEBUG] No document found, showing component');
+                          showAttendanceSheet();
+                        }
+                      });
+                  } else {
+                    // C'est déjà un document PDF
+                    console.log('🔍 [DEBUG] URL appears to be a PDF document, displaying it directly');
+                    showSignedDocument(data.attendance_signature_url, "Feuille d'émargement");
+                  }
+                } else {
+                  console.log('🔍 [DEBUG] No URL found, opening attendance sheet for signing');
+                  showAttendanceSheet();
+                }
+              } else {
+                // Si pas signé, ouvrir le composant pour signature
+                console.log('🔍 [DEBUG] Attendance sheet not signed, opening for signing');
+                showAttendanceSheet();
+              }
+            });
+          break;
+        case 'training-agreement':
+          console.log('🔍 [DEBUG] Opening training agreement');
+          
+          // Rechercher d'abord si une URL de document signé existe déjà
+          supabase
+            .from('user_profiles')
+            .select('has_signed_agreement, agreement_signature_url')
+            .eq('id', userId)
+            .single()
+            .then(({ data }) => {
+              if (data && data.has_signed_agreement) {
+                if (data.agreement_signature_url) {
+                  // Vérifier si l'URL est celle d'une signature ou d'un document PDF
+                  if (data.agreement_signature_url.includes('signatures')) {
+                    console.log('🔍 [DEBUG] URL is for signature, need to fetch actual PDF document');
+                    
+                    // Rechercher le document PDF dans la table documents
+                    supabase
+                      .from('documents')
+                      .select('file_url')
+                      .eq('user_id', userId)
+                      .eq('training_id', training.id)
+                      .eq('type', 'convention')
+                      .single()
+                      .then(({ data: docData, error }) => {
+                        if (error) {
+                          console.error('🔍 [DEBUG] Error fetching document URL:', error);
+                          
+                          // Essayer de récupérer depuis le localStorage en fallback
+                          const localStorageKey = `document_${training.id}_${userId}_convention`;
+                          const storedUrl = localStorage.getItem(localStorageKey);
+                          
+                          if (storedUrl) {
+                            console.log('🔍 [DEBUG] Using document URL from localStorage:', storedUrl);
+                            showSignedDocument(storedUrl, "Convention de formation professionnelle");
+                          } else {
+                            console.log('🔍 [DEBUG] No document found, falling back to signature URL');
+                            // If we can't find the document, try to regenerate it
+                            console.log('�� [DEBUG] Attempting to regenerate the document');
+                            showTrainingAgreement();
+                          }
+                        } else if (docData && docData.file_url) {
+                          console.log('🔍 [DEBUG] Found document URL:', docData.file_url);
+                          showSignedDocument(docData.file_url, "Convention de formation professionnelle");
+                        } else {
+                          console.log('🔍 [DEBUG] No document found, falling back to signature URL');
+                          // If we can't find the document, try to regenerate it
+                          console.log('🔍 [DEBUG] Attempting to regenerate the document');
+                          showTrainingAgreement();
+                        }
+                      });
+                  } else {
+                    // C'est déjà un document PDF
+                    console.log('🔍 [DEBUG] URL appears to be a PDF document, displaying it directly');
+                    showSignedDocument(data.agreement_signature_url, "Convention de formation professionnelle");
+                  }
+                } else {
+                  console.log('🔍 [DEBUG] No URL found, opening agreement for signing');
+                  showTrainingAgreement();
+                }
+              } else {
+                // Si pas signé, ouvrir le composant StudentTrainingAgreement pour signature
+                console.log('🔍 [DEBUG] Agreement not signed, opening for signing');
+                showTrainingAgreement();
+              }
+            });
+          break;
+        default:
+          console.log('🔍 [DEBUG] Unknown document type:', documentType);
+      }
+    };
+
+    const isQuestionnaireItem = isQuestionnaire(item);
+    const isDocumentItem = isDocument(item);
+    const isDisabled = (isQuestionnaireItem || isDocumentItem) && companyStatus !== 'valid';
+
     switch (item.action) {
       case 'completion-certificate':
         return (
-          <StudentCompletionCertificateButton
-            trainingId={training.id}
-            userId={userId}
-            buttonText="Voir et signer"
-            variant="primary"
-            onDocumentOpen={onDocumentOpen}
-            onDocumentClose={onDocumentClose}
-          />
+          <a
+            href="#"
+            className={`inline-flex items-center px-3 py-2 text-sm font-medium rounded-md ${
+              completionCertificateSigned 
+                ? "bg-green-600 hover:bg-green-700 text-white" 
+                : "bg-blue-600 hover:bg-blue-700 text-white"
+            }`}
+            onClick={(e) => handleLinkClick(e, 'completion-certificate')}
+            data-document-type="completion-certificate"
+            data-training-id={training.id}
+            data-user-id={userId}
+          >
+            <FileText className="h-4 w-4 mr-1.5" />
+            {completionCertificateSigned ? "Voir" : "Voir et signer"}
+          </a>
         );
       case 'attendance-sheet':
         return (
-          <StudentAttendanceSheetButton
-            trainingId={training.id}
-            userId={userId}
-            buttonText="Voir et signer"
-            variant="primary"
-            onDocumentOpen={onDocumentOpen}
-            onDocumentClose={onDocumentClose}
-          />
+          <a
+            href="#"
+            className={`inline-flex items-center px-3 py-2 text-sm font-medium rounded-md ${
+              attendanceSheetSigned 
+                ? "bg-green-600 hover:bg-green-700 text-white" 
+                : "bg-blue-600 hover:bg-blue-700 text-white"
+            }`}
+            onClick={(e) => handleLinkClick(e, 'attendance-sheet')}
+            data-document-type="attendance-sheet"
+            data-training-id={training.id}
+            data-user-id={userId}
+          >
+            <FileText className="h-4 w-4 mr-1.5" />
+            {attendanceSheetSigned ? "Voir" : "Voir et signer"}
+          </a>
         );
       case 'training-agreement':
+        console.log('🔍 [DEBUG] Rendering training-agreement button with props:', { 
+          trainingId: training.id, 
+          userId,
+          trainingAgreementSigned
+        });
         return (
-          <StudentTrainingAgreementButton
-            trainingId={training.id}
-            userId={userId}
-            buttonText="Voir et signer"
-            variant="default"
-            onDocumentOpen={onDocumentOpen}
-            onDocumentClose={onDocumentClose}
-          />
+          <a
+            href="#"
+            className={`inline-flex items-center px-3 py-2 text-sm font-medium rounded-md ${
+              trainingAgreementSigned 
+                ? "bg-green-600 hover:bg-green-700 text-white" 
+                : "bg-blue-600 hover:bg-blue-700 text-white"
+            }`}
+            onClick={(e) => handleLinkClick(e, 'training-agreement')}
+            data-document-type="training-agreement"
+            data-training-id={training.id}
+            data-user-id={userId}
+          >
+            <FileText className="h-4 w-4 mr-1.5" />
+            {trainingAgreementSigned ? "Voir" : "Voir et signer"}
+          </a>
         );
       default:
         return null;
@@ -721,7 +1118,585 @@ export const TrainingTimeline = ({
   useEffect(() => {
     const calculatedProgress = calculateProgress();
     setProgress(calculatedProgress);
-  }, [evaluationStatus, questionnaireCompleted]);
+  }, [
+    evaluationStatus, 
+    questionnaireCompleted, 
+    internalRulesAcknowledged, 
+    trainingAgreementSigned, 
+    attendanceSheetSigned, 
+    certificateDownloaded
+  ]);
+
+  // Fonction pour récupérer les données du questionnaire de satisfaction
+  const fetchSatisfactionData = async () => {
+    try {
+      console.log('Fetching satisfaction questionnaire data');
+      
+      // Récupérer l'ID de l'utilisateur
+      let userIdToUse = userId;
+      
+      if (!userIdToUse) {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) {
+          console.error("No user found");
+          return;
+        }
+        userIdToUse = user.id;
+        setUserId(userIdToUse);
+      }
+      
+      // Récupérer les réponses du questionnaire de satisfaction
+      const { data: responsesData, error: responsesError } = await supabase
+        .from('satisfaction_responses')
+        .select('*')
+        .eq('user_id', userIdToUse);
+        
+      if (responsesError) {
+        console.error("Error fetching satisfaction responses:", responsesError);
+        return;
+      }
+      
+      console.log("Satisfaction responses data:", responsesData);
+      
+      if (responsesData && responsesData.length > 0) {
+        setSatisfactionData(responsesData[0]);
+        setShowSatisfactionQuestionnaire(true);
+      } else {
+        // Si aucune donnée n'est trouvée, afficher quand même le questionnaire
+        setShowSatisfactionQuestionnaire(true);
+      }
+    } catch (error) {
+      console.error('Error fetching satisfaction data:', error);
+      // Afficher quand même le questionnaire en cas d'erreur
+      setShowSatisfactionQuestionnaire(true);
+    }
+  };
+
+  // Nouvelle fonction pour vérifier le statut de l'entreprise
+  const fetchCompanyStatus = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      console.log('🔍 [DEBUG] Fetching company status for user:', user.id);
+
+      // Récupérer le profil utilisateur 
+      const { data: profileData, error: profileError } = await supabase
+        .from('user_profiles')
+        .select('status, company_id, company')
+        .eq('id', user.id)
+        .single();
+
+      if (profileError) {
+        console.error('Error fetching user profile:', profileError);
+        setCompanyStatus('not_found');
+        return;
+      }
+
+      console.log('🔍 [DEBUG] User profile data:', profileData);
+
+      // Vérifier si le statut de l'utilisateur est explicitement en attente
+      if (profileData.status === 'pending_company_validation') {
+        console.log('🔍 [DEBUG] Company is pending validation (user status)');
+        setCompanyStatus('pending');
+        return;
+      }
+
+      // Si l'utilisateur a un company_id
+      if (profileData.company_id) {
+        // Faire une requête séparée pour obtenir les données de l'entreprise
+        const { data: companyData, error: companyError } = await supabase
+          .from('companies')
+          .select('id, name, status')
+          .eq('id', profileData.company_id)
+          .single();
+        
+        if (companyError) {
+          console.error('Error fetching company data:', companyError);
+          setCompanyStatus('not_found');
+          return;
+        }
+        
+        console.log('🔍 [DEBUG] Company data:', companyData);
+        
+        // Vérifier si l'entreprise a un statut non valide
+        if (companyData && companyData.status === 'pending') {
+          console.log('🔍 [DEBUG] Company is pending validation (company status)');
+          setCompanyStatus('pending');
+          return;
+        }
+
+        // Vérifier si l'entreprise a des formations associées
+        const { data: trainings, error: trainingsError } = await supabase
+          .from('trainings')
+          .select('id')
+          .eq('company_id', profileData.company_id)
+          .limit(1);
+
+        if (trainingsError) {
+          console.error('Error checking company trainings:', trainingsError);
+          setCompanyStatus('not_found');
+          return;
+        }
+        
+        console.log('🔍 [DEBUG] Company trainings:', trainings);
+        
+        if (trainings && trainings.length > 0) {
+          console.log('🔍 [DEBUG] Company has trainings, status is valid');
+          setCompanyStatus('valid');
+        } else {
+          console.log('🔍 [DEBUG] Company has no trainings, status is pending');
+          setCompanyStatus('pending');
+        }
+      } else {
+        console.log('🔍 [DEBUG] User has no company_id, status is not_found');
+        setCompanyStatus('not_found');
+      }
+    } catch (error) {
+      console.error('Error in fetchCompanyStatus:', error);
+      setCompanyStatus('not_found');
+    }
+  };
+
+  useEffect(() => {
+    fetchUserData();
+    fetchCompanyStatus();
+  }, [refreshTrigger]);
+
+  // Modification pour pouvoir cliquer directement sur les documents
+  const handleDocumentClick = (item: TimelineItem) => {
+    console.log('🔍 [DEBUG] Document clicked directly:', item);
+    
+    if (companyStatus !== 'valid') {
+      console.log('🔍 [DEBUG] Blocking document action, company status is not valid:', companyStatus);
+      return;
+    }
+    
+    // Traiter le document selon son type
+    switch (item.id) {
+      case 'completion-certificate':
+        if (onDocumentOpen) {
+          onDocumentOpen();
+        }
+        showCompletionCertificate();
+        break;
+      case 'attendance-sheet':
+        if (onDocumentOpen) {
+          onDocumentOpen();
+        }
+        showAttendanceSheet();
+        break;
+      case 'training-agreement':
+        if (onDocumentOpen) {
+          onDocumentOpen();
+        }
+        showTrainingAgreement();
+        break;
+      default:
+        // Pour les autres types de documents
+        handleItemClick(item);
+    }
+  };
+
+  // Fonction pour afficher le document signé
+  const showSignedDocument = (documentUrl: string, title: string) => {
+    console.log('🔍 [DEBUG] Showing signed document:', documentUrl);
+    
+    // Ensure the URL is properly encoded
+    let encodedUrl = documentUrl;
+    try {
+      // Check if the URL is already encoded
+      const decodedUrl = decodeURIComponent(documentUrl);
+      if (decodedUrl === documentUrl) {
+        // URL is not encoded, encode it
+        const urlObj = new URL(documentUrl);
+        // Only encode the pathname part
+        urlObj.pathname = urlObj.pathname.split('/').map(segment => 
+          segment.includes('.') ? 
+            // Don't encode the file extension
+            segment.split('.').map((part, i) => 
+              i === segment.split('.').length - 1 ? part : encodeURIComponent(part)
+            ).join('.') : 
+            encodeURIComponent(segment)
+        ).join('/');
+        encodedUrl = urlObj.toString();
+      }
+    } catch (e) {
+      console.error('🔍 [DEBUG] Error encoding URL:', e);
+      // If there's an error, use the original URL
+      encodedUrl = documentUrl;
+    }
+    
+    console.log('🔍 [DEBUG] Encoded document URL:', encodedUrl);
+    
+    // Créer ou réutiliser le conteneur modal
+    const modalContainer = document.getElementById('signed-document-modal') || 
+      (() => {
+        const el = document.createElement('div');
+        el.id = 'signed-document-modal';
+        document.body.appendChild(el);
+        return el;
+      })();
+    
+    // Créer le contenu de la modal avec un affichage standard
+    modalContainer.innerHTML = `
+      <div class="fixed inset-0 z-[9999] overflow-hidden bg-black bg-opacity-50 flex items-center justify-center p-4">
+        <div class="relative bg-white rounded-lg shadow-xl w-full max-w-4xl h-[85vh] flex flex-col">
+          <div className="flex justify-between items-center p-4 border-b bg-gray-50">
+            <h3 class="text-xl font-semibold">${title}</h3>
+            <button 
+              id="close-modal-button"
+              class="inline-flex items-center p-2 border border-gray-300 text-base font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+              </svg>
+            </button>
+          </div>
+          <div class="flex-1 overflow-hidden p-0 bg-gray-100">
+            <iframe 
+              src="${encodedUrl}" 
+              class="w-full h-full border-0" 
+              title="${title}"
+            ></iframe>
+          </div>
+        </div>
+      </div>
+    `;
+    
+    // Ajouter un événement de fermeture
+    const closeButton = document.getElementById('close-modal-button');
+    if (closeButton) {
+      closeButton.addEventListener('click', () => {
+        modalContainer.innerHTML = '';
+        if (onDocumentClose) {
+          onDocumentClose();
+        }
+      });
+    }
+  };
+
+  // Fonction pour afficher la feuille d'émargement
+  const showAttendanceSheet = () => {
+    console.log('🔍 [DEBUG] Showing attendance sheet for signature');
+    
+    // Créer un élément temporaire pour le portail
+    const portalContainer = document.getElementById('attendance-sheet-portal') || 
+      (() => {
+        const el = document.createElement('div');
+        el.id = 'attendance-sheet-portal';
+        document.body.appendChild(el);
+        return el;
+      })();
+    
+    // Vérifier que training.id et userId ne sont pas null
+    if (!training || !training.id || !userId) {
+      console.error('🔍 [DEBUG] Missing required data for attendance sheet', { 
+        trainingId: training?.id, 
+        userId 
+      });
+      return;
+    }
+    
+    // Rendre le composant StudentAttendanceSheet directement dans le portail
+    import('react-dom').then(({ createPortal }) => {
+      import('react').then(({ createElement }) => {
+        import('./StudentAttendanceSheet').then(({ StudentAttendanceSheet }) => {
+          const portalRoot = document.getElementById('attendance-sheet-portal');
+          if (portalRoot) {
+            const trainingData = {
+              id: training.id,
+              title: training.title || '',
+              duration: training.duration || '',
+              trainer_name: training.trainer_name || '',
+              location: training.location || '',
+              start_date: training.start_date,
+              end_date: training.end_date,
+              objectives: training.objectives || [],
+              evaluation_methods: training.evaluation_methods || {
+                profile_evaluation: false,
+                skills_evaluation: false,
+                knowledge_evaluation: false,
+                satisfaction_survey: false
+              },
+              tracking_methods: training.tracking_methods || [],
+              pedagogical_methods: training.pedagogical_methods || [],
+              material_elements: training.material_elements || []
+            };
+            
+            const participantData = {
+              id: userId,
+              first_name: '',
+              last_name: '',
+              job_position: ''
+            };
+            
+            // Récupérer les données du participant
+            supabase
+              .from('user_profiles')
+              .select('first_name, last_name, job_position')
+              .eq('id', userId)
+              .single()
+              .then(({ data }) => {
+                if (data) {
+                  participantData.first_name = data.first_name;
+                  participantData.last_name = data.last_name;
+                  participantData.job_position = data.job_position;
+                  
+                  // Créer l'élément React
+                  const element = createElement(StudentAttendanceSheet, {
+                    training: trainingData,
+                    participant: participantData,
+                    onCancel: () => {
+                      console.log('🔍 [DEBUG] Attendance sheet closed');
+                      // Nettoyer le portail
+                      const portalRoot = document.getElementById('attendance-sheet-portal');
+                      if (portalRoot) {
+                        portalRoot.innerHTML = '';
+                      }
+                      
+                      // Informer le parent que le document a été fermé
+                      if (onDocumentClose) {
+                        console.log('🔍 [DEBUG] Calling onDocumentClose after closing');
+                        onDocumentClose();
+                      }
+                    },
+                    onDocumentOpen,
+                    onDocumentClose
+                  });
+                  
+                  // Rendre l'élément dans le portail
+                  import('react-dom/client').then(({ createRoot }) => {
+                    const root = createRoot(portalRoot);
+                    root.render(element);
+                  });
+                }
+              });
+          }
+        });
+      });
+    });
+  };
+
+  // Fonction pour afficher l'attestation de fin de formation
+  const showCompletionCertificate = () => {
+    console.log('🔍 [DEBUG] Showing completion certificate for signature');
+    
+    // Créer un élément temporaire pour le portail
+    const portalContainer = document.getElementById('completion-certificate-portal') || 
+      (() => {
+        const el = document.createElement('div');
+        el.id = 'completion-certificate-portal';
+        document.body.appendChild(el);
+        return el;
+      })();
+    
+    // Vérifier que training.id et userId ne sont pas null
+    if (!training || !training.id || !userId) {
+      console.error('🔍 [DEBUG] Missing required data for completion certificate', { 
+        trainingId: training?.id, 
+        userId 
+      });
+      return;
+    }
+    
+    // Informer le parent que le document a été ouvert
+    if (onDocumentOpen) {
+      console.log('🔍 [DEBUG] Calling onDocumentOpen for completion certificate');
+      onDocumentOpen();
+    }
+    
+    // Rendre le composant StudentCompletionCertificate directement dans le portail
+    import('react-dom').then(({ createPortal }) => {
+      import('react').then(({ createElement }) => {
+        import('./StudentCompletionCertificate').then(({ StudentCompletionCertificate }) => {
+          const portalRoot = document.getElementById('completion-certificate-portal');
+          if (portalRoot) {
+            const trainingData = {
+              id: training.id,
+              title: training.title || '',
+              duration: training.duration || '',
+              trainer_name: training.trainer_name || '',
+              location: training.location || '',
+              start_date: training.start_date,
+              end_date: training.end_date,
+              objectives: training.objectives || [],
+              evaluation_methods: training.evaluation_methods || {
+                profile_evaluation: false,
+                skills_evaluation: false,
+                knowledge_evaluation: false,
+                satisfaction_survey: false
+              },
+              tracking_methods: training.tracking_methods || [],
+              pedagogical_methods: training.pedagogical_methods || [],
+              material_elements: training.material_elements || []
+            };
+            
+            const participantData = {
+              id: userId,
+              first_name: '',
+              last_name: '',
+              job_position: ''
+            };
+            
+            // Récupérer les données du participant
+            supabase
+              .from('user_profiles')
+              .select('first_name, last_name, job_position')
+              .eq('id', userId)
+              .single()
+              .then(({ data }) => {
+                if (data) {
+                  participantData.first_name = data.first_name;
+                  participantData.last_name = data.last_name;
+                  participantData.job_position = data.job_position;
+                  
+                  // Créer l'élément React
+                  const element = createElement(StudentCompletionCertificate, {
+                    training: trainingData,
+                    participant: participantData,
+                    onCancel: () => {
+                      console.log('🔍 [DEBUG] Completion certificate closed');
+                      // Nettoyer le portail
+                      const portalRoot = document.getElementById('completion-certificate-portal');
+                      if (portalRoot) {
+                        portalRoot.innerHTML = '';
+                      }
+                      
+                      // Informer le parent que le document a été fermé
+                      if (onDocumentClose) {
+                        console.log('🔍 [DEBUG] Calling onDocumentClose after closing');
+                        onDocumentClose();
+                      }
+                    }
+                  });
+                  
+                  // Rendre l'élément dans le portail
+                  import('react-dom/client').then(({ createRoot }) => {
+                    const root = createRoot(portalRoot);
+                    root.render(element);
+                  });
+                }
+              });
+          }
+        });
+      });
+    });
+  };
+
+  // Fonction pour afficher le composant StudentTrainingAgreement
+  const showTrainingAgreement = () => {
+    console.log('🔍 [DEBUG] Showing training agreement for signature');
+    
+    // Créer un élément temporaire pour le portail
+    const portalContainer = document.getElementById('training-agreement-portal') || 
+      (() => {
+        const el = document.createElement('div');
+        el.id = 'training-agreement-portal';
+        document.body.appendChild(el);
+        return el;
+      })();
+    
+    // Vérifier que training.id et userId ne sont pas null
+    if (!training || !training.id || !userId) {
+      console.error('🔍 [DEBUG] Missing required data for training agreement', { 
+        trainingId: training?.id, 
+        userId 
+      });
+      return;
+    }
+    
+    // Rendre le composant StudentTrainingAgreement directement dans le portail
+    import('react-dom').then(({ createPortal }) => {
+      import('react').then(({ createElement }) => {
+        import('./StudentTrainingAgreement').then(({ StudentTrainingAgreement }) => {
+          const portalRoot = document.getElementById('training-agreement-portal');
+          if (portalRoot) {
+            const trainingData = {
+              id: training.id, // Assuré non-null par la vérification ci-dessus
+              title: training.title,
+              duration: training.duration,
+              trainer_name: training.trainer_name || '',
+              location: training.location,
+              start_date: training.start_date,
+              end_date: training.end_date,
+              objectives: training.objectives,
+              evaluation_methods: training.evaluation_methods,
+              tracking_methods: training.tracking_methods,
+              pedagogical_methods: training.pedagogical_methods,
+              material_elements: training.material_elements
+            };
+            
+            const participantData = {
+              id: userId, // Assuré non-null par la vérification ci-dessus
+              first_name: '',
+              last_name: '',
+              job_position: ''
+            };
+            
+            // Récupérer les données du participant
+            supabase
+              .from('user_profiles')
+              .select('first_name, last_name, job_position')
+              .eq('id', userId)
+              .single()
+              .then(({ data }) => {
+                if (data) {
+                  participantData.first_name = data.first_name;
+                  participantData.last_name = data.last_name;
+                  participantData.job_position = data.job_position;
+                  
+                  // Créer l'élément React
+                  const element = createElement(StudentTrainingAgreement, {
+                    training: trainingData,
+                    participant: participantData,
+                    onCancel: () => {
+                      console.log('🔍 [DEBUG] Training agreement closed');
+                      // Nettoyer le portail
+                      const portalRoot = document.getElementById('training-agreement-portal');
+                      if (portalRoot) {
+                        portalRoot.innerHTML = '';
+                      }
+                      
+                      // Informer le parent que le document a été fermé
+                      if (onDocumentClose) {
+                        console.log('🔍 [DEBUG] Calling onDocumentClose after closing');
+                        onDocumentClose();
+                      }
+                    },
+                    onDocumentOpen,
+                    onDocumentClose
+                  });
+                  
+                  // Rendre l'élément dans le portail
+                  import('react-dom/client').then(({ createRoot }) => {
+                    const root = createRoot(portalRoot);
+                    root.render(element);
+                  });
+                }
+              });
+          }
+        });
+      });
+    });
+  };
+
+  const isQuestionnaire = (item: TimelineItem) => {
+    return item.action && (
+      item.action.includes('questionnaire') || 
+      item.action.includes('evaluation') || 
+      item.action === 'satisfaction'
+    );
+  };
+
+  const isDocument = (item: TimelineItem) => {
+    return item.action && (
+      item.action === 'completion-certificate' || 
+      item.action === 'attendance-sheet' || 
+      item.action === 'training-agreement' ||
+      item.action === 'internal-rules'
+    );
+  };
 
   return (
     <div className="relative">
@@ -739,7 +1714,22 @@ export const TrainingTimeline = ({
             />
           </div>
 
-          {nextStep && (
+          {!training && (
+            <div className="w-full mt-4 p-3 sm:p-4 bg-yellow-900/30 border border-yellow-500/30 rounded-lg">
+              <div className="flex items-center gap-2 sm:gap-3 mb-1 sm:mb-2">
+                <AlertCircle className="w-4 h-4 sm:w-5 sm:h-5 text-yellow-400 shrink-0" />
+                <p className="font-medium text-sm sm:text-base text-yellow-400">En attente de validation</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <p className="text-sm sm:text-base text-gray-300">
+                  Votre entreprise est en attente de validation par un administrateur. 
+                  Une fois validée, vous aurez accès à votre formation.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {nextStep && companyStatus === 'valid' && (
             <button
               onClick={nextStep.action}
               className="w-full mt-4 p-3 sm:p-4 bg-green-900/30 border border-green-500/30 rounded-lg hover:bg-green-900/40 transition-colors text-left"
@@ -756,6 +1746,7 @@ export const TrainingTimeline = ({
         </div>
       </div>
 
+      {training && companyStatus === 'valid' ? (
       <div className="relative before:content-[''] before:absolute before:left-4 sm:before:left-1/2 before:-translate-x-0 sm:before:-translate-x-1/2 before:top-0 before:bottom-0 before:w-[2px] before:bg-gray-800 before:z-0">
         {updatedPhases.map((phase, phaseIndex) => (
           <div key={phase.id} className="space-y-8 sm:space-y-16">
@@ -792,10 +1783,10 @@ export const TrainingTimeline = ({
                     <div className={`mt-4 sm:mt-6 space-y-3 sm:space-y-4 ${isEven ? 'sm:ml-auto' : 'sm:mr-auto'} max-w-sm`}>
                       {stage.items.map((item, itemIndex) => {
                         const ItemIcon = item.icon;
-                        const isQuestionnaire = item.action && (item.action.includes('questionnaire') || item.action.includes('evaluation') || item.action === 'satisfaction');
                         const isCompleted = item.status === 'completed';
-                        const score = item.id === 'initial-questionnaire' ? evaluationScores.initial : item.id === 'final-questionnaire' ? evaluationScores.final : null;
-                        const isCertificate = item.id === 'completion-certificate';
+                        const isQuestionnaireItem = isQuestionnaire(item);
+                        const isDocumentItem = isDocument(item);
+                        const isDisabled = (isQuestionnaireItem || isDocumentItem) && companyStatus !== 'valid';
                         
                         return (
                           <motion.div
@@ -803,46 +1794,75 @@ export const TrainingTimeline = ({
                             initial={{ opacity: 0, y: 10 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: phaseIndex * 0.3 + stageIndex * 0.2 + itemIndex * 0.1 }}
-                            onClick={(item.action) ? () => handleItemClick(item) : undefined}
+                            onClick={
+                              (item.action && 
+                               !(item.id === 'completion-certificate' || 
+                                 item.id === 'attendance-sheet' || 
+                                 item.id === 'training-agreement')) && !isDisabled 
+                                ? (e) => {
+                                    console.log('🔍 [DEBUG] Item clicked:', item);
+                                    // Vérifier si le clic provient d'un lien de document
+                                    const target = e.target as HTMLElement;
+                                    if (target.closest('a[data-document-type]')) {
+                                      console.log('🔍 [DEBUG] Click originated from document link, ignoring');
+                                      return;
+                                    }
+                                    handleItemClick(item);
+                                  } 
+                                : isDocumentItem && !isDisabled 
+                                  ? () => handleDocumentClick(item)
+                                  : undefined
+                            }
                             className={`
                               bg-gray-900 p-3 sm:p-4 rounded-xl border relative z-10
-                              ${isQuestionnaire 
+                              ${isQuestionnaireItem 
                                 ? 'border-blue-500/50 shadow-lg shadow-blue-500/10' 
+                                : isDocumentItem
+                                  ? 'border-green-500/50 shadow-lg shadow-green-500/10'
                                 : 'border-gray-800'
                               }
-                              ${(item.action) ? 'cursor-pointer hover:bg-gray-800 transition-colors' : ''}
+                              ${isDisabled ? 'opacity-75' : ''}
+                              ${(item.action && 
+                                 !(item.id === 'completion-certificate' || 
+                                   item.id === 'attendance-sheet' || 
+                                   item.id === 'training-agreement')) && !isDisabled
+                                   ? 'cursor-pointer hover:bg-gray-800 transition-colors' 
+                                   : item.id === 'completion-certificate' || item.id === 'attendance-sheet' || item.id === 'training-agreement'
+                                     ? 'cursor-pointer hover:bg-gray-800 transition-colors'
+                                     : (isDisabled ? 'cursor-default' : '')}
                             `}
                           >
                             <div className="flex items-start gap-3">
-                              <div className={`p-2 rounded-lg ${isCompleted ? 'bg-green-900/20' : 'bg-gray-800'}`}>
-                                <ItemIcon className={`w-4 h-4 sm:w-5 sm:h-5 ${isCompleted ? 'text-green-400' : 'text-gray-400'}`} />
+                              <div className={`p-2 rounded-lg flex-shrink-0 ${isCompleted ? 'bg-green-900/30' : isDisabled ? 'bg-gray-700/50' : 'bg-gray-700'}`}>
+                                {isCompleted ? (
+                                  <CheckCircle2 className="w-5 h-5 sm:w-6 sm:h-6 text-green-400" />
+                                ) : (
+                                  <ItemIcon className={`w-5 h-5 sm:w-6 sm:h-6 ${isDisabled ? 'text-gray-400' : isDocumentItem ? 'text-green-400' : 'text-blue-400'}`} />
+                                )}
                               </div>
-                              <div className="flex-1">
-                                <h4 className="font-medium text-sm sm:text-base">{item.title}</h4>
-                                <p className="text-xs sm:text-sm text-gray-400 mt-1">{item.description}</p>
+                              
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <h4 className={`font-medium text-base sm:text-lg ${isDisabled ? 'text-gray-400' : ''}`}>{item.title}</h4>
+                                  {isDisabled && (
+                                    <span className="inline-flex items-center rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-400">
+                                      <AlertTriangle className="h-3 w-3 mr-1" />
+                                      En attente
+                                    </span>
+                                  )}
+                                </div>
                                 
-                                {(item.id === 'completion-certificate' || item.id === 'attendance-sheet' || item.id === 'training-agreement') && (
-                                  <div className="mt-3" onClick={(e) => e.stopPropagation()}>
+                                <p className={`text-xs sm:text-sm ${isDisabled ? 'text-gray-500' : 'text-gray-400'} mt-1`}>{item.description}</p>
+                                
+                                {/* Ajouter les boutons de document directement ici */}
+                                {(item.id === 'completion-certificate' || 
+                                  item.id === 'attendance-sheet' || 
+                                  item.id === 'training-agreement') && !isDisabled && (
+                                  <div className="mt-2">
                                     {renderDocumentButton(item)}
                                   </div>
                                 )}
-                                
-                                {score !== null && (
-                                  <div className="mt-3 flex items-center gap-2">
-                                    <div className={`p-1.5 rounded-lg ${getScoreDisplay(score)?.bgColor}`}>
-                                      {React.createElement(getScoreDisplay(score)?.icon || Star, {
-                                        className: `w-4 h-4 ${getScoreDisplay(score)?.color}`
-                                      })}
-                                    </div>
-                                    <span className="text-sm font-medium">{score}%</span>
-                                  </div>
-                                )}
                               </div>
-                              {isCompleted && (
-                                <div className="p-1.5 rounded-full bg-green-900/20">
-                                  <CheckCircle2 className="w-4 h-4 sm:w-5 sm:h-5 text-green-400" />
-                                </div>
-                              )}
                             </div>
                           </motion.div>
                         );
@@ -861,6 +1881,15 @@ export const TrainingTimeline = ({
           </div>
         ))}
       </div>
+      ) : (
+        <div className="bg-gray-900 rounded-xl p-6 border border-gray-800 text-center">
+          <Building2 className="w-12 h-12 text-yellow-400 mx-auto mb-4" />
+          <h3 className="text-xl font-bold text-white mb-2">Entreprise en attente de validation</h3>
+          <p className="text-gray-300 max-w-md mx-auto">
+            Vous recevrez une notification dès que votre entreprise sera validée et associée à une formation.
+          </p>
+        </div>
+      )}
 
       <div className="relative z-30">
         {showQuestionnaire && (
@@ -872,6 +1901,7 @@ export const TrainingTimeline = ({
             }}
             readOnly={readOnly}
             type={currentQuestionnaire}
+            companyStatus={companyStatus}
             onSubmitSuccess={() => {
               console.log('Questionnaire submitted successfully');
               setShowQuestionnaire(false);
@@ -886,6 +1916,7 @@ export const TrainingTimeline = ({
             onClose={() => setShowQuestionnaireReport(false)}
             readOnly={readOnly}
             type={currentQuestionnaire}
+            companyStatus={companyStatus}
             onSubmitSuccess={() => {
               setShowQuestionnaireReport(false);
               if (onDocumentClose) onDocumentClose();
@@ -896,9 +1927,16 @@ export const TrainingTimeline = ({
         
         {showSatisfactionQuestionnaire && (
           <SatisfactionQuestionnaire
-            onClose={() => setShowSatisfactionQuestionnaire(false)}
+            onClose={() => {
+              setShowSatisfactionQuestionnaire(false);
+              setSatisfactionData(null);
+              if (onDocumentClose) onDocumentClose();
+            }}
+            readOnly={readOnly}
+            adminResponseData={satisfactionData}
             onSubmitSuccess={() => {
               setShowSatisfactionQuestionnaire(false);
+              setSatisfactionData(null);
               fetchQuestionnaireStatus();
             }}
           />

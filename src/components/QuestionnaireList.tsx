@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { FileText, Eye, Download, CheckCircle2 } from 'lucide-react';
+import { FileText, Eye, Download, CheckCircle2, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { PositioningQuestionnaire } from './PositioningQuestionnaire';
 import { SatisfactionQuestionnaire } from './SatisfactionQuestionnaire';
@@ -44,8 +44,17 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
     final: null,
     satisfaction: null
   });
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [companyStatus, setCompanyStatus] = useState<'valid' | 'pending' | 'not_found'>('valid');
+  const [trainingAvailable, setTrainingAvailable] = useState<boolean>(false);
 
   const fetchQuestionnaireStatus = async () => {
+    // Si l'entreprise n'est pas validée ou n'a pas de formations, ne pas charger les questionnaires
+    if (companyStatus !== 'valid' || !trainingAvailable) {
+      setLoading(false);
+      return;
+    }
+
     try {
       console.log("Fetching questionnaire status in QuestionnaireList");
       const { data: { user } } = await supabase.auth.getUser();
@@ -158,6 +167,11 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
   };
 
   const fetchResponseData = async () => {
+    // Si l'entreprise n'est pas validée ou n'a pas de formations, ne pas charger les données
+    if (companyStatus !== 'valid' || !trainingAvailable) {
+      return;
+    }
+    
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -231,12 +245,22 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
 
   useEffect(() => {
     console.log("QuestionnaireList refreshTrigger changed:", refreshTrigger);
-    fetchQuestionnaireStatus();
-    fetchResponseData();
-  }, [refreshTrigger]);
+    console.log("Company status:", companyStatus, "Training available:", trainingAvailable);
+    
+    // Only fetch if company is valid and has trainings
+    if (companyStatus === 'valid' && trainingAvailable) {
+      fetchQuestionnaireStatus();
+      fetchResponseData();
+    }
+  }, [refreshTrigger, companyStatus, trainingAvailable]);
 
   // Ajouter un effet pour rafraîchir périodiquement le statut des questionnaires
   useEffect(() => {
+    // Only set interval if company is valid and has trainings
+    if (companyStatus !== 'valid' || !trainingAvailable) {
+      return;
+    }
+    
     // Rafraîchir le statut des questionnaires toutes les 5 secondes
     const intervalId = setInterval(() => {
       console.log("Auto-refreshing questionnaire status");
@@ -245,7 +269,7 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
 
     // Nettoyer l'intervalle lorsque le composant est démonté
     return () => clearInterval(intervalId);
-  }, []);
+  }, [companyStatus, trainingAvailable]);
 
   useEffect(() => {
     const checkTableColumns = async () => {
@@ -304,7 +328,67 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
     }
   };
 
+  useEffect(() => {
+    fetchUserProfile();
+  }, [refreshTrigger]);
+
+  const fetchUserProfile = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // Récupérer le profil utilisateur
+      const { data: profileData, error: profileError } = await supabase
+        .from('user_profiles')
+        .select('*, training_id, company_id, status')
+        .eq('id', user.id)
+        .single();
+
+      if (profileError) throw profileError;
+
+      setUserProfile(profileData);
+
+      // Vérifier le statut de l'entreprise
+      if (profileData.status === 'pending_company_validation') {
+        setCompanyStatus('pending');
+        setLoading(false); // Stop loading if company is pending
+        return;
+      } 
+      
+      // Si l'utilisateur a un company_id, vérifier si cette entreprise a des formations
+      if (profileData.company_id) {
+        // Vérifier si l'entreprise a des formations associées
+        const { data: trainings, error: trainingsError } = await supabase
+          .from('trainings')
+          .select('id')
+          .eq('company_id', profileData.company_id)
+          .limit(1);
+
+        if (trainingsError) throw trainingsError;
+        
+        if (trainings && trainings.length > 0) {
+          setCompanyStatus('valid');
+          setTrainingAvailable(true);
+        } else {
+          setCompanyStatus('pending');
+          setLoading(false); // Stop loading if company has no trainings
+        }
+      } else if (profileData.company && !profileData.company_id) {
+        setCompanyStatus('not_found');
+        setLoading(false); // Stop loading if company is not found
+      }
+    } catch (error) {
+      console.error('Error fetching user profile:', error);
+      setLoading(false); // Stop loading on error
+    }
+  };
+
   if (loading) {
+    // Don't show loading spinner if company is not valid
+    if (companyStatus !== 'valid') {
+      return null;
+    }
+    
     return (
       <div className="flex items-center justify-center py-8">
         <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
@@ -313,234 +397,250 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
   }
 
   return (
-    <div className="bg-gray-900 rounded-xl p-6">
-      <h2 className="text-xl font-bold mb-6">Mes questionnaires</h2>
-      
-      <div className="space-y-4">
-        {/* Questionnaire de positionnement */}
-        <div className="bg-gray-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="p-2 bg-blue-500/10 rounded-lg">
-              <FileText className="w-6 h-6 text-blue-400" />
+    <div className="bg-gray-900 rounded-lg p-6 h-full shadow-xl">
+      {/* Afficher les questionnaires seulement si l'entreprise est valide et a des formations */}
+      {(companyStatus === 'valid' && trainingAvailable) ? (
+        <>
+          <h2 className="text-xl font-bold mb-6">Mes questionnaires</h2>
+          
+          <div className="space-y-4">
+            {/* Questionnaire de positionnement */}
+            <div className="bg-gray-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="p-2 bg-blue-500/10 rounded-lg">
+                  <FileText className="w-6 h-6 text-blue-400" />
+                </div>
+                <div>
+                  <h3 className="font-semibold">Questionnaire de positionnement</h3>
+                  <p className="text-sm text-gray-400">Évaluation de vos besoins et objectifs</p>
+                </div>
+                {status.positioning && (
+                  <div className="ml-2 flex items-center text-green-400">
+                    <CheckCircle2 className="w-5 h-5 mr-1" />
+                    <span className="text-xs">Complété</span>
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2 self-end sm:self-auto">
+                <button
+                  onClick={() => setShowQuestionnaire('positioning')}
+                  disabled={!status.positioning}
+                  className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Eye className="w-4 h-4" />
+                  <span>Voir</span>
+                </button>
+                <button
+                  onClick={() => handleGeneratePDF('positionnement')}
+                  disabled={!status.positioning || generatingPDF === 'positionnement'}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{generatingPDF === 'positionnement' ? 'Génération...' : 'PDF'}</span>
+                </button>
+              </div>
             </div>
-            <div>
-              <h3 className="font-semibold">Questionnaire de positionnement</h3>
-              <p className="text-sm text-gray-400">Évaluation de vos besoins et objectifs</p>
+            
+            {/* Évaluation initiale */}
+            <div className="bg-gray-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="p-2 bg-green-500/10 rounded-lg">
+                  <FileText className="w-6 h-6 text-green-400" />
+                </div>
+                <div>
+                  <h3 className="font-semibold">Évaluation initiale</h3>
+                  <p className="text-sm text-gray-400">Évaluation des connaissances de départ</p>
+                  {scores.initial !== null && (
+                    <p className="text-sm text-yellow-400 mt-1">Score: {scores.initial}%</p>
+                  )}
+                </div>
+                {status.initial && (
+                  <div className="ml-2 flex items-center text-green-400">
+                    <CheckCircle2 className="w-5 h-5 mr-1" />
+                    <span className="text-xs">Complété</span>
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2 self-end sm:self-auto">
+                <button
+                  onClick={() => setShowQuestionnaire('initial')}
+                  disabled={!status.initial}
+                  className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Eye className="w-4 h-4" />
+                  <span>Voir</span>
+                </button>
+                <button
+                  onClick={() => handleGeneratePDF('evaluation_initiale')}
+                  disabled={!status.initial || generatingPDF === 'evaluation_initiale'}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{generatingPDF === 'evaluation_initiale' ? 'Génération...' : 'PDF'}</span>
+                </button>
+              </div>
             </div>
-            {status.positioning && (
-              <div className="ml-2 flex items-center text-green-400">
-                <CheckCircle2 className="w-5 h-5 mr-1" />
-                <span className="text-xs">Complété</span>
+            
+            {/* Évaluation finale */}
+            <div className="bg-gray-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="p-2 bg-purple-500/10 rounded-lg">
+                  <FileText className="w-6 h-6 text-purple-400" />
+                </div>
+                <div>
+                  <h3 className="font-semibold">Évaluation finale</h3>
+                  <p className="text-sm text-gray-400">Évaluation des connaissances acquises</p>
+                  {scores.final !== null && (
+                    <p className="text-sm text-yellow-400 mt-1">Score: {scores.final}%</p>
+                  )}
+                </div>
+                {status.final && (
+                  <div className="ml-2 flex items-center text-green-400">
+                    <CheckCircle2 className="w-5 h-5 mr-1" />
+                    <span className="text-xs">Complété</span>
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2 self-end sm:self-auto">
+                <button
+                  onClick={() => setShowQuestionnaire('final')}
+                  disabled={!status.final}
+                  className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Eye className="w-4 h-4" />
+                  <span>Voir</span>
+                </button>
+                <button
+                  onClick={() => handleGeneratePDF('evaluation_finale')}
+                  disabled={!status.final || generatingPDF === 'evaluation_finale'}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{generatingPDF === 'evaluation_finale' ? 'Génération...' : 'PDF'}</span>
+                </button>
+              </div>
+            </div>
+            
+            {/* Questionnaire de satisfaction */}
+            <div className="bg-gray-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="p-2 bg-yellow-500/10 rounded-lg">
+                  <FileText className="w-6 h-6 text-yellow-400" />
+                </div>
+                <div>
+                  <h3 className="font-semibold">Questionnaire de satisfaction</h3>
+                  <p className="text-sm text-gray-400">Votre avis sur la formation</p>
+                </div>
+                {status.satisfaction && (
+                  <div className="ml-2 flex items-center text-green-400">
+                    <CheckCircle2 className="w-5 h-5 mr-1" />
+                    <span className="text-xs">Complété</span>
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2 self-end sm:self-auto">
+                <button
+                  onClick={() => setShowQuestionnaire('satisfaction')}
+                  disabled={!status.satisfaction}
+                  className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Eye className="w-4 h-4" />
+                  <span>Voir</span>
+                </button>
+                <button
+                  onClick={() => handleGeneratePDF('satisfaction')}
+                  disabled={!status.satisfaction || generatingPDF === 'satisfaction'}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{generatingPDF === 'satisfaction' ? 'Génération...' : 'PDF'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          {/* Modals pour afficher les questionnaires */}
+          {showQuestionnaire === 'positioning' && companyStatus === 'valid' && (
+            <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+              <PositioningQuestionnaire 
+                onClose={() => setShowQuestionnaire(null)} 
+                readOnly={true}
+                onSubmitSuccess={fetchQuestionnaireStatus}
+                companyStatus={companyStatus}
+              />
+            </div>
+          )}
+          
+          {showQuestionnaire === 'initial' && companyStatus === 'valid' && (
+            <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+              <PositioningQuestionnaire 
+                onClose={() => setShowQuestionnaire(null)} 
+                readOnly={true}
+                type="initial"
+                onSubmitSuccess={fetchQuestionnaireStatus}
+                companyStatus={companyStatus}
+              />
+            </div>
+          )}
+          
+          {showQuestionnaire === 'final' && companyStatus === 'valid' && (
+            <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+              <PositioningQuestionnaire 
+                onClose={() => setShowQuestionnaire(null)} 
+                readOnly={true}
+                type="final"
+                onSubmitSuccess={fetchQuestionnaireStatus}
+                companyStatus={companyStatus}
+              />
+            </div>
+          )}
+          
+          {showQuestionnaire === 'satisfaction' && companyStatus === 'valid' && (
+            <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+              <SatisfactionQuestionnaire 
+                onClose={() => setShowQuestionnaire(null)} 
+                readOnly={true}
+                onSubmitSuccess={fetchQuestionnaireStatus}
+              />
+            </div>
+          )}
+          
+          {/* Conteneur caché pour la génération de PDF */}
+          <div className="hidden">
+            {generatingPDF === 'positionnement' && (
+              <div ref={pdfRef}>
+                <QuestionnairePDF type="positioning" />
+              </div>
+            )}
+            
+            {generatingPDF === 'evaluation_initiale' && (
+              <div ref={pdfRef}>
+                <QuestionnairePDF type="initial" />
+              </div>
+            )}
+            
+            {generatingPDF === 'evaluation_finale' && (
+              <div ref={pdfRef}>
+                <QuestionnairePDF type="final" />
+              </div>
+            )}
+            
+            {generatingPDF === 'satisfaction' && (
+              <div ref={pdfRef}>
+                <QuestionnairePDF type="satisfaction" />
               </div>
             )}
           </div>
-          <div className="flex gap-2 self-end sm:self-auto">
-            <button
-              onClick={() => setShowQuestionnaire('positioning')}
-              disabled={!status.positioning}
-              className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Eye className="w-4 h-4" />
-              <span>Voir</span>
-            </button>
-            <button
-              onClick={() => handleGeneratePDF('positionnement')}
-              disabled={!status.positioning || generatingPDF === 'positionnement'}
-              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Download className="w-4 h-4" />
-              <span>{generatingPDF === 'positionnement' ? 'Génération...' : 'PDF'}</span>
-            </button>
-          </div>
+        </>
+      ) : (
+        <div className="text-center py-8">
+          <FileText className="h-12 w-12 mx-auto text-gray-500 mb-4" />
+          <h3 className="text-lg font-medium text-gray-300 mb-2">Questionnaires non disponibles</h3>
+          <p className="text-gray-500 max-w-md mx-auto">
+            Les questionnaires seront disponibles une fois que votre entreprise sera validée et associée à une formation.
+          </p>
         </div>
-        
-        {/* Évaluation initiale */}
-        <div className="bg-gray-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="p-2 bg-green-500/10 rounded-lg">
-              <FileText className="w-6 h-6 text-green-400" />
-            </div>
-            <div>
-              <h3 className="font-semibold">Évaluation initiale</h3>
-              <p className="text-sm text-gray-400">Évaluation des connaissances de départ</p>
-              {scores.initial !== null && (
-                <p className="text-sm text-yellow-400 mt-1">Score: {scores.initial}%</p>
-              )}
-            </div>
-            {status.initial && (
-              <div className="ml-2 flex items-center text-green-400">
-                <CheckCircle2 className="w-5 h-5 mr-1" />
-                <span className="text-xs">Complété</span>
-              </div>
-            )}
-          </div>
-          <div className="flex gap-2 self-end sm:self-auto">
-            <button
-              onClick={() => setShowQuestionnaire('initial')}
-              disabled={!status.initial}
-              className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Eye className="w-4 h-4" />
-              <span>Voir</span>
-            </button>
-            <button
-              onClick={() => handleGeneratePDF('evaluation_initiale')}
-              disabled={!status.initial || generatingPDF === 'evaluation_initiale'}
-              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Download className="w-4 h-4" />
-              <span>{generatingPDF === 'evaluation_initiale' ? 'Génération...' : 'PDF'}</span>
-            </button>
-          </div>
-        </div>
-        
-        {/* Évaluation finale */}
-        <div className="bg-gray-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="p-2 bg-purple-500/10 rounded-lg">
-              <FileText className="w-6 h-6 text-purple-400" />
-            </div>
-            <div>
-              <h3 className="font-semibold">Évaluation finale</h3>
-              <p className="text-sm text-gray-400">Évaluation des connaissances acquises</p>
-              {scores.final !== null && (
-                <p className="text-sm text-yellow-400 mt-1">Score: {scores.final}%</p>
-              )}
-            </div>
-            {status.final && (
-              <div className="ml-2 flex items-center text-green-400">
-                <CheckCircle2 className="w-5 h-5 mr-1" />
-                <span className="text-xs">Complété</span>
-              </div>
-            )}
-          </div>
-          <div className="flex gap-2 self-end sm:self-auto">
-            <button
-              onClick={() => setShowQuestionnaire('final')}
-              disabled={!status.final}
-              className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Eye className="w-4 h-4" />
-              <span>Voir</span>
-            </button>
-            <button
-              onClick={() => handleGeneratePDF('evaluation_finale')}
-              disabled={!status.final || generatingPDF === 'evaluation_finale'}
-              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Download className="w-4 h-4" />
-              <span>{generatingPDF === 'evaluation_finale' ? 'Génération...' : 'PDF'}</span>
-            </button>
-          </div>
-        </div>
-        
-        {/* Questionnaire de satisfaction */}
-        <div className="bg-gray-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="p-2 bg-yellow-500/10 rounded-lg">
-              <FileText className="w-6 h-6 text-yellow-400" />
-            </div>
-            <div>
-              <h3 className="font-semibold">Questionnaire de satisfaction</h3>
-              <p className="text-sm text-gray-400">Votre avis sur la formation</p>
-            </div>
-            {status.satisfaction && (
-              <div className="ml-2 flex items-center text-green-400">
-                <CheckCircle2 className="w-5 h-5 mr-1" />
-                <span className="text-xs">Complété</span>
-              </div>
-            )}
-          </div>
-          <div className="flex gap-2 self-end sm:self-auto">
-            <button
-              onClick={() => setShowQuestionnaire('satisfaction')}
-              disabled={!status.satisfaction}
-              className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Eye className="w-4 h-4" />
-              <span>Voir</span>
-            </button>
-            <button
-              onClick={() => handleGeneratePDF('satisfaction')}
-              disabled={!status.satisfaction || generatingPDF === 'satisfaction'}
-              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Download className="w-4 h-4" />
-              <span>{generatingPDF === 'satisfaction' ? 'Génération...' : 'PDF'}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-      
-      {/* Modals pour afficher les questionnaires */}
-      {showQuestionnaire === 'positioning' && (
-        <PositioningQuestionnaire 
-          onClose={() => {
-            console.log('Fermeture du questionnaire de positionnement avec:', responseData.positioning);
-            setShowQuestionnaire(null);
-          }} 
-          readOnly={true}
-          type={null}
-          onSubmitSuccess={fetchQuestionnaireStatus}
-          adminResponseData={responseData.positioning}
-        />
       )}
-      
-      {showQuestionnaire === 'initial' && (
-        <PositioningQuestionnaire 
-          onClose={() => setShowQuestionnaire(null)} 
-          readOnly={true}
-          type="initial"
-          onSubmitSuccess={fetchQuestionnaireStatus}
-          adminResponseData={responseData.initial}
-        />
-      )}
-      
-      {showQuestionnaire === 'final' && (
-        <PositioningQuestionnaire 
-          onClose={() => setShowQuestionnaire(null)} 
-          readOnly={true}
-          type="final"
-          onSubmitSuccess={fetchQuestionnaireStatus}
-          adminResponseData={responseData.final}
-        />
-      )}
-      
-      {showQuestionnaire === 'satisfaction' && (
-        <SatisfactionQuestionnaire 
-          onClose={() => setShowQuestionnaire(null)} 
-          readOnly={true}
-          onSubmitSuccess={fetchQuestionnaireStatus}
-          adminResponseData={responseData.satisfaction}
-        />
-      )}
-      
-      {/* Conteneur caché pour la génération de PDF */}
-      <div className="hidden">
-        {generatingPDF === 'positionnement' && (
-          <div ref={pdfRef}>
-            <QuestionnairePDF type="positioning" />
-          </div>
-        )}
-        
-        {generatingPDF === 'evaluation_initiale' && (
-          <div ref={pdfRef}>
-            <QuestionnairePDF type="initial" />
-          </div>
-        )}
-        
-        {generatingPDF === 'evaluation_finale' && (
-          <div ref={pdfRef}>
-            <QuestionnairePDF type="final" />
-          </div>
-        )}
-        
-        {generatingPDF === 'satisfaction' && (
-          <div ref={pdfRef}>
-            <QuestionnairePDF type="satisfaction" />
-          </div>
-        )}
-      </div>
     </div>
   );
 }; 

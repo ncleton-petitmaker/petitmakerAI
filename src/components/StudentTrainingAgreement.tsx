@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Download } from 'lucide-react';
 import { generateWordLikePDF } from './admin/pdfGenerator';
 import { format } from 'date-fns';
@@ -7,6 +8,7 @@ import { SignatureCanvas } from './SignatureCanvas';
 import { supabase } from '../lib/supabase';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
+import { TrainingAgreementTemplate } from './templates/TrainingAgreementTemplate';
 
 interface StudentTrainingAgreementProps {
   training: {
@@ -73,6 +75,39 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
   const [isSaving, setIsSaving] = useState(false);
   const [company, setCompany] = useState<any>(null);
   const [organizationSettings, setOrganizationSettings] = useState<any>({});
+  const [portalElement, setPortalElement] = useState<HTMLElement | null>(null);
+  const [existingDocumentUrl, setExistingDocumentUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Créer un élément div pour le portail s'il n'existe pas déjà
+    const existingPortal = document.getElementById('training-agreement-portal');
+    if (existingPortal) {
+      setPortalElement(existingPortal);
+    } else {
+      const newPortalElement = document.createElement('div');
+      newPortalElement.id = 'training-agreement-portal';
+      document.body.appendChild(newPortalElement);
+      setPortalElement(newPortalElement);
+    }
+
+    // Appeler onDocumentOpen si fourni
+    if (onDocumentOpen) {
+      onDocumentOpen();
+    }
+
+    // Cleanup function
+    return () => {
+      // Appeler onDocumentClose si fourni
+      if (onDocumentClose) {
+        onDocumentClose();
+      }
+      
+      const portal = document.getElementById('training-agreement-portal');
+      if (portal && portal.childNodes.length === 0) {
+        portal.remove();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     console.log('🔍 [DEBUG] StudentTrainingAgreement - useEffect running');
@@ -104,9 +139,9 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
           console.log('🔍 [DEBUG] Document le plus récent pour cet utilisateur:', latestDoc);
           
           if (latestDoc.file_url) {
-            console.log('🔍 [DEBUG] URL du document trouvée, redirection vers le document existant');
+            console.log('🔍 [DEBUG] URL du document trouvée, initialisation de l\'état');
             
-            // Stocker l'URL dans le localStorage
+            // Stocker l'URL dans le localStorage pour référence future
             const localStorageKey = `document_${training.id}_${participant.id}_convention`;
             try {
               localStorage.setItem(localStorageKey, latestDoc.file_url);
@@ -115,57 +150,76 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
               console.error('🔍 [DEBUG] Erreur lors du stockage dans le localStorage:', storageError);
             }
             
-            // Rediriger vers le document existant
-            window.open(latestDoc.file_url, '_blank');
-            
-            // Fermer le composant
-            onCancel();
-            return;
-          }
-        } else {
-          console.log('🔍 [DEBUG] Aucun document existant trouvé pour cet utilisateur, vérification des templates');
-          
-          // Vérifier s'il existe un template de convention pour cette formation
-          const { data: trainingData, error: trainingError } = await supabase
-            .from('trainings')
-            .select('agreement_template_url')
-            .eq('id', training.id)
-            .single();
-            
-          if (trainingError) {
-            console.error('🔍 [DEBUG] Erreur lors de la récupération du template de convention:', trainingError);
-          } else if (trainingData && trainingData.agreement_template_url) {
-            console.log('🔍 [DEBUG] Template de convention trouvé:', trainingData.agreement_template_url);
-            
-            // Nous avons un template, mais nous allons quand même générer un document personnalisé
-            // pour cet utilisateur plutôt que d'utiliser directement le template
-            console.log('🔍 [DEBUG] Génération d\'un document personnalisé à partir du template');
+            // Mettre à jour l'état pour indiquer que le document est signé
+            setExistingDocumentUrl(latestDoc.file_url);
+            setIsSigned(true);
+            setParticipantSignature(latestDoc.file_url); // On utilise l'URL comme signature
           }
         }
         
-        // Récupérer les données de l'entreprise si disponible
+        // Récupérer les informations sur la société associée à la formation
         if (training.company_id) {
+          console.log('🔍 [DEBUG] Récupération des informations sur la société de la formation:', training.company_id);
           const { data: companyData, error: companyError } = await supabase
             .from('companies')
             .select('*')
             .eq('id', training.company_id)
             .single();
           
-          if (!companyError && companyData) {
-            console.log('🔍 [DEBUG] StudentTrainingAgreement - Company data fetched successfully');
+          if (companyError) {
+            console.error('🔍 [DEBUG] Erreur lors de la récupération des informations sur la société:', companyError);
+          } else {
+            console.log('🔍 [DEBUG] Informations sur la société récupérées avec succès');
             setCompany(companyData);
+          }
+        } 
+        // Si pas de company_id dans la formation, essayer de récupérer l'entreprise du stagiaire
+        else if (participant.company) {
+          console.log('🔍 [DEBUG] Recherche de l\'entreprise du stagiaire par nom:', participant.company);
+          
+          // Essayer de trouver l'entreprise par son nom
+          const { data: companyData, error: companyError } = await supabase
+            .from('companies')
+            .select('*')
+            .ilike('name', `%${participant.company}%`)
+            .limit(1);
+          
+          if (companyError) {
+            console.error('🔍 [DEBUG] Erreur lors de la recherche de l\'entreprise du stagiaire:', companyError);
+          } else if (companyData && companyData.length > 0) {
+            console.log('🔍 [DEBUG] Entreprise du stagiaire trouvée:', companyData[0]);
+            setCompany(companyData[0]);
+          } else {
+            console.log('🔍 [DEBUG] Aucune entreprise trouvée pour le stagiaire, création d\'un objet entreprise basique');
+            // Créer un objet entreprise basique avec les informations disponibles
+            setCompany({
+              name: participant.company,
+              address: '',
+              siret: '',
+              contact_name: ''
+            });
           }
         }
         
-        // Récupérer les paramètres de l'organisme de formation
+        // Récupérer les paramètres de l'organisation
+        console.log('🔍 [DEBUG] Récupération des paramètres de l\'organisation');
         const { data: settingsData, error: settingsError } = await supabase
           .from('settings')
           .select('*')
+          .limit(1)
           .single();
         
-        if (!settingsError && settingsData) {
-          console.log('🔍 [DEBUG] StudentTrainingAgreement - Settings data fetched successfully');
-          setOrganizationSettings(settingsData);
+        if (settingsError) {
+          console.error('🔍 [DEBUG] Erreur lors de la récupération des paramètres de l\'organisation:', settingsError);
+        } else {
+          console.log('🔍 [DEBUG] Paramètres de l\'organisation récupérés avec succès');
+          setOrganizationSettings({
+            organization_name: settingsData.company_name,
+            siret: settingsData.siret,
+            address: `${settingsData.address}, ${settingsData.postal_code} ${settingsData.city}`,
+            representative_name: settingsData.representative_name,
+            activity_declaration_number: settingsData.training_number
+          });
         }
       } catch (error) {
         console.error('🔍 [DEBUG] StudentTrainingAgreement - Error fetching data:', error);
@@ -189,6 +243,18 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
     console.log('🔍 [DEBUG] High z-index elements that might cause conflicts:', highZIndexElements);
     
   }, [training.company_id]);
+
+  useEffect(() => {
+    if (onDocumentOpen) {
+      onDocumentOpen();
+    }
+
+    return () => {
+      if (onDocumentClose) {
+        onDocumentClose();
+      }
+    };
+  }, [onDocumentOpen, onDocumentClose]);
 
   const generatePDF = async () => {
     if (!pdfContentRef.current) return;
@@ -305,6 +371,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
   };
 
   const handleSignatureSave = async (signatureDataUrl: string) => {
+    console.log('🔍 [DEBUG] StudentTrainingAgreement - handleSignatureSave called');
     setParticipantSignature(signatureDataUrl);
     setShowSignatureCanvas(false);
     setIsSigned(true);
@@ -402,8 +469,11 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
           
           console.log('🔍 [DEBUG] PDF généré avec succès, taille:', pdfBlob.size, 'bytes');
           
-          // Créer un nom de fichier unique pour le document (simplifié)
-          const pdfFileName = `convention_${participant.last_name.toLowerCase()}_${participant.first_name.toLowerCase()}_${timestamp}.pdf`;
+          // Créer un nom de fichier unique pour le document
+          const sanitizedTrainingTitle = training.title ? training.title.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase() : '';
+          const sanitizedLastName = participant.last_name ? participant.last_name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase() : '';
+          const sanitizedFirstName = participant.first_name ? participant.first_name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase() : '';
+          const pdfFileName = `convention_${sanitizedLastName}_${sanitizedFirstName}_${timestamp}.pdf`;
           
           console.log('🔍 [DEBUG] Téléchargement du PDF dans le bucket agreements:', pdfFileName);
           
@@ -536,53 +606,195 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
         console.error('🔍 [DEBUG] pdfContentRef.current est null, impossible de générer le PDF');
       }
       
-      console.log('Signature de la convention enregistrée avec succès');
+      console.log('🔍 [DEBUG] StudentTrainingAgreement - Document signé et sauvegardé avec succès');
       
-      // Forcer la mise à jour de l'interface utilisateur
+      // Informer le parent que le document a été signé et fermé
+      if (onDocumentClose) {
+        console.log('🔍 [DEBUG] StudentTrainingAgreement - Calling onDocumentClose after signing');
+        onDocumentClose();
+      }
+      
+      // Fermer le document après un court délai
       setTimeout(() => {
-        alert('Document signé avec succès. Vous pouvez maintenant le consulter.');
+        console.log('🔍 [DEBUG] StudentTrainingAgreement - Closing document after timeout');
+        onCancel();
       }, 500);
+      
     } catch (error) {
-      console.error('Erreur lors de l\'enregistrement de la signature:', error);
-      
-      // Afficher un message d'erreur plus détaillé
-      let errorMessage = 'Une erreur est survenue lors de l\'enregistrement de la signature.';
-      
-      if (error instanceof Error) {
-        errorMessage += ' ' + error.message;
-      }
-      
-      if (typeof error === 'object' && error !== null && 'message' in error) {
-        errorMessage += ' ' + (error as any).message;
-      }
-      
-      alert(errorMessage);
-    } finally {
+      console.error('🔍 [DEBUG] Erreur lors de la sauvegarde du document signé:', error);
       setIsSaving(false);
     }
   };
 
-  // Fonction pour générer un PDF à partir d'un élément HTML
+  // Modification de la façon dont le PDF est généré avec une marge de sécurité
   const generateDocumentPDF = async (element: HTMLElement): Promise<Blob> => {
-    const canvas = await html2canvas(element, {
-      scale: 2,
-      useCORS: true,
-      logging: false
-    });
-    
-    const imgData = canvas.toDataURL('image/png');
-    const pdf = new jsPDF({
-      orientation: 'portrait',
-      unit: 'mm',
-      format: 'a4'
-    });
-    
-    const imgWidth = 210; // A4 width in mm
-    const imgHeight = (canvas.height * imgWidth) / canvas.width;
-    
-    pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
-    
-    return pdf.output('blob');
+    try {
+      // Créer un élément div temporaire pour la génération du PDF
+      const tempContainer = document.createElement('div');
+      tempContainer.className = 'pdf-content-container';
+      tempContainer.style.width = '210mm'; // Largeur A4
+      
+      // Cloner l'élément et ajouter des attributs data pour identifier les sections
+      const clonedElement = element.cloneNode(true) as HTMLElement;
+      
+      // Identifier les sections qui ne doivent pas être coupées
+      const sectionsToPreserve = clonedElement.querySelectorAll('h1, h2, h3, table, ul, ol, p');
+      sectionsToPreserve.forEach((section, index) => {
+        section.setAttribute('data-section-id', `section-${index}`);
+        section.setAttribute('data-preserve', 'true');
+      });
+      
+      tempContainer.appendChild(clonedElement);
+      document.body.appendChild(tempContainer);
+      
+      // Créer un nouveau document PDF
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4',
+        compress: true,
+      });
+      
+      // Dimensions de la page A4
+      const pageWidth = 210; // mm
+      const pageHeight = 297; // mm
+      const margin = 15; // mm
+      const contentWidth = pageWidth - 2 * margin; // mm
+      const contentHeight = pageHeight - 2 * margin - 10; // mm (avec 10mm de marge supplémentaire en bas)
+      
+      // Marge de sécurité en pixels pour éviter les coupures
+      const safetyMarginPx = 20; // pixels de marge de sécurité
+      
+      // Générer le canvas pour tout le contenu
+      const canvas = await html2canvas(tempContainer, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        allowTaint: true,
+        backgroundColor: '#ffffff',
+      });
+      
+      // Calculer la hauteur de chaque page en pixels
+      const pxRatio = canvas.width / contentWidth;
+      const pageHeightPx = contentHeight * pxRatio;
+      
+      // Collecter les informations sur les sections à préserver
+      const preserveSections: {id: string, top: number, bottom: number}[] = [];
+      sectionsToPreserve.forEach((section) => {
+        const rect = section.getBoundingClientRect();
+        const containerRect = tempContainer.getBoundingClientRect();
+        const relativeTop = rect.top - containerRect.top;
+        preserveSections.push({
+          id: section.getAttribute('data-section-id') || '',
+          top: relativeTop * (canvas.height / tempContainer.offsetHeight),
+          bottom: (relativeTop + rect.height) * (canvas.height / tempContainer.offsetHeight)
+        });
+      });
+      
+      // Calculer les positions de saut de page optimales
+      const pageBreakPositions: number[] = [0]; // Commencer par le début du document
+      let currentPageBottom = pageHeightPx;
+      
+      // Parcourir le document et déterminer les meilleurs points de coupure
+      while (currentPageBottom < canvas.height) {
+        // Position idéale de coupure (bas de la page actuelle)
+        let idealCutPosition = currentPageBottom;
+        
+        // Trouver la meilleure position de coupure en évitant de couper les sections
+        let bestCutPosition = idealCutPosition;
+        let minDistance = Number.MAX_SAFE_INTEGER;
+        
+        // Vérifier si la position idéale coupe une section
+        const sectionsAtCut = preserveSections.filter(section => 
+          section.top < idealCutPosition && section.bottom > idealCutPosition
+        );
+        
+        if (sectionsAtCut.length > 0) {
+          // Chercher une meilleure position de coupure
+          preserveSections.forEach(section => {
+            // Essayer de couper avant la section
+            if (section.top > idealCutPosition - pageHeightPx + safetyMarginPx && 
+                section.top < idealCutPosition) {
+              const distance = Math.abs(section.top - idealCutPosition);
+              if (distance < minDistance) {
+                minDistance = distance;
+                bestCutPosition = section.top;
+              }
+            }
+            
+            // Essayer de couper après la section
+            if (section.bottom > idealCutPosition && 
+                section.bottom < idealCutPosition + safetyMarginPx) {
+              const distance = Math.abs(section.bottom - idealCutPosition);
+              if (distance < minDistance) {
+                minDistance = distance;
+                bestCutPosition = section.bottom;
+              }
+            }
+          });
+        }
+        
+        // Si aucune meilleure position n'est trouvée, utiliser la position idéale
+        if (minDistance === Number.MAX_SAFE_INTEGER) {
+          bestCutPosition = idealCutPosition;
+        }
+        
+        // Ajouter la position de coupure et passer à la page suivante
+        pageBreakPositions.push(bestCutPosition);
+        currentPageBottom = bestCutPosition + pageHeightPx;
+      }
+      
+      // Ajouter la position Y de la fin du contenu
+      pageBreakPositions.push(canvas.height);
+      
+      console.log(`🔍 [DEBUG] Génération de PDF: ${pageBreakPositions.length - 1} pages nécessaires`);
+      console.log(`🔍 [DEBUG] Positions des sauts de page: ${pageBreakPositions.join(', ')}`);
+      
+      // Générer chaque page
+      for (let i = 0; i < pageBreakPositions.length - 1; i++) {
+        // Si ce n'est pas la première page, ajouter une nouvelle page
+        if (i > 0) {
+          pdf.addPage();
+        }
+        
+        // Calculer les coordonnées de la section à extraire du canvas
+        const startY = pageBreakPositions[i];
+        const endY = pageBreakPositions[i + 1];
+        const height = endY - startY;
+        
+        // Vérifier si la hauteur est valide
+        if (height <= 0) continue;
+        
+        // Créer un canvas temporaire pour la section
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = canvas.width;
+        tempCanvas.height = height;
+        const ctx = tempCanvas.getContext('2d');
+        
+        if (ctx) {
+          // Dessiner la section sur le canvas temporaire
+          ctx.drawImage(
+            canvas,
+            0, startY, canvas.width, height,
+            0, 0, canvas.width, height
+          );
+          
+          // Convertir le canvas temporaire en image
+          const imgData = tempCanvas.toDataURL('image/jpeg', 0.95);
+          
+          // Ajouter l'image au PDF
+          pdf.addImage(imgData, 'JPEG', margin, margin, contentWidth, height * contentWidth / canvas.width);
+        }
+      }
+      
+      // Nettoyer
+      document.body.removeChild(tempContainer);
+      
+      return pdf.output('blob');
+    } catch (error) {
+      console.error('🔍 [DEBUG] Erreur lors de la génération du PDF:', error);
+      throw error;
+    }
   };
 
   const objectives = getObjectives();
@@ -590,14 +802,46 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
   const pedagogicalMethods = getPedagogicalMethods();
   const materialElements = getMaterialElements();
 
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-100 flex items-center justify-center z-[9999] overflow-hidden">
+  // Le contenu de la modale
+  const modalContent = (
+    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[9999] overflow-hidden" style={{ pointerEvents: 'auto' }}>
       {showSignatureCanvas ? (
         <SignatureCanvas 
           onSave={handleSignatureSave} 
           onCancel={handleSignatureCancel}
           initialName={`${participant.first_name} ${participant.last_name}`}
         />
+      ) : existingDocumentUrl ? (
+        <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col m-4">
+          <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+            <h3 className="text-lg font-medium text-gray-900">
+              Convention de formation signée
+            </h3>
+            <div className="flex space-x-2">
+              <button
+                onClick={() => window.open(existingDocumentUrl, '_blank')}
+                className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+              >
+                <Download className="h-4 w-4 mr-1.5" />
+                Ouvrir dans un nouvel onglet
+              </button>
+              <button
+                onClick={onCancel}
+                className="inline-flex items-center px-2 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto p-6">
+            <iframe 
+              src={existingDocumentUrl} 
+              className="w-full h-full border-0" 
+              title="Convention de formation signée"
+            />
+          </div>
+        </div>
       ) : (
         <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col m-4">
           <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
@@ -627,117 +871,13 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
           
           <div className="flex-1 overflow-y-auto p-6">
             <div ref={pdfContentRef} className="bg-white p-8 shadow-sm border border-gray-200 mx-auto" style={{ maxWidth: '800px' }}>
-              <div className="text-center mb-8">
-                <h1 className="text-2xl font-bold mb-2">CONVENTION DE FORMATION PROFESSIONNELLE</h1>
-                <p className="text-sm text-gray-600">(Article L. 6353-1 du Code du travail)</p>
-              </div>
-              
-              <div className="mb-8">
-                <p>Entre les soussignés :</p>
-                <p className="mt-4"><strong>1. {organizationSettings.organization_name || 'FORMACEO'}</strong></p>
-                <p>SIRET : {organizationSettings.siret || 'N/A'}</p>
-                <p>Adresse : {organizationSettings.address || 'N/A'}</p>
-                <p>Représenté par : {organizationSettings.representative_name || 'N/A'}</p>
-                <p>Numéro de déclaration d'activité : {organizationSettings.activity_declaration_number || 'N/A'}</p>
-                <p className="mt-4"><strong>2. {company?.name || participant.company || 'Entreprise du stagiaire'}</strong></p>
-                <p>Représenté par : {company?.contact_name || 'N/A'}</p>
-                <p>Adresse : {company?.address || 'N/A'}</p>
-                <p>SIRET : {company?.siret || 'N/A'}</p>
-                <p className="mt-4">Est conclue la convention suivante, en application des dispositions du Livre III de la sixième partie du Code du travail.</p>
-              </div>
-              
-              <div className="mb-8">
-                <h2 className="text-xl font-bold mb-4">Article 1 : Objet de la convention</h2>
-                <p>L'organisme de formation s'engage à organiser l'action de formation suivante :</p>
-                <p className="mt-2"><strong>Intitulé de la formation :</strong> {training.title}</p>
-                <p><strong>Objectifs :</strong></p>
-                <ul className="list-disc pl-6">
-                  {objectives.map((objective, index) => (
-                    <li key={index} className="mb-1">{objective}</li>
-                  ))}
-                </ul>
-                <p className="mt-2"><strong>Dates :</strong> {getTrainingDates()}</p>
-                <p><strong>Durée :</strong> {training.duration}</p>
-                <p><strong>Lieu :</strong> {training.location}</p>
-                <p><strong>Participant :</strong> {participant.first_name} {participant.last_name}{participant.job_position ? ` - ${participant.job_position}` : ''}</p>
-              </div>
-              
-              <div className="mb-8">
-                <h2 className="text-xl font-bold mb-4">Article 2 : Nature et caractéristiques de l'action de formation</h2>
-                <p><strong>Méthodes pédagogiques :</strong></p>
-                <ul className="list-disc pl-6">
-                  {pedagogicalMethods.map((method, index) => (
-                    <li key={index} className="mb-1">{method}</li>
-                  ))}
-                </ul>
-                <p className="mt-2"><strong>Moyens matériels :</strong></p>
-                <ul className="list-disc pl-6">
-                  {materialElements.map((element, index) => (
-                    <li key={index} className="mb-1">{element}</li>
-                  ))}
-                </ul>
-                <p className="mt-2"><strong>Méthodes d'évaluation :</strong></p>
-                <ul className="list-disc pl-6">
-                  {evaluationMethods.map((method, index) => (
-                    <li key={index} className="mb-1">{method}</li>
-                  ))}
-                </ul>
-              </div>
-              
-              <div className="mb-8">
-                <h2 className="text-xl font-bold mb-4">Article 3 : Dispositions financières</h2>
-                <p>Le client s'engage à verser à l'organisme de formation, en contrepartie de cette action de formation, une somme correspondant aux frais de formation de :</p>
-                <p className="mt-2"><strong>Prix HT :</strong> {training.price ? `${training.price} €` : 'N/A'}</p>
-                <p><strong>TVA (20%) :</strong> {training.price ? `${training.price * 0.2} €` : 'N/A'}</p>
-                <p><strong>Prix TTC :</strong> {training.price ? `${training.price * 1.2} €` : 'N/A'}</p>
-                <p className="mt-2">Cette somme couvre l'intégralité des frais engagés par l'organisme de formation pour cette session.</p>
-              </div>
-              
-              <div className="mb-8">
-                <h2 className="text-xl font-bold mb-4">Article 4 : Modalités de règlement</h2>
-                <p>Le paiement sera dû à réception de la facture, à l'issue de la formation.</p>
-              </div>
-              
-              <div className="mb-8">
-                <h2 className="text-xl font-bold mb-4">Article 5 : Dédit ou abandon</h2>
-                <p>En cas de dédit par l'entreprise à moins de 10 jours francs avant le début de l'action mentionnée à l'article 1, ou d'abandon en cours de formation par un ou plusieurs stagiaires, l'organisme remboursera sur le coût total, les sommes qu'il n'aura pas réellement dépensées ou engagées pour la réalisation de ladite action.</p>
-              </div>
-              
-              <div className="mb-8">
-                <h2 className="text-xl font-bold mb-4">Article 6 : Date d'effet et durée de la convention</h2>
-                <p>La présente convention prend effet à compter de sa signature pour la durée de la formation.</p>
-              </div>
-              
-              <div className="mb-8">
-                <h2 className="text-xl font-bold mb-4">Article 7 : Différends éventuels</h2>
-                <p>Si une contestation ou un différend ne peuvent être réglés à l'amiable, le Tribunal de Commerce de Paris sera seul compétent pour régler le litige.</p>
-              </div>
-              
-              <div className="mb-8">
-                <p>Fait en double exemplaire, à Paris, le {getCurrentDate()}</p>
-              </div>
-              
-              <div className="flex justify-between mt-12">
-                <div className="text-left">
-                  <p className="font-bold">Pour le stagiaire :</p>
-                  <p>{participant.first_name} {participant.last_name}</p>
-                  <div className="h-24 w-48 mt-2 border border-gray-300 flex items-center justify-center">
-                    {participantSignature ? (
-                      <img src={participantSignature} alt="Signature du stagiaire" className="max-h-full max-w-full" />
-                    ) : (
-                      <p className="text-gray-400 text-sm">Aucune signature</p>
-                    )}
-                  </div>
-                </div>
-                
-                <div className="text-right">
-                  <p className="font-bold">Pour l'organisme de formation :</p>
-                  <p>{organizationSettings.representative_name || 'Le représentant'}</p>
-                  <div className="h-24 w-48 mt-2 border border-gray-300">
-                    {/* Espace pour la signature de l'organisme */}
-                  </div>
-                </div>
-              </div>
+              <TrainingAgreementTemplate
+                training={training}
+                participant={participant}
+                company={company}
+                organizationSettings={organizationSettings}
+                participantSignature={participantSignature}
+              />
             </div>
           </div>
           
@@ -775,4 +915,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
       )}
     </div>
   );
+
+  // Utiliser createPortal pour rendre la modale
+  return portalElement ? createPortal(modalContent, portalElement) : null;
 }; 
