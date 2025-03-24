@@ -113,10 +113,10 @@ export const CompanyForm: React.FC<CompanyFormProps> = ({ company, onSubmit, onC
     
     // Log the start of form submission with current formData
     console.log('CompanyForm - Starting form submission with data:', formData);
-    console.log('CompanyForm - Current siret value in form:', formData.siret);
+    console.log('CompanyForm - Current address value in form:', formData.address);
     
     if (company) {
-      console.log('CompanyForm - Original company siret value:', company.siret);
+      console.log('CompanyForm - Original company address value:', company.address);
     }
 
     if (!validateForm()) {
@@ -135,6 +135,12 @@ export const CompanyForm: React.FC<CompanyFormProps> = ({ company, onSubmit, onC
         // Si c'est une mise à jour, inclure l'ID de l'entreprise
         dataToSubmit.id = company.id;
         console.log('CompanyForm - Including company ID for update:', company.id);
+        
+        // Log détaillé pour l'adresse
+        console.log('CompanyForm - Address comparison:');
+        console.log('  - Form address value:', dataToSubmit.address);
+        console.log('  - Original address value:', company.address);
+        console.log('  - Is form address different?', dataToSubmit.address !== company.address);
         
         // Si les champs email et siret sont vides dans le formulaire
         // mais définis dans l'entreprise existante, les préserver
@@ -163,7 +169,8 @@ export const CompanyForm: React.FC<CompanyFormProps> = ({ company, onSubmit, onC
         ...dataToSubmit,
         id: dataToSubmit.id,
         email: dataToSubmit.email,
-        siret: dataToSubmit.siret
+        siret: dataToSubmit.siret,
+        address: dataToSubmit.address
       });
 
       onSubmit(dataToSubmit);

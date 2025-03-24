@@ -1,0 +1,94 @@
+{
+  "templates": [
+    {
+      "path": "/src/components/templates/TrainingAgreementTemplate.tsx",
+      "status": "to_be_deleted",
+      "importedBy": [
+        "/src/components/admin/TrainingAgreementForm.tsx",
+        "/src/components/StudentTrainingAgreement.tsx"
+      ],
+      "notes": "Version originale du template, remplacer par le template unifié"
+    },
+    {
+      "path": "/src/components/shared/templates/TrainingAgreementTemplate.tsx",
+      "status": "to_be_deleted",
+      "importedBy": [
+        "/src/components/shared/GenericTrainingAgreement.tsx"
+      ],
+      "notes": "Version alternative du template, remplacer par le template unifié"
+    },
+    {
+      "path": "/src/components/shared/templates/unified/TrainingAgreementTemplate.tsx",
+      "status": "to_be_created",
+      "notes": "Nouveau template unifié qui remplace les deux versions précédentes"
+    }
+  ],
+  "components": [
+    {
+      "path": "/src/components/StudentTrainingAgreement.tsx",
+      "status": "to_be_updated",
+      "changes": [
+        "Mettre à jour l'import pour utiliser le template unifié",
+        "Remplacer la fonction cleanupSignatureBlocks par removeAllParticipantSignatureSections",
+        "Nettoyer le code redondant de manipulation des signatures"
+      ]
+    },
+    {
+      "path": "/src/components/admin/TrainingAgreementForm.tsx",
+      "status": "to_be_updated",
+      "changes": [
+        "Mettre à jour l'import pour utiliser le template unifié"
+      ]
+    },
+    {
+      "path": "/src/components/shared/GenericTrainingAgreement.tsx",
+      "status": "to_be_updated",
+      "changes": [
+        "Mettre à jour l'import pour utiliser le template unifié"
+      ]
+    }
+  ],
+  "utils": [
+    {
+      "path": "/src/utils/SignatureUtils.ts",
+      "status": "updated",
+      "changes": [
+        "Fonction removeAllParticipantSignatureSections déjà ajoutée"
+      ]
+    }
+  ],
+  "modules": [
+    {
+      "path": "/src/modules/signatures",
+      "status": "to_be_created",
+      "files": [
+        "SignatureContainer.tsx",
+        "SignatureManager.ts",
+        "SignatureHooks.ts"
+      ],
+      "notes": "Nouveau module centralisé pour la gestion des signatures - Phase 2 de la migration"
+    }
+  ],
+  "documentation": [
+    {
+      "path": "/src/migration/SIGNATURE_MIGRATION_PLAN.md",
+      "status": "created",
+      "notes": "Documentation du plan de migration"
+    },
+    {
+      "path": "/src/migration/USAGE_INSTRUCTIONS.md",
+      "status": "created",
+      "notes": "Instructions d'utilisation du nouveau template"
+    },
+    {
+      "path": "/src/migration/CreateUnifiedTemplate.tsx",
+      "status": "created",
+      "notes": "Script de création du template unifié"
+    },
+    {
+      "path": "/src/migration/files_to_update.json",
+      "status": "created",
+      "notes": "Liste des fichiers à mettre à jour"
+    }
+  ]
+} 

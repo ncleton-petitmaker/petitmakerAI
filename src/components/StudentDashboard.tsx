@@ -36,6 +36,21 @@ export const StudentDashboard = () => {
     fetchUserData();
   }, [refreshTrigger]);
 
+  // Ajouter un effet pour rafraîchir périodiquement les données
+  useEffect(() => {
+    // Rafraîchir les données toutes les 30 secondes au lieu de 10
+    const intervalId = setInterval(() => {
+      // Ne pas rafraîchir si l'onglet est en arrière-plan ou si un document est en cours d'affichage
+      if (document.hidden || showingDocument) {
+        return;
+      }
+      setRefreshTrigger(prev => prev + 1);
+    }, 30000); // 30 secondes au lieu de 10
+
+    // Nettoyer l'intervalle lorsque le composant est démonté
+    return () => clearInterval(intervalId);
+  }, [showingDocument]);
+
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
@@ -46,11 +61,9 @@ export const StudentDashboard = () => {
               training={training}
               refreshTrigger={refreshTrigger}
               onDocumentOpen={() => {
-                console.log('onDocumentOpen called - hiding timeline');
                 setShowingDocument(true);
               }}
               onDocumentClose={() => {
-                console.log('onDocumentClose called - showing timeline');
                 setShowingDocument(false);
                 // Déclencher un rafraîchissement du profil et des questionnaires
                 setRefreshTrigger(prev => prev + 1);

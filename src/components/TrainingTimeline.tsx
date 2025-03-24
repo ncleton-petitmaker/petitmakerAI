@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Brain, 
@@ -23,9 +23,16 @@ import { QuestionnaireReport } from './QuestionnaireReport';
 import { SatisfactionQuestionnaire } from './SatisfactionQuestionnaire';
 import { InternalRulesModal } from './InternalRulesModal';
 import { StudentCompletionCertificateButton } from './StudentCompletionCertificateButton';
-import { StudentAttendanceSheetButton } from './StudentAttendanceSheetButton';
-import { StudentTrainingAgreementButton } from './StudentTrainingAgreementButton';
+import { StudentGenericAttendanceSheetButton } from './StudentGenericAttendanceSheetButton';
+import { StudentGenericTrainingAgreementButton } from './StudentGenericTrainingAgreementButton';
 import { supabase } from '../lib/supabase';
+import { Root } from 'react-dom/client';
+import { AttendanceSheetPortal } from './AttendanceSheetPortal';
+import ReactDOM from 'react-dom/client';
+import { TrainingAgreementPortal } from './TrainingAgreementPortal';
+
+// Map pour stocker les références aux roots React
+const reactRoots = new Map<string, Root>();
 
 interface TrainingTimelineProps {
   questionnaireCompleted?: boolean;
@@ -258,57 +265,49 @@ export const TrainingTimeline = ({
   const [certificateDownloaded, setCertificateDownloaded] = useState(false);
   const [companyStatus, setCompanyStatus] = useState<'valid' | 'pending' | 'not_found'>('valid');
   const [userProfile, setUserProfile] = useState<any>(null);
+  const [isAttendanceSheetButtonCalled, setIsAttendanceSheetButtonCalled] = useState(false);
+  const [isTrainingAgreementButtonCalled, setIsTrainingAgreementButtonCalled] = useState(false);
 
   const fetchQuestionnaireStatus = async () => {
     try {
-      console.log('Fetching questionnaire status in TrainingTimeline');
-      
-      // Skip fetching if company is not validated
-      if (companyStatus !== 'valid') {
-        console.log('Company not validated, skipping questionnaire status fetch');
-        return;
+      // Get user data if not already set
+      if (!userId) {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return;
+        setUserId(user.id);
       }
       
-      // Get user data
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      
-      const userId = user.id;
-      setUserId(userId);
+      // Assurer qu'on a un userId valide avant de continuer
+      const currentUserId = userId || null;
+      if (!currentUserId) {
+        return;
+      }
       
       // Check if user has completed positioning questionnaire
       const { data: positioningResponses, error: positioningError } = await supabase
         .from('questionnaire_responses')
         .select('id, score')
-        .eq('user_id', userId)
+        .eq('user_id', currentUserId)
         .eq('type', 'positioning');
-      
+
       if (positioningError) {
         console.error('Error checking positioning questionnaire:', positioningError);
         return;
       }
       
       const hasPositioningResponses = positioningResponses && positioningResponses.length > 0;
-      console.log('Positioning responses from database:', positioningResponses);
-      
-      if (hasPositioningResponses) {
-        console.log('Found positioning questionnaire in database, marking as completed');
-      }
-
-      // Récupérer le score du questionnaire de positionnement si disponible
-      const positioningScore = hasPositioningResponses ? positioningResponses[0].score : null;
       
       // Check initial evaluation
       const evalType = 'initial_final_evaluation';
       
-      const { data: initialResponses, error: initialError } = await supabase
+      const { data: evaluationResponses, error: evalError } = await supabase
         .from('questionnaire_responses')
         .select('id, score, sous_type')
-        .eq('user_id', userId)
+        .eq('user_id', currentUserId)
         .eq('type', evalType);
-      
-      if (initialError) {
-        console.error('Error checking initial evaluation:', initialError);
+
+      if (evalError) {
+        console.error('Error checking evaluations:', evalError);
         return;
       }
       
@@ -316,11 +315,11 @@ export const TrainingTimeline = ({
       let hasInitialResponses, hasFinalResponses;
       let initialScore = null;
       let finalScore = null;
-      
+
       if (hasSousTypeColumn) {
         // Si la colonne sous_type existe, filtrer par sous_type
-        const initialEvals = initialResponses && initialResponses.filter(item => item.sous_type === 'initial');
-        const finalEvals = initialResponses && initialResponses.filter(item => item.sous_type === 'final');
+        const initialEvals = evaluationResponses && evaluationResponses.filter(item => item.sous_type === 'initial');
+        const finalEvals = evaluationResponses && evaluationResponses.filter(item => item.sous_type === 'final');
         
         hasInitialResponses = initialEvals && initialEvals.length > 0;
         hasFinalResponses = finalEvals && finalEvals.length > 0;
@@ -328,41 +327,27 @@ export const TrainingTimeline = ({
         // Récupérer les scores
         if (hasInitialResponses && initialEvals[0].score) {
           initialScore = initialEvals[0].score;
-          console.log('Found initial evaluation score:', initialScore);
         }
         
         if (hasFinalResponses && finalEvals[0].score) {
           finalScore = finalEvals[0].score;
-          console.log('Found final evaluation score:', finalScore);
         }
       } else {
         // Sinon, on ne peut pas distinguer initial de final
         // On suppose que s'il y a des données d'évaluation, les deux sont complétés
-        hasInitialResponses = initialResponses && initialResponses.length > 0;
-        hasFinalResponses = initialResponses && initialResponses.length > 1;
+        hasInitialResponses = evaluationResponses && evaluationResponses.length > 0;
+        hasFinalResponses = evaluationResponses && evaluationResponses.length > 1;
         
         // Récupérer les scores
-        if (hasInitialResponses && initialResponses[0].score) {
-          initialScore = initialResponses[0].score;
-          console.log('Found initial evaluation score:', initialScore);
+        if (hasInitialResponses && evaluationResponses[0].score) {
+          initialScore = evaluationResponses[0].score;
         }
         
-        if (hasFinalResponses && initialResponses[1].score) {
-          finalScore = initialResponses[1].score;
-          console.log('Found final evaluation score:', finalScore);
+        if (hasFinalResponses && evaluationResponses[1].score) {
+          finalScore = evaluationResponses[1].score;
         }
       }
-      
-      console.log('Initial evaluation responses from database:', initialResponses);
-      if (hasInitialResponses) {
-        console.log('Found initial evaluation in database, marking as completed');
-      }
-      
-      console.log('Final evaluation responses from database:', initialResponses);
-      if (hasFinalResponses) {
-        console.log('Found final evaluation in database, marking as completed');
-      }
-      
+
       // Update user profile if needed
       if (hasPositioningResponses || hasInitialResponses || hasFinalResponses) {
         const profileUpdate: any = {};
@@ -379,32 +364,23 @@ export const TrainingTimeline = ({
           profileUpdate.final_evaluation_completed = true;
         }
         
-        const { data: profileData, error: profileError } = await supabase
+        await supabase
           .from('user_profiles')
           .update(profileUpdate)
-          .eq('id', userId)
-          .select();
-        
-        if (profileError) {
-          console.error('Error updating user profile:', profileError);
-        } else {
-          console.log('User profile updated:', profileData);
-        }
+          .eq('id', currentUserId);
       }
       
       // Fetch updated user profile data
       const { data: profileData, error: getProfileError } = await supabase
         .from('user_profiles')
         .select('questionnaire_completed, initial_evaluation_completed, final_evaluation_completed, satisfaction_completed')
-        .eq('id', userId)
+        .eq('id', currentUserId)
         .single();
       
       if (getProfileError) {
         console.error('Error fetching updated profile:', getProfileError);
         return;
       }
-      
-      console.log('Questionnaire status from profile:', profileData);
       
       // Update local state with fetched data
       setEvaluationStatus({
@@ -418,16 +394,6 @@ export const TrainingTimeline = ({
         initial: initialScore,
         final: finalScore
       });
-      
-      // Si le questionnaire de satisfaction est complété, récupérer les données
-      if (profileData?.satisfaction_completed) {
-        // Nous ne récupérons pas les données ici pour éviter de les charger inutilement
-        // Elles seront récupérées uniquement lorsque l'utilisateur cliquera sur la tuile
-        console.log('Satisfaction questionnaire is completed');
-      }
-      
-      setUserId(userId);
-      
     } catch (error) {
       console.error('Error in fetchQuestionnaireStatus:', error);
     }
@@ -439,35 +405,22 @@ export const TrainingTimeline = ({
 
     const fetchUserData = async () => {
       try {
-        console.log("Fetching user data for timeline...");
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) return;
         
-        console.log("User ID:", user.id);
         setUserId(user.id);
-        
-        console.log("Training data from props:", training);
 
         const { data: userProfileData, error: userProfileError } = await supabase
           .from('user_profiles')
-        .select('*, has_signed_certificate, internal_rules_acknowledged')
+          .select('*, has_signed_certificate, internal_rules_acknowledged')
           .eq('id', user.id)
           .single();
-        
-        console.log("User profile data:", userProfileData);
         
         if (userProfileError) {
           console.error("Error fetching user profile data:", userProfileError);
         }
         
         if (userProfileData) {
-          console.log("Setting signature states:", {
-            attendanceSigned: userProfileData.has_signed_attendance,
-          agreementSigned: userProfileData.has_signed_agreement,
-          certificateSigned: userProfileData.has_signed_certificate,
-          rulesAcknowledged: userProfileData.internal_rules_acknowledged
-          });
-
           setAttendanceSheetSigned(
             userProfileData.has_signed_attendance !== undefined 
               ? userProfileData.has_signed_attendance 
@@ -478,22 +431,19 @@ export const TrainingTimeline = ({
               ? userProfileData.has_signed_agreement 
               : false
           );
-        setCompletionCertificateSigned(
-          userProfileData.has_signed_certificate !== undefined 
-            ? userProfileData.has_signed_certificate 
-            : false
-        );
-        setInternalRulesAcknowledged(
-          userProfileData.internal_rules_acknowledged !== undefined 
-            ? userProfileData.internal_rules_acknowledged 
-            : false
-        );
-        
-        setCertificateDownloaded(
-          userProfileData.has_signed_certificate !== undefined 
-            ? userProfileData.has_signed_certificate 
+          setCompletionCertificateSigned(
+            userProfileData.has_signed_certificate !== undefined 
+              ? userProfileData.has_signed_certificate 
               : false
           );
+          setInternalRulesAcknowledged(
+            userProfileData.internal_rules_acknowledged !== undefined 
+              ? userProfileData.internal_rules_acknowledged 
+              : false
+          );
+          
+          // Set user profile
+          setUserProfile(userProfileData);
         }
       } catch (error) {
         console.error('Error fetching user data:', error);
@@ -502,11 +452,11 @@ export const TrainingTimeline = ({
 
   useEffect(() => {
     return () => {
-      if (onDocumentClose) {
-        onDocumentClose();
-      }
+      // Nous ne devrions pas appeler onDocumentClose lors du démontage normal
+      // car cela provoque une boucle infinie avec le refresh trigger
+      // onDocumentClose sera appelé explicitement lorsque nécessaire
     };
-  }, [onDocumentClose]);
+  }, []);
 
   const calculateProgress = () => {
     let completed = 0;
@@ -770,16 +720,26 @@ export const TrainingTimeline = ({
   const nextStep = getNextStep();
 
   const renderDocumentButton = (item: TimelineItem) => {
-    console.log('🔍 [DEBUG] Rendering document button for item:', item);
-    
     if (!training || !userId) {
-      console.log('🔍 [DEBUG] Missing training or userId:', { training, userId });
       return (
         <button
           disabled
           className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-md bg-red-100 text-red-700"
         >
-          {!training ? "Formation non assignée" : "Erreur de chargement"}
+          <AlertTriangle className="mr-2 h-4 w-4" />
+          Non disponible
+        </button>
+      );
+    }
+
+    if (item.status === 'pending') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-md bg-yellow-100 text-yellow-700"
+        >
+          <AlertCircle className="mr-2 h-4 w-4" />
+          En attente
         </button>
       );
     }
@@ -900,13 +860,13 @@ export const TrainingTimeline = ({
                         if (error) {
                           console.error('🔍 [DEBUG] Error fetching document URL:', error);
                           // Fallback à l'affichage du composant
-                          showAttendanceSheet();
+                          showAttendanceSheet(training);
                         } else if (docData && docData.file_url) {
                           console.log('🔍 [DEBUG] Found document URL:', docData.file_url);
                           showSignedDocument(docData.file_url, "Feuille d'émargement");
                         } else {
                           console.log('🔍 [DEBUG] No document found, showing component');
-                          showAttendanceSheet();
+                          showAttendanceSheet(training);
                         }
                       });
                   } else {
@@ -916,12 +876,12 @@ export const TrainingTimeline = ({
                   }
                 } else {
                   console.log('🔍 [DEBUG] No URL found, opening attendance sheet for signing');
-                  showAttendanceSheet();
+                  showAttendanceSheet(training);
                 }
               } else {
                 // Si pas signé, ouvrir le composant pour signature
                 console.log('🔍 [DEBUG] Attendance sheet not signed, opening for signing');
-                showAttendanceSheet();
+                showAttendanceSheet(training);
               }
             });
           break;
@@ -963,7 +923,7 @@ export const TrainingTimeline = ({
                           } else {
                             console.log('🔍 [DEBUG] No document found, falling back to signature URL');
                             // If we can't find the document, try to regenerate it
-                            console.log('�� [DEBUG] Attempting to regenerate the document');
+                            console.log('🔍 [DEBUG] Attempting to regenerate the document');
                             showTrainingAgreement();
                           }
                         } else if (docData && docData.file_url) {
@@ -986,7 +946,7 @@ export const TrainingTimeline = ({
                   showTrainingAgreement();
                 }
               } else {
-                // Si pas signé, ouvrir le composant StudentTrainingAgreement pour signature
+                // Si pas signé, ouvrir le composant StudentGenericTrainingAgreementButton pour signature
                 console.log('🔍 [DEBUG] Agreement not signed, opening for signing');
                 showTrainingAgreement();
               }
@@ -1039,43 +999,36 @@ export const TrainingTimeline = ({
           </a>
         );
       case 'training-agreement':
-        console.log('🔍 [DEBUG] Rendering training-agreement button with props:', { 
-          trainingId: training.id, 
-          userId,
-          trainingAgreementSigned
-        });
         return (
           <a
             href="#"
             className={`inline-flex items-center px-3 py-2 text-sm font-medium rounded-md ${
-              trainingAgreementSigned 
-                ? "bg-green-600 hover:bg-green-700 text-white" 
-                : "bg-blue-600 hover:bg-blue-700 text-white"
+              trainingAgreementSigned
+                ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
             }`}
-            onClick={(e) => handleLinkClick(e, 'training-agreement')}
-            data-document-type="training-agreement"
-            data-training-id={training.id}
-            data-user-id={userId}
+            onClick={(e) => {
+              e.preventDefault();
+              showTrainingAgreement();
+            }}
           >
-            <FileText className="h-4 w-4 mr-1.5" />
-            {trainingAgreementSigned ? "Voir" : "Voir et signer"}
+            {trainingAgreementSigned ? (
+              <>
+                <CheckCircle2 className="mr-2 h-4 w-4" />
+                Signé
+              </>
+            ) : (
+              <>
+                <FileText className="mr-2 h-4 w-4" />
+                Voir le document
+              </>
+            )}
           </a>
         );
       default:
         return null;
     }
   };
-
-  // Move console.log statements outside JSX
-  const debugRenderComponent = () => {
-    console.log('🔍 [DEBUG] TrainingTimeline - Rendering component');
-    console.log('🔍 [DEBUG] TrainingTimeline - Progress bar z-index: 10');
-    console.log('🔍 [DEBUG] TrainingTimeline - Timeline container z-index: 0');
-    console.log('🔍 [DEBUG] TrainingTimeline - Phase title z-index: 10');
-    console.log('🔍 [DEBUG] TrainingTimeline - Modals container z-index: 30 (changed from 50)');
-  };
-
-  debugRenderComponent();
 
   useEffect(() => {
     const checkTableColumns = async () => {
@@ -1094,12 +1047,10 @@ export const TrainingTimeline = ({
         // Si nous avons des données, vérifier si sous_type existe dans le premier enregistrement
         if (data && data.length > 0) {
           const hasColSousType = 'sous_type' in data[0];
-          console.log('🔍 [DEBUG] TrainingTimeline - Colonne sous_type existe:', hasColSousType);
           return hasColSousType;
         }
         
         // Si aucune donnée n'est retournée, nous ne pouvons pas vérifier
-        console.log('🔍 [DEBUG] TrainingTimeline - Aucun enregistrement pour vérifier la structure de la table');
         return false;
       } catch (e) {
         console.error('Erreur lors de la vérification de la structure de la table:', e);
@@ -1109,7 +1060,6 @@ export const TrainingTimeline = ({
 
     // Utiliser cette information pour adapter notre comportement
     checkTableColumns().then(hasCol => {
-      console.log('🔍 [DEBUG] TrainingTimeline - Adaptation du comportement en fonction de la présence de sous_type:', hasCol);
       setHasSousTypeColumn(hasCol);
     });
   }, []);
@@ -1176,11 +1126,12 @@ export const TrainingTimeline = ({
   const fetchCompanyStatus = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) {
+        setCompanyStatus('not_found');
+        return;
+      }
 
-      console.log('🔍 [DEBUG] Fetching company status for user:', user.id);
-
-      // Récupérer le profil utilisateur 
+      // Récupérer les données du profil utilisateur avec l'id de l'entreprise
       const { data: profileData, error: profileError } = await supabase
         .from('user_profiles')
         .select('status, company_id, company')
@@ -1193,11 +1144,8 @@ export const TrainingTimeline = ({
         return;
       }
 
-      console.log('🔍 [DEBUG] User profile data:', profileData);
-
       // Vérifier si le statut de l'utilisateur est explicitement en attente
       if (profileData.status === 'pending_company_validation') {
-        console.log('🔍 [DEBUG] Company is pending validation (user status)');
         setCompanyStatus('pending');
         return;
       }
@@ -1217,11 +1165,8 @@ export const TrainingTimeline = ({
           return;
         }
         
-        console.log('🔍 [DEBUG] Company data:', companyData);
-        
         // Vérifier si l'entreprise a un statut non valide
         if (companyData && companyData.status === 'pending') {
-          console.log('🔍 [DEBUG] Company is pending validation (company status)');
           setCompanyStatus('pending');
           return;
         }
@@ -1239,17 +1184,12 @@ export const TrainingTimeline = ({
           return;
         }
         
-        console.log('🔍 [DEBUG] Company trainings:', trainings);
-        
         if (trainings && trainings.length > 0) {
-          console.log('🔍 [DEBUG] Company has trainings, status is valid');
           setCompanyStatus('valid');
         } else {
-          console.log('🔍 [DEBUG] Company has no trainings, status is pending');
           setCompanyStatus('pending');
         }
       } else {
-        console.log('🔍 [DEBUG] User has no company_id, status is not_found');
         setCompanyStatus('not_found');
       }
     } catch (error) {
@@ -1265,36 +1205,51 @@ export const TrainingTimeline = ({
 
   // Modification pour pouvoir cliquer directement sur les documents
   const handleDocumentClick = (item: TimelineItem) => {
-    console.log('🔍 [DEBUG] Document clicked directly:', item);
-    
-    if (companyStatus !== 'valid') {
-      console.log('🔍 [DEBUG] Blocking document action, company status is not valid:', companyStatus);
-      return;
+    // Informer le parent que le document a été ouvert
+    if (onDocumentOpen) {
+      onDocumentOpen();
     }
     
-    // Traiter le document selon son type
-    switch (item.id) {
-      case 'completion-certificate':
-        if (onDocumentOpen) {
-          onDocumentOpen();
+    // Vérifier le type de document et appeler la fonction appropriée
+    if (item.action === 'training-agreement') {
+      showTrainingAgreement();
+    } else if (item.action === 'attendance-sheet') {
+      showAttendanceSheet(training);
+    } else if (item.action === 'completion-certificate') {
+      showCompletionCertificate();
+    } else if (item.action === 'internal-rules') {
+      setShowInternalRules(true);
+    } else if (item.action && (
+      item.action.includes('questionnaire') || 
+      item.action.includes('evaluation') || 
+      item.action === 'satisfaction'
+    )) {
+      // Gérer les différents types de questionnaires
+      if (item.action === 'questionnaire') {
+        setCurrentQuestionnaire(null);
+        setReadOnly(questionnaireCompleted);
+        setShowQuestionnaire(true);
+      } else if (item.action === 'initial-evaluation') {
+        setCurrentQuestionnaire('initial');
+        setReadOnly(evaluationStatus.initial);
+        setShowQuestionnaireReport(true);
+      } else if (item.action === 'final-evaluation') {
+        setCurrentQuestionnaire('final');
+        setReadOnly(evaluationStatus.final);
+        setShowQuestionnaireReport(true);
+      } else if (item.action === 'satisfaction') {
+        const isSatisfactionCompleted = evaluationStatus.satisfaction;
+        setReadOnly(isSatisfactionCompleted);
+        
+        if (isSatisfactionCompleted && !satisfactionData) {
+          fetchSatisfactionData();
+        } else {
+          setShowSatisfactionQuestionnaire(true);
         }
-        showCompletionCertificate();
-        break;
-      case 'attendance-sheet':
-        if (onDocumentOpen) {
-          onDocumentOpen();
-        }
-        showAttendanceSheet();
-        break;
-      case 'training-agreement':
-        if (onDocumentOpen) {
-          onDocumentOpen();
-        }
-        showTrainingAgreement();
-        break;
-      default:
-        // Pour les autres types de documents
-        handleItemClick(item);
+      }
+    } else {
+      // Si c'est un autre type de document, afficher un message
+      alert(`Fonctionnalité non implémentée: ${item.action}`);
     }
   };
 
@@ -1377,105 +1332,45 @@ export const TrainingTimeline = ({
   };
 
   // Fonction pour afficher la feuille d'émargement
-  const showAttendanceSheet = () => {
-    console.log('🔍 [DEBUG] Showing attendance sheet for signature');
-    
-    // Créer un élément temporaire pour le portail
-    const portalContainer = document.getElementById('attendance-sheet-portal') || 
-      (() => {
-        const el = document.createElement('div');
-        el.id = 'attendance-sheet-portal';
-        document.body.appendChild(el);
-        return el;
-      })();
-    
-    // Vérifier que training.id et userId ne sont pas null
-    if (!training || !training.id || !userId) {
-      console.error('🔍 [DEBUG] Missing required data for attendance sheet', { 
-        trainingId: training?.id, 
-        userId 
-      });
+  const showAttendanceSheet = (training: any) => {
+    console.log("Showing attendance sheet for training", training);
+
+    if (!training?.id || !userId) {
       return;
     }
+
+    // Définir isAttendanceSheetButtonCalled pour éviter les appels multiples
+    setIsAttendanceSheetButtonCalled(true);
+
+    // Créer un élément temporaire pour le bouton de feuille d'émargement
+    const portalElement = document.createElement('div');
+    portalElement.id = 'attendance-sheet-button-portal';
+    document.body.appendChild(portalElement);
+
+    // Créer un portail React
+    const root = ReactDOM.createRoot(portalElement);
     
-    // Rendre le composant StudentAttendanceSheet directement dans le portail
-    import('react-dom').then(({ createPortal }) => {
-      import('react').then(({ createElement }) => {
-        import('./StudentAttendanceSheet').then(({ StudentAttendanceSheet }) => {
-          const portalRoot = document.getElementById('attendance-sheet-portal');
-          if (portalRoot) {
-            const trainingData = {
-              id: training.id,
-              title: training.title || '',
-              duration: training.duration || '',
-              trainer_name: training.trainer_name || '',
-              location: training.location || '',
-              start_date: training.start_date,
-              end_date: training.end_date,
-              objectives: training.objectives || [],
-              evaluation_methods: training.evaluation_methods || {
-                profile_evaluation: false,
-                skills_evaluation: false,
-                knowledge_evaluation: false,
-                satisfaction_survey: false
-              },
-              tracking_methods: training.tracking_methods || [],
-              pedagogical_methods: training.pedagogical_methods || [],
-              material_elements: training.material_elements || []
-            };
-            
-            const participantData = {
-              id: userId,
-              first_name: '',
-              last_name: '',
-              job_position: ''
-            };
-            
-            // Récupérer les données du participant
-            supabase
-              .from('user_profiles')
-              .select('first_name, last_name, job_position')
-              .eq('id', userId)
-              .single()
-              .then(({ data }) => {
-                if (data) {
-                  participantData.first_name = data.first_name;
-                  participantData.last_name = data.last_name;
-                  participantData.job_position = data.job_position;
-                  
-                  // Créer l'élément React
-                  const element = createElement(StudentAttendanceSheet, {
-                    training: trainingData,
-                    participant: participantData,
-                    onCancel: () => {
-                      console.log('🔍 [DEBUG] Attendance sheet closed');
-                      // Nettoyer le portail
-                      const portalRoot = document.getElementById('attendance-sheet-portal');
-                      if (portalRoot) {
-                        portalRoot.innerHTML = '';
-                      }
-                      
-                      // Informer le parent que le document a été fermé
-                      if (onDocumentClose) {
-                        console.log('🔍 [DEBUG] Calling onDocumentClose after closing');
-                        onDocumentClose();
-                      }
-                    },
-                    onDocumentOpen,
-                    onDocumentClose
-                  });
-                  
-                  // Rendre l'élément dans le portail
-                  import('react-dom/client').then(({ createRoot }) => {
-                    const root = createRoot(portalRoot);
-                    root.render(element);
-                  });
-                }
-              });
-          }
-        });
-      });
-    });
+    // Fonction pour nettoyer
+    const cleanup = () => {
+      root.unmount();
+      document.body.removeChild(portalElement);
+      setIsAttendanceSheetButtonCalled(false);
+      
+      if (onDocumentClose) {
+        onDocumentClose();
+      }
+    };
+
+    // Rendu du composant dans le portail
+    root.render(
+      <AttendanceSheetPortal
+        training={training}
+        userId={userId}
+        onCancel={cleanup}
+        onDocumentOpen={onDocumentOpen}
+        onDocumentClose={onDocumentClose}
+      />
+    );
   };
 
   // Fonction pour afficher l'attestation de fin de formation
@@ -1506,10 +1401,10 @@ export const TrainingTimeline = ({
       onDocumentOpen();
     }
     
-    // Rendre le composant StudentCompletionCertificate directement dans le portail
+    // Rendre le composant CompletionCertificate directement dans le portail
     import('react-dom').then(({ createPortal }) => {
       import('react').then(({ createElement }) => {
-        import('./StudentCompletionCertificate').then(({ StudentCompletionCertificate }) => {
+        import('./shared/CompletionCertificate').then(({ CompletionCertificate }) => {
           const portalRoot = document.getElementById('completion-certificate-portal');
           if (portalRoot) {
             const trainingData = {
@@ -1552,9 +1447,10 @@ export const TrainingTimeline = ({
                   participantData.job_position = data.job_position;
                   
                   // Créer l'élément React
-                  const element = createElement(StudentCompletionCertificate, {
+                  const element = createElement(CompletionCertificate, {
                     training: trainingData,
                     participant: participantData,
+                    viewContext: 'student',
                     onCancel: () => {
                       console.log('🔍 [DEBUG] Completion certificate closed');
                       // Nettoyer le portail
@@ -1563,9 +1459,9 @@ export const TrainingTimeline = ({
                         portalRoot.innerHTML = '';
                       }
                       
-                      // Informer le parent que le document a été fermé
+                      // Appeler onDocumentClose pour informer le parent
                       if (onDocumentClose) {
-                        console.log('🔍 [DEBUG] Calling onDocumentClose after closing');
+                        console.log('🔍 [DEBUG] Calling onDocumentClose from completion certificate onCancel');
                         onDocumentClose();
                       }
                     }
@@ -1584,18 +1480,9 @@ export const TrainingTimeline = ({
     });
   };
 
-  // Fonction pour afficher le composant StudentTrainingAgreement
+  // Fonction pour afficher le composant TrainingAgreementPortal
   const showTrainingAgreement = () => {
     console.log('🔍 [DEBUG] Showing training agreement for signature');
-    
-    // Créer un élément temporaire pour le portail
-    const portalContainer = document.getElementById('training-agreement-portal') || 
-      (() => {
-        const el = document.createElement('div');
-        el.id = 'training-agreement-portal';
-        document.body.appendChild(el);
-        return el;
-      })();
     
     // Vérifier que training.id et userId ne sont pas null
     if (!training || !training.id || !userId) {
@@ -1605,80 +1492,52 @@ export const TrainingTimeline = ({
       });
       return;
     }
+
+    // Définir isTrainingAgreementButtonCalled pour éviter les appels multiples
+    setIsTrainingAgreementButtonCalled(true);
+
+    // Créer un élément temporaire pour la convention de formation
+    const portalElement = document.createElement('div');
+    portalElement.id = 'training-agreement-button-portal';
+    document.body.appendChild(portalElement);
+
+    // Créer un portail React
+    const root = ReactDOM.createRoot(portalElement);
     
-    // Rendre le composant StudentTrainingAgreement directement dans le portail
-    import('react-dom').then(({ createPortal }) => {
-      import('react').then(({ createElement }) => {
-        import('./StudentTrainingAgreement').then(({ StudentTrainingAgreement }) => {
-          const portalRoot = document.getElementById('training-agreement-portal');
-          if (portalRoot) {
-            const trainingData = {
-              id: training.id, // Assuré non-null par la vérification ci-dessus
-              title: training.title,
-              duration: training.duration,
-              trainer_name: training.trainer_name || '',
-              location: training.location,
-              start_date: training.start_date,
-              end_date: training.end_date,
-              objectives: training.objectives,
-              evaluation_methods: training.evaluation_methods,
-              tracking_methods: training.tracking_methods,
-              pedagogical_methods: training.pedagogical_methods,
-              material_elements: training.material_elements
-            };
-            
-            const participantData = {
-              id: userId, // Assuré non-null par la vérification ci-dessus
-              first_name: '',
-              last_name: '',
-              job_position: ''
-            };
-            
-            // Récupérer les données du participant
-            supabase
-              .from('user_profiles')
-              .select('first_name, last_name, job_position')
-              .eq('id', userId)
-              .single()
-              .then(({ data }) => {
-                if (data) {
-                  participantData.first_name = data.first_name;
-                  participantData.last_name = data.last_name;
-                  participantData.job_position = data.job_position;
-                  
-                  // Créer l'élément React
-                  const element = createElement(StudentTrainingAgreement, {
-                    training: trainingData,
-                    participant: participantData,
-                    onCancel: () => {
-                      console.log('🔍 [DEBUG] Training agreement closed');
-                      // Nettoyer le portail
-                      const portalRoot = document.getElementById('training-agreement-portal');
-                      if (portalRoot) {
-                        portalRoot.innerHTML = '';
-                      }
-                      
-                      // Informer le parent que le document a été fermé
-                      if (onDocumentClose) {
-                        console.log('🔍 [DEBUG] Calling onDocumentClose after closing');
-                        onDocumentClose();
-                      }
-                    },
-                    onDocumentOpen,
-                    onDocumentClose
-                  });
-                  
-                  // Rendre l'élément dans le portail
-                  import('react-dom/client').then(({ createRoot }) => {
-                    const root = createRoot(portalRoot);
-                    root.render(element);
-                  });
-                }
-              });
-          }
-        });
-      });
-    });
+    // Fonction pour nettoyer
+    const cleanup = () => {
+      root.unmount();
+      document.body.removeChild(portalElement);
+      setIsTrainingAgreementButtonCalled(false);
+      
+      if (onDocumentClose) {
+        onDocumentClose();
+      }
+    };
+
+    // Construire l'objet training pour le composant
+    const trainingData = {
+      id: training.id,
+      title: training.title,
+      duration: training.duration,
+      trainer_name: training.trainer_name || '',
+      location: typeof training.location === 'string' 
+        ? training.location 
+        : training.location?.name || '',
+      start_date: training.start_date,
+      end_date: training.end_date
+    };
+
+    // Rendu du composant dans le portail
+    root.render(
+      <TrainingAgreementPortal
+        training={trainingData}
+        userId={userId}
+        onCancel={cleanup}
+        onDocumentOpen={onDocumentOpen}
+        onDocumentClose={onDocumentClose}
+      />
+    );
   };
 
   const isQuestionnaire = (item: TimelineItem) => {
@@ -1690,12 +1549,11 @@ export const TrainingTimeline = ({
   };
 
   const isDocument = (item: TimelineItem) => {
-    return item.action && (
-      item.action === 'completion-certificate' || 
-      item.action === 'attendance-sheet' || 
-      item.action === 'training-agreement' ||
-      item.action === 'internal-rules'
-    );
+    return item.id === 'training-agreement' 
+      || item.id === 'attendance-sheet' 
+      || item.id === 'completion-certificate' 
+      || item.id === 'internal-rules'
+      || item.action === 'pdf';
   };
 
   return (

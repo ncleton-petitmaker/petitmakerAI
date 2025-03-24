@@ -3,7 +3,8 @@ import { useNavigate, Link } from 'react-router-dom';
 import { 
   ArrowLeft, 
   BookOpen,
-  MessageSquare
+  MessageSquare,
+  Bell
 } from 'lucide-react';
 import { ProfileMenu } from '../components/ProfileMenu';
 import { PositioningQuestionnaire } from '../components/PositioningQuestionnaire';
@@ -26,6 +27,7 @@ interface UserProfile {
   questionnaire_completed: boolean;
   photo_url?: string | null;
   google_photo_url?: string | null;
+  status: string;
 }
 
 export const StudentDashboard = () => {
@@ -40,6 +42,10 @@ export const StudentDashboard = () => {
   const [training, setTraining] = useState<any>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [companyStatus, setCompanyStatus] = useState<'valid' | 'pending' | 'not_found'>('valid');
+  const [notifications, setNotifications] = useState<any[]>([]); 
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   const fetchUserData = async () => {
     try {
@@ -76,6 +82,28 @@ export const StudentDashboard = () => {
         }
           
         setProfile(profileData);
+          
+        // Check company status
+        if (profileData.status === 'pending_company_validation') {
+          setCompanyStatus('pending');
+        } else if (profileData.company_id) {
+          // Check if the company has trainings
+          const { data: trainings, error: trainingsError } = await supabase
+            .from('trainings')
+            .select('id')
+            .eq('company_id', profileData.company_id)
+            .limit(1);
+
+          if (trainingsError) throw trainingsError;
+          
+          if (trainings && trainings.length > 0) {
+            setCompanyStatus('valid');
+          } else {
+            setCompanyStatus('pending');
+          }
+        } else if (profileData.company && !profileData.company_id) {
+          setCompanyStatus('not_found');
+        }
           
         // Fetch training data separately if training_id exists
         if (profileData.training_id) {
@@ -193,19 +221,23 @@ export const StudentDashboard = () => {
 
   useEffect(() => {
     fetchUserData();
-  }, [navigate]);
+    fetchNotifications();
+  }, []);
 
   // Ajouter un effet pour rafraîchir périodiquement les données
   useEffect(() => {
-    // Rafraîchir les données toutes les 10 secondes
+    // Rafraîchir les données toutes les 30 secondes au lieu de 10
     const intervalId = setInterval(() => {
-      console.log("Auto-refreshing dashboard data");
+      // Ne pas rafraîchir si l'onglet est en arrière-plan ou si un document est en cours d'affichage
+      if (document.hidden || showingDocument) {
+        return;
+      }
       setRefreshTrigger(prev => prev + 1);
-    }, 10000);
+    }, 30000); // 30 secondes au lieu de 10
 
     // Nettoyer l'intervalle lorsque le composant est démonté
     return () => clearInterval(intervalId);
-  }, []);
+  }, [showingDocument]);
 
   const handleSignOut = async () => {
     try {
@@ -237,6 +269,77 @@ export const StudentDashboard = () => {
     } catch (error) {
       console.error('Error updating profile:', error);
       alert('Une erreur est survenue lors de la mise à jour du profil.');
+    }
+  };
+
+  const fetchNotifications = async () => {
+    try {
+      console.log('🔍 [DEBUG] StudentDashboard - Fetching notifications');
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(10);
+      
+      if (error) throw error;
+      
+      if (data) {
+        console.log('🔍 [DEBUG] StudentDashboard - Notifications fetched:', data);
+        setNotifications(data);
+        setUnreadCount(data.filter(n => !n.read).length);
+      }
+    } catch (error) {
+      console.error('Error fetching notifications:', error);
+    }
+  };
+
+  const markAsRead = async (id: string) => {
+    try {
+      const { error } = await supabase
+        .from('notifications')
+        .update({ read: true })
+        .eq('id', id);
+      
+      if (error) throw error;
+      
+      setNotifications(notifications.map(notification => 
+        notification.id === id 
+          ? { ...notification, read: true } 
+          : notification
+      ));
+      setUnreadCount(prev => Math.max(0, prev - 1));
+    } catch (error) {
+      console.error('Error marking notification as read:', error);
+    }
+  };
+
+  const markAllAsRead = async () => {
+    try {
+      const unreadIds = notifications
+        .filter(notification => !notification.read)
+        .map(notification => notification.id);
+      
+      if (unreadIds.length === 0) return;
+      
+      const { error } = await supabase
+        .from('notifications')
+        .update({ read: true })
+        .in('id', unreadIds);
+      
+      if (error) throw error;
+      
+      setNotifications(notifications.map(notification => ({
+        ...notification,
+        read: true
+      })));
+      setUnreadCount(0);
+      setShowNotifications(false);
+    } catch (error) {
+      console.error('Error marking all notifications as read:', error);
     }
   };
 
@@ -282,14 +385,82 @@ export const StudentDashboard = () => {
               </Link>
               <h1 className="text-4xl font-bold text-white">Tableau de bord</h1>
             </div>
-            {profile && (
-              <ProfileMenu 
-                profile={profile}
-                onSignOut={handleSignOut}
-                onProfileUpdate={handleProfileUpdate}
-              />
-            )}
+            <div className="flex items-center gap-4">
+              {/* Notifications */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowNotifications(!showNotifications)}
+                  className="relative p-2 text-white hover:bg-gray-800 rounded-full transition-colors"
+                >
+                  <Bell className="h-6 w-6" />
+                  {unreadCount > 0 && (
+                    <span className="absolute top-0 right-0 block h-4 w-4 rounded-full bg-red-500 text-xs text-white flex items-center justify-center">
+                      {unreadCount}
+                    </span>
+                  )}
+                </button>
+                
+                {showNotifications && (
+                  <div className="absolute right-0 mt-2 w-80 bg-gray-900 rounded-xl shadow-lg border border-gray-800 z-10">
+                    <div className="p-4 border-b border-gray-800 flex justify-between items-center">
+                      <h3 className="text-white font-medium">Notifications</h3>
+                      {unreadCount > 0 && (
+                        <button
+                          onClick={markAllAsRead}
+                          className="text-xs text-blue-400 hover:text-blue-300"
+                        >
+                          Tout marquer comme lu
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-60 overflow-y-auto">
+                      {notifications.length > 0 ? (
+                        notifications.map((notification) => (
+                          <div
+                            key={notification.id}
+                            className={`p-4 hover:bg-gray-800 border-b border-gray-800 last:border-b-0 ${!notification.read ? 'bg-gray-800' : ''}`}
+                          >
+                            <div className="flex justify-between">
+                              <p className="text-sm font-medium text-white">{notification.title}</p>
+                              <button
+                                onClick={() => markAsRead(notification.id)}
+                                className="text-xs text-gray-400 hover:text-white"
+                              >
+                                {!notification.read && 'Marquer comme lu'}
+                              </button>
+                            </div>
+                            <p className="text-xs text-gray-300 mt-1">{notification.message}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {new Date(notification.created_at).toLocaleString()}
+                            </p>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="p-4 text-sm text-gray-400">Aucune notification</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+              
+              {/* Profile Menu */}
+              {profile && (
+                <ProfileMenu 
+                  profile={profile}
+                  onSignOut={handleSignOut}
+                  onProfileUpdate={handleProfileUpdate}
+                />
+              )}
+            </div>
           </div>
+
+          {/* Message d'alerte pour entreprise en attente de validation */}
+          {profile && profile.status === 'pending_company_validation' && (
+            <div className="bg-amber-500 bg-opacity-20 border border-amber-400 text-amber-300 px-4 py-3 rounded-md">
+              <p className="font-semibold">Entreprise en attente de validation</p>
+              <p>Votre entreprise n'est pas encore référencée dans notre système. Un administrateur a été prévenu et s'occupe de la validation de votre compte. Certaines fonctionnalités peuvent être limitées en attendant.</p>
+            </div>
+          )}
 
           {/* Main Content */}
           {profile ? (
@@ -339,14 +510,22 @@ export const StudentDashboard = () => {
                       training={training}
                       refreshTrigger={refreshTrigger}
                       onDocumentOpen={() => {
-                        console.log('onDocumentOpen called - hiding timeline');
                         setShowingDocument(true);
                       }}
                       onDocumentClose={() => {
-                        console.log('onDocumentClose called - showing timeline');
                         setShowingDocument(false);
+                        setRefreshTrigger(prev => prev + 1);
                       }}
                     />
+                  )}
+                  
+                  {/* Container pour afficher les documents */}
+                  {showingDocument && (
+                    <div>
+                      <div id="training-agreement-portal" className="w-full"></div>
+                      <div id="attendance-sheet-portal" className="w-full"></div>
+                      <div id="completion-certificate-portal" className="w-full"></div>
+                    </div>
                   )}
                   
                   {/* Questionnaire List */}
@@ -381,6 +560,7 @@ export const StudentDashboard = () => {
             setRefreshTrigger(prev => prev + 1);
           }} 
           onSubmitSuccess={handleProfileUpdate}
+          companyStatus={companyStatus}
         />
       )}
 

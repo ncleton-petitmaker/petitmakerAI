@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test d'affichage des signatures - ROUGE</title>
+    <script type="module" src="/src/main.tsx"></script>
+    <style>
+        .debug-border {
+            border: 2px solid red;
+        }
+        
+        .signature-container {
+            border: 3px solid #ff0000;
+            height: 120px;
+            position: relative;
+            margin-top: 10px;
+            background-color: #fff0f0;
+        }
+        
+        .signature-placeholder {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            height: 100%;
+            background-color: #ffeeee;
+        }
+
+        button {
+            background-color: #ff0000 !important;
+            border-color: #990000 !important;
+        }
+
+        h1, h2, h3 {
+            color: #ff0000 !important;
+        }
+    </style>
+</head>
+<body style="background-color: #fff8f8;">
+    <div id="root">
+        <div class="container mx-auto px-4 py-8">
+            <h1 class="text-2xl font-bold mb-6" style="color: #ff0000; text-align: center;">
+                TEST ROUGE - Vérification d'affichage des signatures
+            </h1>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Section de test pour la signature du stagiaire -->
+                <div class="border p-4 rounded" style="border-color: #ff0000;">
+                    <h2 class="text-xl font-semibold mb-4">Pour le stagiaire</h2>
+                    <p class="mb-2">Nom : Jean Dupont</p>
+                    
+                    <div id="participant-signature-container" 
+                         class="signature-container" 
+                         data-signature-container="participant"
+                         data-signature-type="participant">
+                        <div class="signature-placeholder">
+                            <p class="text-red-600 italic">Signature en attente - ROUGE</p>
+                        </div>
+                    </div>
+                    
+                    <button id="loadSignatureBtn" class="mt-4 bg-red-600 text-white px-4 py-2 rounded">
+                        Charger la signature
+                    </button>
+                </div>
+                
+                <!-- Section de test pour la signature du formateur -->
+                <div class="border p-4 rounded" style="border-color: #ff0000;">
+                    <h2 class="text-xl font-semibold mb-4">Pour l'organisme de formation</h2>
+                    <p class="mb-2">Nom et qualité du signataire</p>
+                    
+                    <div id="trainer-signature-container" 
+                         class="signature-container" 
+                         data-signature-container="trainer"
+                         data-signature-type="trainer">
+                        <div class="signature-placeholder">
+                            <p class="text-red-600 italic">Signature en attente - ROUGE</p>
+                        </div>
+                    </div>
+                    
+                    <button id="loadTrainerSignatureBtn" class="mt-4 bg-red-600 text-white px-4 py-2 rounded">
+                        Charger la signature
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Section de debug -->
+            <div class="mt-10 p-4 border border-red-500 rounded bg-red-50">
+                <h3 class="text-lg font-semibold mb-2">Informations de débogage</h3>
+                <pre id="debugInfo" class="whitespace-pre-wrap bg-white p-2 border border-red-300"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { addCacheBuster, isValidImageUrl, normalizeSupabaseUrl, getAntiCacheSignatureUrl } from '/src/utils/SignatureUtils.ts';
+        
+        // URL de test pour les signatures
+        const SAMPLE_SIGNATURE_URL = 'https://placehold.co/400x200/ff0000/ffffff?text=Signature+Test+ROUGE';
+        const SAMPLE_TRAINER_SIGNATURE_URL = 'https://placehold.co/400x200/ff0000/ffffff?text=Signature+Formateur+ROUGE';
+        
+        // Fonction pour ajouter des logs au débogage
+        function log(message) {
+            const debugInfo = document.getElementById('debugInfo');
+            debugInfo.textContent += message + '\n';
+            console.log(message);
+        }
+        
+        // Fonction de diagnostic pour analyser l'état des conteneurs de signature
+        function diagnoseSignatureContainers() {
+            log('🔴 [DIAGNOSTIC ROUGE] Analyse des conteneurs de signature...');
+            
+            // Recherche de tous les conteneurs potentiels
+            const allElements = document.querySelectorAll('*');
+            log(`🔴 [DIAGNOSTIC ROUGE] ${allElements.length} éléments DOM au total`);
+            
+            // Recherche par attributs data-*
+            const dataContainers = document.querySelectorAll('[data-signature-container], [data-signature-type]');
+            log(`🔴 [DIAGNOSTIC ROUGE] ${dataContainers.length} conteneurs trouvés via attributs data-*`);
+            dataContainers.forEach((el, i) => {
+                log(`🔴 [DIAGNOSTIC ROUGE] Conteneur #${i+1}: id=${el.id}, type=${el.dataset.signatureContainer || el.dataset.signatureType}`);
+            });
+            
+            // Recherche par bordure (méthode visuelle)
+            const borderElements = Array.from(document.querySelectorAll('*')).filter(el => 
+                el.style && el.style.border || 
+                (el.className && el.className.includes('border'))
+            );
+            log(`🔴 [DIAGNOSTIC ROUGE] ${borderElements.length} éléments avec bordure trouvés`);
+            
+            // Comptage des images de signature
+            const signatureImages = document.querySelectorAll('[data-signature-image]');
+            log(`🔴 [DIAGNOSTIC ROUGE] ${signatureImages.length} images de signature trouvées`);
+            
+            return {
+                totalElements: allElements.length,
+                dataContainers: dataContainers.length,
+                borderElements: borderElements.length,
+                signatureImages: signatureImages.length
+            };
+        }
+        
+        // Attendre que le DOM soit chargé
+        document.addEventListener('DOMContentLoaded', () => {
+            log('🔴 [MODIFICATION ROUGE] Page de test des signatures chargée');
+            
+            // Exécuter un diagnostic initial
+            diagnoseSignatureContainers();
+            
+            // Bouton pour charger la signature du participant
+            const loadSignatureBtn = document.getElementById('loadSignatureBtn');
+            loadSignatureBtn.addEventListener('click', () => {
+                log('🔴 [MODIFICATION ROUGE] Chargement de la signature du participant...');
+                
+                // Utiliser la fonction de préchargement de signatures
+                const success = SignatureUtils.preloadSignatureImage(
+                    SAMPLE_SIGNATURE_URL,
+                    'participant',
+                    document.body
+                );
+                
+                log(`🔴 [MODIFICATION ROUGE] Résultat du chargement: ${success ? 'Succès' : 'Échec'}`);
+                
+                // Exécuter un diagnostic après chargement
+                setTimeout(() => {
+                    log('🔴 [DIAGNOSTIC ROUGE] État après chargement de la signature:');
+                    diagnoseSignatureContainers();
+                }, 500);
+            });
+            
+            // Bouton pour charger la signature du formateur
+            const loadTrainerSignatureBtn = document.getElementById('loadTrainerSignatureBtn');
+            loadTrainerSignatureBtn.addEventListener('click', () => {
+                log('🔴 [MODIFICATION ROUGE] Chargement de la signature du formateur...');
+                
+                // Utiliser la fonction de préchargement de signatures
+                const success = SignatureUtils.preloadSignatureImage(
+                    SAMPLE_TRAINER_SIGNATURE_URL,
+                    'trainer',
+                    document.body
+                );
+                
+                log(`🔴 [MODIFICATION ROUGE] Résultat du chargement: ${success ? 'Succès' : 'Échec'}`);
+            });
+        });
+    </script>
+</body>
+</html> 

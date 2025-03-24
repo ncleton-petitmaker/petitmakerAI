@@ -1,0 +1,1187 @@
+/**
+ * Module d'utilitaires pour la gestion des signatures dans les documents
+ * 
+ * Ce module fournit des fonctions pour:
+ * - Nettoyer les sections de signature indésirables
+ * - Configurer les conteneurs de signature
+ * - Précharger les images de signature
+ * - Vérifier la validité des URLs de signature
+ */
+
+import { supabase } from '../lib/supabase';
+
+// Types de signature standardisés
+export type SignatureType = 'participant' | 'stagiaire' | 'company' | 'trainer' | 'representative';
+
+/**
+ * Vérifie si l'URL fournie est une URL d'image valide
+ */
+export const isValidImageUrl = (url: string | null): boolean => {
+  if (!url) return false;
+  
+  try {
+    const parsedUrl = new URL(url);
+    const path = parsedUrl.pathname.toLowerCase();
+    return path.endsWith('.png') || path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.gif') || path.endsWith('.webp');
+  } catch (e) {
+    return false;
+  }
+};
+
+/**
+ * Ajoute un anti-cache à une URL d'image pour forcer son rechargement
+ * Version améliorée avec nettoyage préalable de l'URL et support de plusieurs stratégies
+ */
+export const addCacheBuster = (url: string | null, strategy: 'timestamp' | 'random' | 'both' = 'both'): string => {
+  if (!url) return '';
+  
+  try {
+    // Nettoyer l'URL pour enlever tout paramètre existant
+    const baseUrl = url.split('?')[0];
+    
+    // Ajouter les paramètres anti-cache selon la stratégie choisie
+    if (strategy === 'timestamp' || strategy === 'both') {
+      return `${baseUrl}?t=${Date.now()}`;
+    } else if (strategy === 'random') {
+      return `${baseUrl}?r=${Math.random().toString(36).substring(2, 15)}`;
+    } else {
+      // Par défaut, utiliser les deux
+      return `${baseUrl}?t=${Date.now()}&r=${Math.random().toString(36).substring(2, 15)}`;
+    }
+  } catch (e) {
+    // En cas d'erreur, retourner l'URL originale
+    console.error('Erreur lors de l\'ajout d\'anti-cache:', e);
+    return url;
+  }
+};
+
+/**
+ * Vérifie qu'un fichier de signature existe et est accessible
+ * Cette fonction effectue plusieurs tentatives avec différentes méthodes
+ */
+export const verifySignatureFile = async (url: string | null): Promise<{
+  exists: boolean;
+  url: string | null;
+  status?: number;
+  statusText?: string;
+  message?: string;
+}> => {
+  if (!url) {
+    return { exists: false, url: null, message: 'URL non fournie' };
+  }
+  
+  try {
+    console.log('🔍 [SIGNATURE] Vérification de l\'existence du fichier:', url);
+    
+    // Nettoyer l'URL (enlever les paramètres anti-cache existants)
+    const cleanUrl = url.split('?')[0];
+    
+    // Première approche: requête HTTP directe
+    try {
+      const response = await fetch(cleanUrl, {
+        method: 'HEAD',
+        cache: 'no-store',
+        headers: {
+          'Pragma': 'no-cache',
+          'Cache-Control': 'no-cache'
+        }
+      });
+      
+      console.log('🔍 [SIGNATURE] Résultat de la vérification HTTP:', {
+        status: response.status,
+        statusText: response.statusText,
+        ok: response.ok,
+        headers: Object.fromEntries([...response.headers])
+      });
+      
+      // Si le fichier existe
+      if (response.ok) {
+        return {
+          exists: true,
+          url: cleanUrl,
+          status: response.status,
+          statusText: response.statusText,
+          message: 'Fichier accessible via HTTP'
+        };
+      }
+      
+      // Si le fichier n'existe pas
+      if (response.status === 404) {
+        return {
+          exists: false,
+          url: cleanUrl,
+          status: response.status,
+          statusText: response.statusText,
+          message: 'Fichier non trouvé (HTTP 404)'
+        };
+      }
+    } catch (fetchError) {
+      console.error('🔍 [SIGNATURE] Erreur lors de la vérification HTTP:', fetchError);
+    }
+    
+    // Deuxième approche: API Supabase pour vérifier dans le bucket
+    try {
+      // Extraire le nom du fichier de l'URL
+      const urlObj = new URL(cleanUrl);
+      const pathParts = urlObj.pathname.split('/');
+      const filename = pathParts[pathParts.length - 1];
+      
+      if (!filename) {
+        return {
+          exists: false, 
+          url: cleanUrl,
+          message: 'Impossible d\'extraire le nom du fichier de l\'URL'
+        };
+      }
+      
+      // Vérifier si le fichier existe via Supabase Storage API
+      const { data, error } = await supabase.storage
+        .from('signatures')
+        .list('', { 
+          limit: 100,
+          sortBy: { column: 'name', order: 'desc' }
+        });
+      
+      if (error) {
+        console.error('🔍 [SIGNATURE] Erreur lors de la liste des fichiers:', error);
+        return {
+          exists: false,
+          url: cleanUrl,
+          message: `Erreur Supabase: ${error.message}`
+        };
+      }
+      
+      const fileExists = data.some(f => f.name === filename);
+      if (fileExists) {
+        return {
+          exists: true,
+          url: cleanUrl,
+          message: 'Fichier trouvé dans le bucket Supabase'
+        };
+      }
+    } catch (supabaseError) {
+      console.error('🔍 [SIGNATURE] Erreur lors de la vérification Supabase:', supabaseError);
+    }
+    
+    // Par défaut, présumer que le fichier n'existe pas
+    return {
+      exists: false,
+      url: cleanUrl,
+      message: 'Fichier non trouvé après plusieurs tentatives'
+    };
+  } catch (error) {
+    console.error('🔍 [SIGNATURE] Exception lors de la vérification du fichier:', error);
+    return {
+      exists: false,
+      url: url,
+      message: `Exception: ${error instanceof Error ? error.message : 'Erreur inconnue'}`
+    };
+  }
+};
+
+/**
+ * Vérifie si une URL est une URL Supabase pointant vers un fichier de signature
+ * @param url L'URL à vérifier
+ * @returns Vrai si c'est une URL Supabase de signature
+ */
+export const isSupabaseSignatureUrl = (url: string | null | undefined): boolean => {
+  if (!url) return false;
+  return url.includes('supabase.co/storage/v1/object/public/signatures/');
+};
+
+/**
+ * Crée une URL de fallback pour une signature
+ * Utilisé quand l'URL de signature originale ne peut pas être chargée
+ * 
+ * @param type Le type de signature (participant, representative, trainer)
+ * @returns Une URL vers une image générique de signature
+ */
+export const createSignatureFallbackUrl = (type: 'participant' | 'representative' | 'trainer'): string => {
+  // Utilise des images statiques hébergées dans le dossier public
+  return `/images/signatures/${type}_signature_placeholder.png`;
+};
+
+/**
+ * Charge une image avec un mécanisme de retry
+ * @param url L'URL de l'image à charger
+ * @param retries Nombre de tentatives (défaut: 3)
+ * @param delay Délai initial entre les tentatives en ms (défaut: 1000)
+ * @returns Une promesse qui se résout avec une réponse fetch si l'image est chargée
+ */
+export const loadImageWithRetry = async (
+  url: string, 
+  retries = 3, 
+  delay = 1000
+): Promise<Response> => {
+  let lastError: Error | null = null;
+  
+  // Normaliser l'URL si c'est une URL Supabase
+  let normalizedUrl = url;
+  if (isSupabaseSignatureUrl(url)) {
+    normalizedUrl = normalizeSupabaseUrl(url) || url;
+  }
+  
+  // Ajouter un cache buster à l'URL
+  const cacheBustedUrl = addCacheBuster(normalizedUrl);
+  console.log(`🔍 [DEBUG] Tentative de chargement d'image avec retry: ${cacheBustedUrl}`);
+  
+  for (let i = 0; i < retries; i++) {
+    try {
+      // Utilisation de fetch avec mode no-cors pour éviter les erreurs CORS
+      const response = await fetch(cacheBustedUrl, { 
+        method: 'GET',
+        mode: 'no-cors',
+        cache: 'no-cache',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
+        }
+      });
+      
+      console.log(`🔍 [DEBUG] Tentative ${i + 1}/${retries} - Statut: ${response.status}`);
+      
+      if (response.ok || response.type === 'opaque') {
+        console.log(`🔍 [DEBUG] Image chargée avec succès (tentative ${i + 1})`);
+        return response;
+      }
+    } catch (error) {
+      lastError = error as Error;
+      console.error(`🔍 [DEBUG] Erreur lors de la tentative ${i + 1}/${retries}:`, error);
+    }
+    
+    // Attendre un délai progressif avant de réessayer (délai exponentiel)
+    const waitTime = delay * Math.pow(2, i);
+    console.log(`🔍 [DEBUG] Attente de ${waitTime}ms avant nouvelle tentative...`);
+    await new Promise(resolve => setTimeout(resolve, waitTime));
+  }
+  
+  // Si on arrive ici, toutes les tentatives ont échoué
+  throw lastError || new Error(`Impossible de charger l'image après ${retries} tentatives`);
+};
+
+/**
+ * Précharge plusieurs images en parallèle
+ * @param urls Liste des URLs à précharger
+ * @returns Promise qui se résout quand toutes les images sont chargées ou ont échoué
+ */
+export const preloadImages = async (urls: (string | null | undefined)[]): Promise<Map<string, boolean>> => {
+  const results = new Map<string, boolean>();
+  const filteredUrls = urls.filter((url): url is string => !!url);
+  
+  if (filteredUrls.length === 0) return results;
+  
+  console.log(`🔍 [DEBUG] Préchargement de ${filteredUrls.length} images...`);
+  
+  await Promise.allSettled(
+    filteredUrls.map(async (url) => {
+      try {
+        if (isSupabaseSignatureUrl(url)) {
+          // Pour les URLs Supabase, utiliser le mécanisme de retry
+          await loadImageWithRetry(url);
+          results.set(url, true);
+        } else {
+          // Pour les autres URLs, utiliser la méthode standard
+          await new Promise<void>((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+              results.set(url, true);
+              resolve();
+            };
+            img.onerror = () => {
+              results.set(url, false);
+              reject(new Error(`Échec du chargement de ${url}`));
+            };
+            img.src = addCacheBuster(url);
+          });
+        }
+      } catch (error) {
+        console.error(`🔍 [DEBUG] Erreur lors du préchargement de ${url}:`, error);
+        results.set(url, false);
+      }
+    })
+  );
+  
+  const successCount = Array.from(results.values()).filter(Boolean).length;
+  console.log(`🔍 [DEBUG] Préchargement terminé: ${successCount}/${filteredUrls.length} images chargées avec succès`);
+  
+  return results;
+};
+
+/**
+ * Normalise une URL Supabase pour éviter les erreurs 400 (version synchrone)
+ * Cette fonction est particulièrement utile pour les URLs de signatures qui peuvent
+ * avoir une structure complexe de dossiers qui cause des problèmes.
+ * 
+ * @param url L'URL Supabase à normaliser
+ * @returns L'URL normalisée
+ */
+export const normalizeSupabaseUrl = (url: string | null | undefined): string | null | undefined => {
+  if (!url) return url;
+  
+  // Si ce n'est pas une URL Supabase pour les signatures, retourner telle quelle
+  if (!isSupabaseSignatureUrl(url)) return url;
+  
+  try {
+    console.log('🔥 [DEBUG] Normalisation d\'URL Supabase (sync):', url);
+    
+    // Analyse et extraction des composants d'URL
+    const urlObj = new URL(url);
+    const host = urlObj.origin;
+    const pathname = urlObj.pathname;
+    
+    console.log('🔥 [DEBUG] Décomposition de l\'URL:');
+    console.log('🔥 [DEBUG] - Hôte:', host);
+    console.log('🔥 [DEBUG] - Chemin complet:', pathname);
+    
+    // Examiner la structure du chemin
+    const pathParts = pathname.split('/');
+    console.log('🔥 [DEBUG] - Parties du chemin:', pathParts);
+    
+    // Extraire uniquement le nom du fichier (dernière partie du chemin)
+    const lastPart = pathParts[pathParts.length - 1].split('?')[0]; // Sans paramètres
+    console.log('🔥 [DEBUG] - Nom de fichier:', lastPart);
+    
+    // 1. Approche basée sur les patterns: Recherche de patterns connus dans le nom de fichier
+    const signatureMatch = lastPart.match(/(participant|representative|trainer)_(\w+)_(\d+)\.png/);
+    
+    if (signatureMatch) {
+      // Extraire les parties significatives
+      const [_, signerType, docType, timestamp] = signatureMatch;
+      console.log(`🔥 [DEBUG] Signature identifiée: type=${signerType}, docType=${docType}, timestamp=${timestamp}`);
+      
+      // STRATÉGIE 1: La structure de base originale que nous attendons (simple)
+      const simpleUrl = `${host}/storage/v1/object/public/signatures/${signerType}_${docType}_${timestamp}.png`;
+      console.log('🔥 [DEBUG] URL simplifiée (stratégie 1):', simpleUrl);
+      
+      // STRATÉGIE 2: Structure avec dossiers UUID et sous-dossier signatures
+      // Cela correspond à ce qu'on voit dans les logs d'erreur
+      // Note: Cette structure est hypothétique, dépend de votre configuration réelle
+      if (pathname.includes('/signatures/signatures/')) {
+        console.log('🔥 [DEBUG] Structure avec duplication de signatures détectée');
+        
+        // Trouver la position du dernier dossier "signatures"
+        const lastSignaturesPos = pathname.lastIndexOf('/signatures/');
+        if (lastSignaturesPos !== -1) {
+          const prefix = pathname.substring(0, lastSignaturesPos);
+          const complexUrl = `${host}${prefix}/signatures/${signerType}_${docType}_${timestamp}.png`;
+          console.log('🔥 [DEBUG] URL complexe avec structure de dossiers (stratégie 2):', complexUrl);
+          return complexUrl;
+        }
+      }
+      
+      // STRATÉGIE 3: Si l'URL contient des UUID, essayer de préserver la structure
+      const uuidPattern = /\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\//i;
+      if (uuidPattern.test(pathname)) {
+        console.log('🔥 [DEBUG] Structure avec UUID détectée');
+        
+        // Récupérer tous les segments UUID
+        const uuidSegments: string[] = [];
+        pathParts.forEach(part => {
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(part)) {
+            uuidSegments.push(part);
+          }
+        });
+        
+        if (uuidSegments.length > 0) {
+          console.log('🔥 [DEBUG] Segments UUID trouvés:', uuidSegments);
+          
+          // Construire une URL avec la structure UUID mais le nom de fichier simplifié
+          let uuidStructure = '/storage/v1/object/public/signatures';
+          uuidSegments.forEach(uuid => {
+            uuidStructure += `/${uuid}`;
+          });
+          
+          const uuidUrl = `${host}${uuidStructure}/${signerType}_${docType}_${timestamp}.png`;
+          console.log('🔥 [DEBUG] URL avec structure UUID préservée (stratégie 3):', uuidUrl);
+          return uuidUrl;
+        }
+      }
+      
+      // Par défaut, retourner l'URL simple
+      return simpleUrl;
+    }
+    
+    // Si nous n'avons pas pu extraire un identifiant temporel, essayer avec le nom complet
+    const fullPath = `/storage/v1/object/public/signatures/${lastPart}`;
+    const fullUrl = `${host}${fullPath}`;
+    
+    console.log('🔥 [DEBUG] URL avec nom complet (aucun pattern reconnu):', fullUrl);
+    return fullUrl;
+    
+  } catch (error) {
+    console.error('🔥 [DEBUG] Erreur lors de la normalisation de l\'URL:', error, url);
+    return url;
+  }
+};
+
+/**
+ * Normalise une URL Supabase pour éviter les erreurs 400 (version asynchrone)
+ * Cette fonction est particulièrement utile pour les URLs de signatures qui peuvent
+ * avoir une structure complexe de dossiers qui cause des problèmes.
+ * 
+ * @param url L'URL Supabase à normaliser
+ * @param supabaseInstance Instance de Supabase (optionnel, pour diagnostic avancé)
+ * @returns Promise avec l'URL normalisée
+ */
+export const normalizeSupabaseUrlAsync = async (
+  url: string | null | undefined, 
+  supabaseInstance?: any
+): Promise<string | null | undefined> => {
+  if (!url) return url;
+  
+  // Si ce n'est pas une URL Supabase pour les signatures, retourner telle quelle
+  if (!isSupabaseSignatureUrl(url)) return url;
+  
+  try {
+    console.log('🔥 [DEBUG] Normalisation d\'URL Supabase (async):', url);
+    
+    // Si l'instance Supabase est fournie, utiliser le diagnostic avancé
+    if (supabaseInstance) {
+      const diagnostic = await diagnoseSignatureUrl(supabaseInstance, url);
+      
+      if (diagnostic.exists && diagnostic.correctUrl) {
+        console.log('🔥 [DEBUG] URL correcte trouvée via diagnostic:', diagnostic.correctUrl);
+        return diagnostic.correctUrl;
+      }
+    }
+    
+    // Si le diagnostic n'a pas fonctionné, utiliser la version synchrone
+    return normalizeSupabaseUrl(url);
+    
+  } catch (error) {
+    console.error('🔥 [DEBUG] Erreur lors de la normalisation asynchrone de l\'URL:', error, url);
+    return url;
+  }
+};
+
+// Définir l'interface pour les fichiers Supabase
+interface SupabaseStorageFile {
+  name: string;
+  id: string;
+  created_at: string;
+  updated_at: string;
+  last_accessed_at: string;
+  metadata: any;
+  size: number;
+}
+
+/**
+ * Recherche une signature dans le bucket Supabase à partir de son identifiant timestamp
+ * @param supabaseInstance Instance de Supabase (pour éviter les problèmes de référence circulaire)
+ * @param signerType Type de signataire (participant, representative, trainer)
+ * @param timestamp Timestamp unique de la signature
+ * @returns Promise avec l'URL complète du fichier trouvé, ou null si non trouvé
+ */
+export const findRealSignatureFile = async (
+  supabaseInstance: any,
+  signerType: string,
+  timestamp: string
+): Promise<string | null> => {
+  try {
+    console.log(`🔍 [DEBUG] Recherche du fichier de signature: type=${signerType}, timestamp=${timestamp}`);
+    
+    // Lister les fichiers du bucket "signatures"
+    const { data: files, error } = await supabaseInstance.storage
+      .from('signatures')
+      .list('', { 
+        limit: 100,
+        sortBy: { column: 'created_at', order: 'desc' }
+      });
+    
+    if (error) {
+      console.error('🔍 [DEBUG] Erreur lors de la liste des fichiers signatures:', error);
+      return null;
+    }
+    
+    if (!files || files.length === 0) {
+      console.log('🔍 [DEBUG] Aucun fichier dans le bucket signatures');
+      return null;
+    }
+    
+    console.log(`🔍 [DEBUG] ${files.length} fichiers trouvés dans le bucket signatures`);
+    
+    // Rechercher un fichier qui contient le type de signataire et le timestamp
+    const matchingFile = files.find((file: SupabaseStorageFile) => 
+      file.name.includes(signerType) && 
+      file.name.includes(timestamp) && 
+      file.name.endsWith('.png')
+    );
+    
+    if (matchingFile) {
+      console.log(`🔍 [DEBUG] Fichier correspondant trouvé: ${matchingFile.name}`);
+      
+      // Générer l'URL publique correcte avec le vrai nom de fichier
+      const { data: urlData } = await supabaseInstance.storage
+        .from('signatures')
+        .getPublicUrl(matchingFile.name);
+      
+      if (urlData && urlData.publicUrl) {
+        console.log(`🔍 [DEBUG] URL publique générée: ${urlData.publicUrl}`);
+        return urlData.publicUrl;
+      }
+    }
+    
+    console.log(`🔍 [DEBUG] Aucun fichier correspondant pour: type=${signerType}, timestamp=${timestamp}`);
+    return null;
+  } catch (error) {
+    console.error('🔍 [DEBUG] Erreur lors de la recherche du fichier de signature:', error);
+    return null;
+  }
+};
+
+/**
+ * Vérifie directement si un fichier existe dans le bucket Supabase
+ * @param supabaseInstance Instance de Supabase
+ * @param signatureUrl URL de la signature à vérifier
+ * @returns Un objet contenant le résultat et des informations de diagnostic
+ */
+export const diagnoseSignatureUrl = async (
+  supabaseInstance: any,
+  signatureUrl: string | null
+): Promise<{exists: boolean; details: string; path?: string; actualFiles?: string[]; correctUrl?: string; rawResponse?: any}> => {
+  if (!signatureUrl) {
+    return {
+      exists: false,
+      details: "URL de signature manquante"
+    };
+  }
+
+  try {
+    console.log('🧨 [DIAGNOSTIC] Diagnostic complet de l\'URL de signature:', signatureUrl);
+    
+    // Faire une requête HEAD directe pour voir la réponse exacte
+    try {
+      const response = await fetch(signatureUrl, { 
+        method: 'HEAD',
+        cache: 'no-store' 
+      });
+      
+      console.log('🧨 [DIAGNOSTIC] Statut de la réponse HTTP:', response.status);
+      console.log('🧨 [DIAGNOSTIC] Type de réponse:', response.type);
+      
+      // Récupérer tous les headers
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+      console.log('🧨 [DIAGNOSTIC] Headers de réponse:', headers);
+      
+      // Si c'est une erreur 400, essayer de faire un GET pour récupérer le corps
+      if (response.status === 400) {
+        try {
+          const getResponse = await fetch(signatureUrl, { method: 'GET' });
+          const responseData = await getResponse.text();
+          console.log('🧨 [DIAGNOSTIC] Contenu de la réponse 400:', responseData);
+        } catch (e) {
+          console.error('🧨 [DIAGNOSTIC] Impossible de récupérer le contenu de l\'erreur:', e);
+        }
+      }
+    } catch (fetchError) {
+      console.error('🧨 [DIAGNOSTIC] Erreur lors du fetch direct:', fetchError);
+    }
+    
+    // Extraire le nom du fichier attendu de l'URL
+    const url = new URL(signatureUrl);
+    const pathParts = url.pathname.split('/');
+    const expectedFileName = pathParts[pathParts.length - 1].split('?')[0];
+    
+    console.log('🧨 [DIAGNOSTIC] Analyse du chemin:');
+    console.log('🧨 [DIAGNOSTIC] URL complète:', url.toString());
+    console.log('🧨 [DIAGNOSTIC] Hostname:', url.hostname);
+    console.log('🧨 [DIAGNOSTIC] Pathname complet:', url.pathname);
+    console.log('🧨 [DIAGNOSTIC] Parties du chemin:', pathParts);
+    console.log('🧨 [DIAGNOSTIC] Nom de fichier attendu:', expectedFileName);
+    
+    // Décoder les parties de l'URL pour s'assurer qu'il n'y a pas de problème d'encodage
+    const decodedPathname = decodeURIComponent(url.pathname);
+    console.log('🧨 [DIAGNOSTIC] Chemin décodé:', decodedPathname);
+    
+    // Lister TOUS les fichiers du bucket sans filtre pour voir exactement ce qu'il contient
+    const { data: allFiles, error: listAllError } = await supabaseInstance.storage
+      .from('signatures')
+      .list('', { 
+        limit: 100,
+        sortBy: { column: 'created_at', order: 'desc' }
+      });
+    
+    if (listAllError) {
+      console.error('🧨 [DIAGNOSTIC] Erreur lors de la liste des fichiers:', listAllError);
+    } else {
+      console.log('🧨 [DIAGNOSTIC] Contenu COMPLET du bucket signatures:');
+      if (allFiles && allFiles.length > 0) {
+        allFiles.forEach((file: SupabaseStorageFile, index: number) => {
+          console.log(`🧨 [DIAGNOSTIC] Fichier #${index + 1}:`, file.name);
+        });
+      } else {
+        console.log('🧨 [DIAGNOSTIC] Aucun fichier trouvé dans le bucket signatures');
+      }
+    }
+    
+    // Rechercher dans le bucket si le fichier existe avec exactement ce nom
+    const { data: exactMatch, error: exactMatchError } = await supabaseInstance.storage
+      .from('signatures')
+      .list('', {
+        search: expectedFileName
+      });
+    
+    if (exactMatchError) {
+      console.error('🧨 [DIAGNOSTIC] Erreur lors de la recherche exacte:', exactMatchError);
+      return {
+        exists: false,
+        details: `Erreur lors de la recherche: ${exactMatchError.message}`,
+        path: expectedFileName
+      };
+    }
+    
+    if (exactMatch && exactMatch.length > 0) {
+      console.log('🧨 [DIAGNOSTIC] Fichier trouvé avec le nom exact:', exactMatch);
+      
+      // Générer l'URL publique correcte
+      const { data: urlData } = await supabaseInstance.storage
+        .from('signatures')
+        .getPublicUrl(exactMatch[0].name);
+      
+      if (urlData && urlData.publicUrl) {
+        console.log('🧨 [DIAGNOSTIC] URL publique correcte générée:', urlData.publicUrl);
+        return {
+          exists: true,
+          details: "Le fichier existe dans le bucket",
+          path: expectedFileName,
+          correctUrl: urlData.publicUrl
+        };
+      }
+    }
+    
+    // Extraire l'identifiant timestamp et le type de signataire de l'URL
+    let timestamp: string | null = null;
+    let signerType: string | null = null;
+    
+    // Essayer d'extraire le timestamp du nom de fichier
+    const timestampMatch = expectedFileName.match(/_([\d]+)\.png/);
+    if (timestampMatch && timestampMatch[1]) {
+      timestamp = timestampMatch[1];
+      console.log('🧨 [DIAGNOSTIC] Timestamp extrait:', timestamp);
+    }
+    
+    // Essayer d'extraire le type de signataire
+    const signerTypeMatch = expectedFileName.match(/(participant|representative|trainer)_/);
+    if (signerTypeMatch && signerTypeMatch[1]) {
+      signerType = signerTypeMatch[1];
+      console.log('🧨 [DIAGNOSTIC] Type de signataire extrait:', signerType);
+    }
+    
+    // Si nous avons un timestamp et un type de signataire, chercher des fichiers correspondants
+    if (timestamp && signerType) {
+      // Chercher parmi les fichiers récents ceux qui contiennent le timestamp et le type de signataire
+      const matchingFiles = allFiles.filter((file: SupabaseStorageFile) => 
+        file.name.includes(timestamp as string) && 
+        file.name.includes(signerType as string)
+      );
+      
+      if (matchingFiles.length > 0) {
+        console.log('🧨 [DIAGNOSTIC] Fichiers correspondant au timestamp et type trouvés:', matchingFiles);
+        console.log('🧨 [DIAGNOSTIC] Noms des fichiers correspondants:');
+        const fileNames = matchingFiles.map((f: SupabaseStorageFile) => f.name);
+        fileNames.forEach((name: string, index: number) => {
+          console.log(`🧨 [DIAGNOSTIC] Correspondance #${index + 1}:`, name);
+        });
+        
+        // Générer l'URL publique correcte pour le premier fichier correspondant
+        const { data: urlData } = await supabaseInstance.storage
+          .from('signatures')
+          .getPublicUrl(matchingFiles[0].name);
+        
+        if (urlData && urlData.publicUrl) {
+          console.log('🧨 [DIAGNOSTIC] URL publique correcte générée:', urlData.publicUrl);
+          return {
+            exists: true,
+            details: `Fichier correspondant trouvé avec le timestamp ${timestamp} et le type ${signerType}`,
+            path: expectedFileName,
+            actualFiles: fileNames,
+            correctUrl: urlData.publicUrl
+          };
+        }
+      }
+    }
+    
+    // Si nous avons seulement un timestamp, chercher des fichiers correspondants
+    if (timestamp) {
+      const matchingFiles = allFiles.filter((file: SupabaseStorageFile) => 
+        file.name.includes(timestamp as string)
+      );
+      
+      if (matchingFiles.length > 0) {
+        console.log('🧨 [DIAGNOSTIC] Fichiers correspondant au timestamp trouvés:', matchingFiles);
+        const fileNames = matchingFiles.map((f: SupabaseStorageFile) => f.name);
+        
+        // Générer l'URL publique correcte pour le premier fichier correspondant
+        const { data: urlData } = await supabaseInstance.storage
+          .from('signatures')
+          .getPublicUrl(matchingFiles[0].name);
+        
+        if (urlData && urlData.publicUrl) {
+          console.log('🧨 [DIAGNOSTIC] URL publique correcte générée (par timestamp):', urlData.publicUrl);
+          return {
+            exists: true,
+            details: `Fichier correspondant trouvé avec le timestamp ${timestamp}`,
+            path: expectedFileName,
+            actualFiles: fileNames,
+            correctUrl: urlData.publicUrl
+          };
+        }
+      }
+    }
+    
+    // Aucune correspondance trouvée
+    return {
+      exists: false,
+      details: `Le fichier ${expectedFileName} n'existe pas dans le bucket 'signatures'. ${allFiles?.length || 0} fichiers récents listés.`,
+      path: expectedFileName,
+      actualFiles: allFiles?.map((f: SupabaseStorageFile) => f.name) || []
+    };
+    
+  } catch (error) {
+    console.error('🧨 [DIAGNOSTIC] Erreur lors du diagnostic de l\'URL de signature:', error);
+    return {
+      exists: false,
+      details: `Erreur: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+};
+
+/**
+ * Supprime toutes les sections intitulées "Signature du participant" d'un document
+ * en préservant celles qui sont explicitement placées dans les templates unifiés
+ * 
+ * @param container Élément DOM contenant le document
+ * @returns Nombre de sections supprimées
+ */
+export const removeAllParticipantSignatureSections = (container: HTMLElement): number => {
+  if (!container) {
+    console.log('🔍 [DEBUG] removeAllParticipantSignatureSections: Aucun conteneur fourni');
+    return 0;
+  }
+
+  console.log('🔍 [DEBUG] Suppression des sections "Signature du participant" indésirables');
+  let removedCount = 0;
+
+  // Étape 1: Vérifier si on est dans un template unifié
+  const isUnifiedTemplate = container.classList.contains('unified-training-agreement');
+  console.log(`🔍 [DEBUG] Est-ce un template unifié? ${isUnifiedTemplate}`);
+  
+  // Étape 2: Trouver tous les nœuds de texte contenant "Signature du participant"
+  const allTextNodes = getAllTextNodes(container);
+  const signatureNodes = allTextNodes.filter(
+    node => node.textContent && node.textContent.trim() === 'Signature du participant'
+  );
+
+  // Étape 3: Pour chaque occurrence, supprimer la section parente appropriée
+  signatureNodes.forEach(node => {
+    // Vérifier si ce nœud est dans la section "Pour le stagiaire" ou signatures-section
+    let isInProtectedSection = false;
+    let currentNode: Node | null = node;
+    
+    // Remonter jusqu'à 5 niveaux pour chercher un titre ou une classe protégée
+    for (let i = 0; i < 5 && currentNode; i++) {
+      if (currentNode.nodeType === Node.ELEMENT_NODE) {
+        const element = currentNode as HTMLElement;
+        // Vérifier les classes et attributs qui indiquent qu'il s'agit d'une section légitime
+        if (
+          element.classList?.contains('signatures-section') ||
+          element.hasAttribute('data-signature-container') ||
+          element.hasAttribute('data-signature-type')
+        ) {
+          isInProtectedSection = true;
+          break;
+        }
+      }
+      
+      // Si un parent contient le texte "Pour le stagiaire", ne pas supprimer
+      if (currentNode.textContent && (
+          currentNode.textContent.includes('Pour le stagiaire') ||
+          currentNode.textContent.includes('Pour l\'entreprise') ||
+          currentNode.textContent.includes('Pour l\'organisme de formation')
+      )) {
+        isInProtectedSection = true;
+        break;
+      }
+      currentNode = currentNode.parentNode;
+    }
+
+    if (!isInProtectedSection) {
+      // Trouver le parent à supprimer (div, section, etc.)
+      let target = node.parentElement;
+      let foundTarget = false;
+      
+      // Remonter jusqu'à 5 niveaux pour trouver une section ou div
+      for (let i = 0; i < 5 && target; i++) {
+        // Si c'est un élément qui ressemble à une section complète
+        if (
+          target.tagName === 'DIV' || 
+          target.tagName === 'SECTION' ||
+          (target.className && (
+            target.className.includes('signature') ||
+            target.className.includes('mt-') ||
+            target.className.includes('border-t')
+          ))
+        ) {
+          foundTarget = true;
+          break;
+        }
+        target = target.parentElement;
+      }
+
+      if (foundTarget && target) {
+        console.log(`🔍 [DEBUG] Suppression d'une section "Signature du participant": ${target.tagName}`);
+        // Masquer d'abord, puis vider, puis supprimer
+        (target as HTMLElement).style.display = 'none';
+        target.innerHTML = '';
+        if (target.parentElement) {
+          target.parentElement.removeChild(target);
+        }
+        removedCount++;
+      }
+    } else {
+      console.log('🔍 [DEBUG] Section de signature détectée dans une zone protégée, conservation');
+    }
+  });
+
+  // Étape 4: Chercher aussi par attributs data, mais épargner les containers légitimes
+  const dataSignatureElements = container.querySelectorAll('[data-signature-type="participant"]');
+  dataSignatureElements.forEach(element => {
+    // Vérifier si cet élément est dans un conteneur protégé
+    let isInProtectedSection = false;
+    
+    // Vérifier si l'élément lui-même est un conteneur légitime
+    if (element.hasAttribute('data-signature-container')) {
+      isInProtectedSection = true;
+    } else {
+      let currentNode: Node | null = element;
+      
+      // Remonter jusqu'à 5 niveaux pour chercher un conteneur protégé
+      for (let i = 0; i < 5 && currentNode; i++) {
+        if (currentNode.nodeType === Node.ELEMENT_NODE) {
+          const parentElement = currentNode as HTMLElement;
+          if (
+            parentElement.classList?.contains('signatures-section') ||
+            parentElement.textContent?.includes('Pour le stagiaire')
+          ) {
+            isInProtectedSection = true;
+            break;
+          }
+        }
+        currentNode = currentNode.parentNode;
+      }
+    }
+
+    if (!isInProtectedSection) {
+      console.log(`🔍 [DEBUG] Suppression d'un élément avec data-signature-type="participant"`);
+      (element as HTMLElement).style.display = 'none';
+      element.innerHTML = '';
+      element.parentElement?.removeChild(element);
+      removedCount++;
+    } else {
+      console.log('🔍 [DEBUG] Conteneur de signature data-* détecté dans une zone protégée, conservation');
+    }
+  });
+
+  console.log(`🔍 [DEBUG] ${removedCount} sections "Signature du participant" supprimées`);
+  return removedCount;
+};
+
+/**
+ * Configure un conteneur de signature avec les attributs standardisés
+ * 
+ * @param container Élément DOM contenant le document
+ * @param type Type de signature (participant, company, trainer)
+ * @param headerText Texte d'en-tête identifiant la section (ex: "Pour le stagiaire")
+ * @returns Le conteneur de signature configuré ou null si non trouvé
+ */
+export const setupSignatureContainer = (
+  container: HTMLElement, 
+  type: SignatureType, 
+  headerText: string
+): HTMLElement | null => {
+  if (!container) {
+    console.log(`🔍 [DEBUG] setupSignatureContainer: Aucun conteneur fourni pour ${type}`);
+    return null;
+  }
+
+  console.log(`🔍 [DEBUG] Configuration du conteneur de signature pour "${headerText}"`);
+  
+  // Étape 1: Chercher si un conteneur existe déjà avec l'attribut data-*
+  const existingContainers = container.querySelectorAll(`[data-signature-container="${type}"], [data-signature-type="${type}"]`);
+  if (existingContainers.length > 0) {
+    console.log(`🔍 [DEBUG] Conteneur existant trouvé pour ${type}`);
+    return existingContainers[0] as HTMLElement;
+  }
+  
+  // Étape 2: Chercher par texte d'en-tête
+  const textNodes = getAllTextNodes(container);
+  const headerNodes = textNodes.filter(node => 
+    node.textContent && node.textContent.trim() === headerText
+  );
+  
+  if (headerNodes.length === 0) {
+    console.log(`🔍 [DEBUG] Aucun en-tête "${headerText}" trouvé`);
+    return null;
+  }
+  
+  // Prendre le premier en-tête trouvé
+  const headerNode = headerNodes[0];
+  let headerElement = headerNode.parentElement;
+  
+  // Étape 3: Trouver le conteneur de signature proche de l'en-tête
+  let signatureContainer: HTMLElement | null = null;
+  
+  // Remonter jusqu'à 3 niveaux pour trouver un parent commun
+  let commonParent = headerElement;
+  for (let i = 0; i < 3 && commonParent; i++) {
+    // Chercher une div avec une bordure (probablement le conteneur de signature)
+    const potentialContainers = commonParent.querySelectorAll('.border, [style*="border"]');
+    
+    for (const container of potentialContainers) {
+      // Vérifier que c'est une div de taille raisonnable (probablement un cadre de signature)
+      const rect = container.getBoundingClientRect();
+      if (rect.height > 20 && rect.width > 50) {
+        signatureContainer = container as HTMLElement;
+        break;
+      }
+    }
+    
+    if (signatureContainer) break;
+    commonParent = commonParent?.parentElement;
+  }
+  
+  // Si aucun conteneur trouvé, chercher n'importe quelle div qui pourrait convenir
+  if (!signatureContainer && headerElement?.parentElement) {
+    const parentDiv = headerElement.parentElement;
+    const divs = parentDiv.querySelectorAll('div');
+    
+    // Parcourir les divs et prendre la première qui semble appropriée
+    for (const div of divs) {
+      if (div.children.length === 0 || div.textContent?.trim() === '') {
+        signatureContainer = div as HTMLElement;
+        break;
+      }
+    }
+  }
+  
+  // Étape 4: Si un conteneur a été trouvé, le configurer
+  if (signatureContainer) {
+    console.log(`🔍 [DEBUG] Conteneur de signature trouvé et configuré pour ${type}`);
+    
+    // Ajouter les attributs data-* standardisés
+    signatureContainer.setAttribute('data-signature-container', type);
+    signatureContainer.setAttribute('data-signature-type', type);
+    
+    // Ajouter des classes CSS si nécessaire
+    if (!signatureContainer.classList.contains('border')) {
+      signatureContainer.classList.add('border', 'border-gray-300');
+    }
+    
+    if (!signatureContainer.style.height) {
+      signatureContainer.style.height = '100px';
+    }
+    
+    return signatureContainer;
+  }
+  
+  console.log(`🔍 [DEBUG] Aucun conteneur trouvé pour ${type}`);
+  return null;
+};
+
+/**
+ * Précharge une image de signature et l'insère dans le conteneur approprié
+ * 
+ * @param signatureUrl URL de l'image de signature
+ * @param type Type de signature (participant, company, trainer)
+ * @param container Élément DOM contenant le document
+ * @returns true si l'image a été chargée avec succès, false sinon
+ */
+export const preloadSignatureImage = (
+  signatureUrl: string | null | undefined,
+  type: SignatureType,
+  container: HTMLElement = document.body
+): boolean => {
+  if (!signatureUrl) {
+    console.log(`🔍 [DEBUG] preloadSignatureImage: Aucune URL fournie pour ${type}`);
+    return false;
+  }
+
+  console.log(`🔍 [DEBUG] Préchargement de la signature ${type}: ${signatureUrl}`);
+  
+  // Étape 1: Trouver les conteneurs de signature correspondants
+  const signatureContainers = Array.from(container.querySelectorAll(
+    `[data-signature-container="${type}"], [data-signature-type="${type}"]`
+  )) as HTMLElement[];
+  
+  if (signatureContainers.length === 0) {
+    console.log(`🔍 [DEBUG] Aucun conteneur trouvé pour la signature ${type}`);
+    return false;
+  }
+  
+  // Étape 2: Ajouter un timestamp pour éviter le cache
+  const antiCacheUrl = addAntiCacheToUrl(signatureUrl);
+  
+  // Étape 3: Précharger l'image
+  const img = new Image();
+  let loaded = false;
+  
+  img.onload = () => {
+    console.log(`🔍 [DEBUG] Image de signature ${type} chargée avec succès`);
+    loaded = true;
+    
+    // Étape 4: Insérer l'image dans tous les conteneurs trouvés
+    signatureContainers.forEach(container => {
+      // Vider le conteneur
+      container.innerHTML = '';
+      
+      // Créer un wrapper pour centrer l'image
+      const wrapper = document.createElement('div');
+      wrapper.className = 'w-full h-full flex items-center justify-center';
+      wrapper.dataset.signatureWrapper = type;
+      
+      // Créer une copie de l'image pour chaque conteneur
+      const imgCopy = document.createElement('img');
+      imgCopy.src = antiCacheUrl;
+      imgCopy.alt = `Signature ${type}`;
+      imgCopy.className = 'max-h-20 max-w-[95%] object-contain';
+      imgCopy.dataset.signatureImage = type;
+      imgCopy.dataset.signatureSrc = signatureUrl;
+      
+      wrapper.appendChild(imgCopy);
+      container.appendChild(wrapper);
+    });
+  };
+  
+  img.onerror = () => {
+    console.error(`🔍 [ERROR] Échec du chargement de l'image de signature ${type}`);
+    console.log(`🔍 [DEBUG] URL qui a échoué: ${antiCacheUrl}`);
+    
+    // Essayer sans les paramètres anti-cache
+    const retryImg = new Image();
+    retryImg.onload = () => {
+      console.log(`🔍 [DEBUG] Image de signature ${type} chargée avec succès (seconde tentative)`);
+      loaded = true;
+      
+      // Insérer l'image dans tous les conteneurs trouvés
+      signatureContainers.forEach(container => {
+        container.innerHTML = '';
+        
+        const wrapper = document.createElement('div');
+        wrapper.className = 'w-full h-full flex items-center justify-center';
+        wrapper.dataset.signatureWrapper = type;
+        
+        const imgCopy = document.createElement('img');
+        imgCopy.src = signatureUrl;
+        imgCopy.alt = `Signature ${type}`;
+        imgCopy.className = 'max-h-20 max-w-[95%] object-contain';
+        imgCopy.dataset.signatureImage = type;
+        imgCopy.dataset.signatureSrc = signatureUrl;
+        
+        wrapper.appendChild(imgCopy);
+        container.appendChild(wrapper);
+      });
+    };
+    
+    retryImg.onerror = () => {
+      console.error(`🔍 [ERROR] Échec du chargement de l'image de signature ${type} (seconde tentative)`);
+    };
+    
+    retryImg.src = signatureUrl;
+  };
+  
+  img.src = antiCacheUrl;
+  return true;
+};
+
+/**
+ * Vérifie si une URL de signature existe et est accessible
+ * 
+ * @param signatureUrl URL de l'image à vérifier
+ * @returns Promise<boolean> true si l'URL est valide et accessible
+ */
+export const verifySignatureUrl = async (signatureUrl: string | null | undefined): Promise<boolean> => {
+  if (!signatureUrl) return false;
+  
+  try {
+    console.log(`🔍 [DEBUG] Vérification de l'URL de signature: ${signatureUrl}`);
+    
+    // Extraire l'URL de base sans paramètres
+    const baseUrl = signatureUrl.split('?')[0];
+    
+    // Faire une requête HEAD pour vérifier si l'URL est accessible
+    const response = await fetch(baseUrl, { 
+      method: 'HEAD', 
+      cache: 'no-store',
+      credentials: 'omit'
+    });
+    
+    const isValid = response.ok;
+    console.log(`🔍 [DEBUG] URL de signature ${isValid ? 'valide' : 'invalide'}: ${signatureUrl}`);
+    
+    return isValid;
+  } catch (error) {
+    console.error(`🔍 [ERROR] Erreur lors de la vérification de l'URL: ${error}`);
+    return false;
+  }
+};
+
+/**
+ * Ajoute des paramètres anti-cache à une URL
+ * 
+ * @param url URL à modifier
+ * @returns URL modifiée avec des paramètres anti-cache
+ */
+export const addAntiCacheToUrl = (url: string | null | undefined): string => {
+  if (!url) return '';
+  
+  // Si l'URL contient déjà des paramètres anti-cache, la retourner telle quelle
+  if (url.includes('nocache=') || url.includes('t=')) {
+    return url;
+  }
+  
+  // Ajouter des paramètres anti-cache
+  const separator = url.includes('?') ? '&' : '?';
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 8);
+  
+  return `${url}${separator}t=${timestamp}&r=${random}&nocache=true`;
+};
+
+/**
+ * Récupère tous les nœuds de texte d'un élément DOM
+ * 
+ * @param element Élément DOM à parcourir
+ * @returns Tableau de nœuds de texte
+ */
+const getAllTextNodes = (element: Node): Text[] => {
+  const textNodes: Text[] = [];
+  
+  // Fonction récursive pour parcourir l'arbre DOM
+  const traverse = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
+      textNodes.push(node as Text);
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      for (let i = 0; i < node.childNodes.length; i++) {
+        traverse(node.childNodes[i]);
+      }
+    }
+  };
+  
+  traverse(element);
+  return textNodes;
+};
+
+// Exporter un objet pour faciliter l'importation
+export const SignatureUtils = {
+  removeAllParticipantSignatureSections,
+  setupSignatureContainer,
+  preloadSignatureImage,
+  verifySignatureUrl,
+  addAntiCacheToUrl,
+};
+
+export default SignatureUtils; 

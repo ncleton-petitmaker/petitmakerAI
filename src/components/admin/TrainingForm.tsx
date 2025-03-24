@@ -1360,8 +1360,13 @@ Vous vérifiez systématiquement la cohérence mathématique des durées avant d
       // Extraire les métadonnées du formData de manière sécurisée
       const { objectives, evaluation_methods, tracking_methods, pedagogical_methods, material_elements, ...formDataWithoutMetadata } = formData;
       
+      // Créer une copie de l'objet training sans la propriété learners
+      // Utiliser une assertion de type pour éviter l'erreur TypeScript
+      const trainingData = training as any;
+      const { learners, ...trainingWithoutLearners } = trainingData;
+      
       const duplicatedTraining: Training = {
-        ...training, // Utiliser le training original comme base
+        ...trainingWithoutLearners, // Utiliser le training original comme base mais sans les learners
         ...formDataWithoutMetadata,
         // Ajouter les propriétés obligatoires pour satisfaire le type Training
         id: training.id, // Garder l'ID original pour référence

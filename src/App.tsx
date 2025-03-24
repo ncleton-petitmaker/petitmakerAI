@@ -15,6 +15,7 @@ import { supabase } from './lib/supabase';
 import { User } from '@supabase/supabase-js';
 import { LearnerDetail } from './components/admin/LearnerDetail';
 import { CompanyDetail } from './components/admin/CompanyDetail';
+import SignatureMigrationPage from './pages/SignatureMigrationPage';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -101,6 +102,14 @@ function App() {
         <Route path="/admin/learners/:id" element={<Admin />} />
         <Route path="/admin/companies/:id" element={<Admin />} />
         <Route path="/admin/trainers/:id" element={<Admin />} />
+        <Route 
+          path="/admin/signatures" 
+          element={
+            <ProtectedRoute>
+              <SignatureMigrationPage />
+            </ProtectedRoute>
+          } 
+        />
         
         {/* Public Trainer Profile */}
         <Route path="/formateur/:id" element={<TrainerProfile />} />

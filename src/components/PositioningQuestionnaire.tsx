@@ -19,6 +19,7 @@ interface PositioningQuestionnaireProps {
   type?: 'initial' | 'final' | null;
   onSubmitSuccess?: () => void;
   adminResponseData?: any;
+  companyStatus?: 'valid' | 'pending' | 'not_found';
 }
 
 export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> = ({ 
@@ -26,7 +27,8 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
   readOnly = false, 
   type = null, 
   onSubmitSuccess,
-  adminResponseData
+  adminResponseData,
+  companyStatus = 'valid'
 }) => {
   console.log('PositioningQuestionnaire - Props:', { 
     readOnly, 
@@ -51,6 +53,13 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
       try {
         setIsLoading(true);
         setError(null);
+        
+        // If company is not validated, don't fetch questions
+        if (companyStatus !== 'valid') {
+          console.log('🔍 [DEBUG] Company not validated, skipping question fetch');
+          setIsLoading(false);
+          return;
+        }
         
         // Si nous avons des données d'admin, utiliser ces données directement
         if (adminResponseData) {
@@ -414,7 +423,7 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
     };
 
     fetchQuestions();
-  }, [readOnly, type, adminResponseData, hasSousTypeColumn]);
+  }, [readOnly, type, adminResponseData, hasSousTypeColumn, companyStatus]);
 
   const handleAnswer = async (questionId: string, answer: any) => {
     if (readOnly) return;
@@ -618,6 +627,41 @@ export const PositioningQuestionnaire: React.FC<PositioningQuestionnaireProps> =
         <LoadingSpinner />
       </div>
     );
+  }
+
+  // Don't show an error if company status is not valid, just close silently
+  if (companyStatus !== 'valid') {
+    console.log('🔍 [DEBUG] Not showing questionnaire because company is not valid');
+    
+    // If it's an admin view (with adminResponseData), still allow viewing
+    if (adminResponseData) {
+      console.log('🔍 [DEBUG] Admin view detected, allowing questionnaire display');
+    } else {
+      // For non-admin views, show a helpful message and close
+      return (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-gray-900 rounded-xl p-8 max-w-lg w-full">
+            <div className="flex flex-col items-center mb-6">
+              <div className="mb-4 bg-amber-500/10 p-3 rounded-full">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <h2 className="text-xl font-semibold text-white mb-2">Questionnaires non disponibles</h2>
+              <p className="text-gray-300 text-center">
+                Les questionnaires seront disponibles une fois que votre entreprise sera validée et associée à une formation.
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      );
+    }
   }
 
   if (error || questions.length === 0) {

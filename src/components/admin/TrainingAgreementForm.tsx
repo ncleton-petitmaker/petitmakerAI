@@ -4,6 +4,7 @@ import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import { supabase } from '../../lib/supabase';
 import { generateWordLikePDF } from './pdfGenerator';
+import { UnifiedTrainingAgreementTemplate } from '../shared/templates/unified/TrainingAgreementTemplate';
 
 interface Company {
   id: string;
@@ -27,13 +28,18 @@ interface Training {
   location: string | null;
   price: number | null;
   status: string;
-  objectives?: string[];
   content?: string;
+  trainer_name?: string;
+  objectives?: string[];
   evaluation_methods?: {
     profile_evaluation?: boolean;
     skills_evaluation?: boolean;
     knowledge_evaluation?: boolean;
     satisfaction_survey?: boolean;
+  };
+  tracking_methods?: {
+    attendance_sheet?: boolean;
+    completion_certificate?: boolean;
   };
   pedagogical_methods?: {
     needs_evaluation?: boolean;
@@ -111,6 +117,7 @@ interface FormData {
     target_audience: string;
     accessibility: string;
     schedule: string;
+    trainer_name?: string;
   };
   financial: {
     price_ht: number;
@@ -148,6 +155,20 @@ interface FormData {
   };
 }
 
+interface Settings {
+  company_name: string;
+  siret: string;
+  training_number: string;
+  address: string;
+  city: string;
+  postal_code: string;
+  country: string;
+  email: string;
+  phone: string;
+  website: string;
+  representative_name?: string;
+}
+
 export const TrainingAgreementForm: React.FC<TrainingAgreementFormProps> = ({
   training,
   company,
@@ -160,7 +181,7 @@ export const TrainingAgreementForm: React.FC<TrainingAgreementFormProps> = ({
   console.log('TrainingAgreementForm - Moyens pédagogiques:', training.pedagogical_methods);
   console.log('TrainingAgreementForm - Éléments matériels:', training.material_elements);
   
-  const [settings, setSettings] = useState({
+  const [settings, setSettings] = useState<Settings>({
     company_name: 'PETITMAKER',
     siret: '928 386 044 00012',
     training_number: '32 59 13116 59',
@@ -223,6 +244,7 @@ export const TrainingAgreementForm: React.FC<TrainingAgreementFormProps> = ({
       target_audience: '',
       accessibility: 'Pour toute situation de handicap, merci de nous contacter pour envisager les possibilités d\'adaptation.',
       schedule: 'De 9h00 à 12h30 et de 13h30 à 17h00', // Valeur par défaut pour l'horaire
+      trainer_name: training.trainer_name,
     },
     
     // Financial Information
@@ -662,259 +684,76 @@ export const TrainingAgreementForm: React.FC<TrainingAgreementFormProps> = ({
             `}
           </style>
           <div ref={pdfContentRef} className="bg-white max-w-[210mm] mx-auto pdf-container">
-            {/* Contenu du formulaire pour le PDF */}
-            <div className="mb-0 avoid-break section-content">
-              <h2 className="font-bold text-center mb-0">CONVENTION DE FORMATION PROFESSIONNELLE</h2>
-              <p className="text-center mb-0">(Article L.6353-1 du Code du travail)</p>
-            </div>
-            
-            {/* Entre */}
-            <div className="mb-0 section-content">
-              <p className="font-semibold mb-0">Entre</p>
-            </div>
-            
-            {/* Informations sur l'organisme de formation */}
-            <div className="mb-0 section-content">
-              <p className="mb-0">L'organisme de formation : <span className="font-semibold">{settings.company_name}</span></p>
-              <p className="mb-0">Numéro de déclaration d'activité de formation : <span className="font-semibold">{settings.training_number}</span></p>
-              <p className="mb-0">Numéro SIRET de l'organisme de formation : <span className="font-semibold">{settings.siret}</span></p>
-              <p className="mb-0">Adresse de l'organisme de formation : <span className="font-semibold">{settings.address}, {settings.postal_code} {settings.city}, {settings.country}</span></p>
-            </div>
-            
-            {/* Et */}
-            <div className="mb-0 section-content">
-              <p className="font-semibold mb-0">Et</p>
-            </div>
-            
-            {/* Informations sur le client */}
-            <div className="mb-0 section-content">
-              <p className="mb-0">L'entreprise : <span className={company?.name ? "font-semibold" : "bg-yellow-200 px-1"}>{company?.name || "XXXXXXXXXX"}</span></p>
-              <p className="mb-0">Adresse de l'entreprise : <span className={company?.address ? "font-semibold" : "bg-yellow-200 px-1"}>{company?.address || "XXXXXXXXXX"}</span></p>
-              <p className="mb-0">SIRET de l'entreprise : <span className={company?.siret ? "font-semibold" : "bg-yellow-200 px-1"}>{company?.siret || "xxxxxxxxxxxx"}</span></p>
-            </div>
-            
-            {/* Participants */}
-            <div className="mb-0 avoid-break section-content">
-              <p className="font-semibold mb-0">Pour le(s) bénéficiaire(s) : (Ci-après dénommé(s) le(s) stagiaire(s))</p>
-              <table className="w-full border-collapse border border-gray-300" style={{ maxWidth: "100%", margin: "6pt auto" }}>
-                <thead>
-                  <tr>
-                    <th className="border border-gray-300 px-4 py-2 text-center" style={{ width: '60%' }}>Stagiaires</th>
-                    <th className="border border-gray-300 px-4 py-2 text-center" style={{ width: '40%' }}>Fonction</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {formData.participants.filter(p => p.selected).length > 0 ? (
-                    formData.participants.filter(p => p.selected).map((participant) => (
-                      <tr key={participant.id}>
-                        <td className="border border-gray-300 px-4 py-2 text-center">{`${participant.first_name} ${participant.last_name}`}</td>
-                        <td className="border border-gray-300 px-4 py-2 text-center">{participant.job_position || "-"}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td className="border border-gray-300 px-4 py-2 text-center bg-yellow-200">XXXXXX</td>
-                      <td className="border border-gray-300 px-4 py-2 text-center bg-yellow-200">XXXXX</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            
-            {/* Objet */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">I - OBJET</h3>
-              <p className="mb-0">L'action de formation entre dans la catégorie : « Les actions de formation » prévue à l'article L.6313-1 du Code du travail.</p>
-              <p className="mb-0">En exécution de la présente convention, l'organisme de formation s'engage à organiser l'action de formation professionnelle intitulée : <span className="font-semibold">{training.title}</span></p>
-            </div>
-            
-            {/* Nature et caractéristiques */}
-            <div className="mb-0 avoid-break section-content">
-              <div className="page-break-before"></div>
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">II - NATURE ET CARACTÉRISTIQUES DE L'ACTION DE FORMATION</h3>
-              <p className="mb-0">À l'issue de cette formation, le participant sera capable de :</p>
-              {formData.training.objectives ? (
-                <ul className="list-disc pl-6 mb-0">
-                  {formData.training.objectives.split('\n').map((objective, index) => (
-                    <li key={index} className="mb-0">{objective.replace('• ', '')}</li>
-                  ))}
-                </ul>
-              ) : (
-                <ul className="list-disc pl-6 mb-0">
-                  <li className="mb-0 bg-yellow-200">xxxx</li>
-                  <li className="mb-0 bg-yellow-200">xxxxxx</li>
-                  <li className="mb-0 bg-yellow-200">xxxxxxxxx</li>
-                </ul>
-              )}
-              <p className="mb-0">La durée de la formation est fixée à <span className={training.duration ? "font-semibold" : "bg-yellow-200 px-1"}>{training.duration || "2 heures"}</span></p>
-              <p className="mb-0">Horaires de Stage : <span className={formData.training.schedule ? "font-semibold" : "bg-yellow-200 px-1"}>{formData.training.schedule || "9h00-11h00"}</span></p>
-              <p className="mb-0">Le programme détaillé de l'action de formation figure en annexe de la présente convention.</p>
-            </div>
-            
-            {/* Niveau de connaissances préalables */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">III - NIVEAU DE CONNAISSANCES PRÉALABLES NÉCESSAIRE</h3>
-              <p className="mb-0">{formData.training.prerequisites || "Aucun."}</p>
-            </div>
-            
-            {/* Organisation */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">IV - ORGANISATION DE L'ACTION DE FORMATION</h3>
-              <p className="mb-0">Modalités : {formData.training.modality === 'presentiel' ? 'Formation en présentiel' : 
-                                formData.training.modality === 'distanciel' ? 'Formation à distance sous la forme de webinar participatif' : 
-                                'Formation mixte (présentiel et distanciel)'}</p>
-              <p className="mb-0">L'action de formation aura lieu (date ou période) : {training.start_date && training.end_date ? 
-                                `du ${new Date(training.start_date).toLocaleDateString('fr-FR')} au ${new Date(training.end_date).toLocaleDateString('fr-FR')}` : 
-                                <span className="bg-yellow-200 px-1">le xx/xx/2020</span>}</p>
-              <p className="mb-0">Lieu de formation : <span className={training.location ? "font-semibold" : "bg-yellow-200 px-1"}>{training.location || "À distance"}</span></p>
-              <p className="mb-0">Les conditions générales dans lesquelles la formation est dispensée, notamment les moyens pédagogiques et techniques, sont les suivantes :</p>
-              <ul className="list-disc pl-6 mb-0">
-                {training.pedagogical_methods?.needs_evaluation === true && (
-                  <li className="mb-0">Évaluation des besoins et du profil du participant</li>
-                )}
-                {training.pedagogical_methods?.theoretical_content === true && (
-                  <li className="mb-0">Apport théorique et méthodologique</li>
-                )}
-                {training.pedagogical_methods?.case_studies === true && (
-                  <li className="mb-0">Études de cas</li>
-                )}
-                {training.pedagogical_methods?.practical_exercises === true && (
-                  <li className="mb-0">Questionnaires et exercices pratiques</li>
-                )}
-                {training.pedagogical_methods?.experience_sharing === true && (
-                  <li className="mb-0">Retours d'expériences</li>
-                )}
-                {training.pedagogical_methods?.digital_support === true && (
-                  <li className="mb-0">Support de cours numérique</li>
-                )}
-              </ul>
-              <p className="mb-0">Les conditions détaillées figurent en annexe de la présente convention.</p>
-            </div>
-            
-            {/* Moyens permettant d'apprécier les résultats */}
-            <div className="mb-0 avoid-break section-content">
-              <div className="page-break-before"></div>
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">V - MOYENS PERMETTANT D'APPRÉCIER LES RÉSULTATS DE L'ACTION</h3>
-              <ul className="list-disc pl-6 mb-0">
-                {training.evaluation_methods?.satisfaction_survey === true && (
-                  <li className="mb-0">Questionnaire d'évaluation de la satisfaction</li>
-                )}
-                {training.evaluation_methods?.knowledge_evaluation === true && (
-                  <li className="mb-0">Évaluation des connaissances à chaque étape</li>
-                )}
-                {training.evaluation_methods?.profile_evaluation === true && (
-                  <li className="mb-0">Évaluation individuelle du profil, des attentes et des besoins</li>
-                )}
-                {training.evaluation_methods?.skills_evaluation === true && (
-                  <li className="mb-0">Évaluation des compétences en début et fin de formation</li>
-                )}
-              </ul>
-            </div>
-            
-            {/* Sanction de la formation */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">VI - SANCTION DE LA FORMATION</h3>
-              <p className="mb-0">En application de l'article L.6353-1 du Code du travail, une attestation mentionnant les objectifs, la nature et la durée de l'action et les résultats de l'évaluation des acquis de la formation sera remise au stagiaire à l'issue de la formation.</p>
-            </div>
-            
-            {/* Moyens permettant de suivre l'exécution */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">VII - MOYENS PERMETTANT DE SUIVRE L'EXÉCUTION DE L'ACTION</h3>
-              <ul className="list-disc pl-6 mb-0">
-                <li className="mb-0">Feuille de présences signées des participants et du formateur par demi-journée</li>
-                <li className="mb-0">Attestation de fin de formation mentionnant les objectifs, la nature et la durée de l'action et les résultats de l'évaluation des acquis de la formation</li>
-              </ul>
-            </div>
-            
-            {/* Non-réalisation de la prestation */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">VIII - NON-RÉALISATION DE LA PRESTATION DE FORMATION</h3>
-              <p className="mb-0">En application de l'article L. 6354-1 du Code du travail, il est convenu entre les signataires de la présente convention, que faute de réalisation totale ou partielle de la prestation de formation, l'organisme prestataire doit rembourser au cocontractant les sommes indûment perçues de ce fait.</p>
-            </div>
-            
-            {/* Dispositions financières */}
-            <div className="mb-0 avoid-break section-content">
-              <div className="page-break-before"></div>
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">IX - DISPOSITIONS FINANCIÈRES</h3>
-              {training.price ? (
-                <p className="mb-0">Le prix de l'action de formation est fixé à : <span className="font-semibold">{training.price.toFixed(2)}€ HT + TVA (20%) : {(training.price * 0.2).toFixed(2)} € = {(training.price * 1.2).toFixed(2)} € TTC</span></p>
-              ) : (
-                <p className="mb-0">Le prix de l'action de formation est fixé à : <span className="bg-yellow-200 px-1">3 500,00€ HT + TVA (20%) : 700,00 € = 4 200,00 € TTC</span></p>
-              )}
-            </div>
-            
-            {/* Interruption du stage */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">X - INTERRUPTION DU STAGE</h3>
-              <p className="mb-0">En cas de cessation anticipée de la formation du fait de l'organisme de formation ou en cas de renoncement par le bénéficiaire pour un autre motif que la force majeure dûment reconnue, le présent contrat est résilié.</p>
-              <p className="mb-0">Dans ce cas, seules les prestations effectivement dispensées sont dues au prorata temporis de leur valeur prévue au présent contrat.</p>
-              <p className="mb-0">Si le stagiaire est empêché de suivre la formation par suite de force majeure dûment reconnue, la convention de formation professionnelle est résiliée. Dans ce cas, seules les prestations effectivement dispensées sont dues au prorata temporis de leur valeur prévue au présent contrat.</p>
-            </div>
-            
-            {/* Cas de différend */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">XI - CAS DE DIFFÉREND</h3>
-              <p className="mb-0">Si une contestation ou un différend n'ont pu être réglés à l'amiable, seul le tribunal de commerce dans le ressort de la juridiction du siège social du centre de formation sera compétent pour régler le litige.</p>
-            </div>
-            
-            {/* Éléments matériels */}
-            <div className="mb-0 avoid-break section-content">
-              <h3 className="font-bold mb-0 bg-gray-200 p-1">XII - ÉLÉMENTS MATÉRIELS</h3>
-              <p className="mb-0">Les éléments matériels de la formation sont :</p>
-              <ul className="list-disc pl-6 mb-0">
-                {training.material_elements?.computer_provided === true && (
-                  <li className="mb-0">Mise à disposition du matériel informatique</li>
-                )}
-                {training.material_elements?.pedagogical_material === true && (
-                  <li className="mb-0">Mise à disposition du matériel pédagogique</li>
-                )}
-                {training.material_elements?.digital_support_provided === true && (
-                  <li className="mb-0">Support de cours au format numérique</li>
-                )}
-              </ul>
-            </div>
-
-            {/* Signature et signatures */}
-            <div className="mb-0 avoid-break section-content">
-              <div className="page-break-before"></div>
-              <div className="mb-0">
-                <p className="mb-0">Fait en double exemplaire, à <span className="font-semibold">{settings.city}</span>, le <span className="font-semibold">{new Date().toLocaleDateString('fr-FR')}</span></p>
-              </div>
-              
-              <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-4 mb-0">
-                <div>
-                  <p className="font-semibold mb-0">Pour l'organisme de formation :</p>
-                  <p className="mb-0">Nom et qualité du signataire :</p>
-                  <p className="mb-0">Signature et cachet :</p>
-                  <div className="h-16 border border-gray-300 mt-1"></div>
-                </div>
-                <div>
-                  <p className="font-semibold mb-0">Pour l'entreprise :</p>
-                  <p className="mb-0">Nom et qualité du signataire :</p>
-                  <p className="mb-0">Signature et cachet :</p>
-                  <div className="h-16 border border-gray-300 mt-1"></div>
-                </div>
-              </div>
-            </div>
-
-            {/* Annexe - Programme de formation */}
-            <div className="annexe avoid-break">
-              <div className="page-break-before"></div>
-              <h3 className="annexe-title font-bold mb-0 text-center">ANNEXE - PROGRAMME DE FORMATION</h3>
-              
-              {/* Titre de la formation */}
-              <div className="annexe-content mb-0">
-                <h4 className="font-semibold mb-0">{training.title}</h4>
-              </div>
-              
-              {/* Programme de formation */}
-              <div className="annexe-content mb-0">
-                <h4 className="font-semibold mb-0">Contenu de la formation :</h4>
-                <div className="whitespace-pre-wrap">
-                  {training.content || "Le programme détaillé sera fourni ultérieurement."}
-                </div>
-              </div>
-            </div>
+            <UnifiedTrainingAgreementTemplate
+              training={{
+                id: training.id,
+                title: formData.training.title,
+                duration: formData.training.duration,
+                trainer_name: formData.training.trainer_name || '',
+                location: formData.training.location,
+                start_date: formData.training.start_date,
+                end_date: formData.training.end_date,
+                objectives: formData.training.objectives ? formData.training.objectives.split('\n').filter(Boolean) : [],
+                evaluation_methods: {
+                  profile_evaluation: training.evaluation_methods?.profile_evaluation || false,
+                  skills_evaluation: training.evaluation_methods?.skills_evaluation || false,
+                  knowledge_evaluation: training.evaluation_methods?.knowledge_evaluation || false,
+                  satisfaction_survey: training.evaluation_methods?.satisfaction_survey || false
+                },
+                tracking_methods: {
+                  attendance_sheet: training.tracking_methods?.attendance_sheet || false,
+                  completion_certificate: training.tracking_methods?.completion_certificate || false
+                },
+                pedagogical_methods: {
+                  needs_evaluation: training.pedagogical_methods?.needs_evaluation || false,
+                  theoretical_content: training.pedagogical_methods?.theoretical_content || false,
+                  practical_exercises: training.pedagogical_methods?.practical_exercises || false,
+                  case_studies: training.pedagogical_methods?.case_studies || false,
+                  experience_sharing: training.pedagogical_methods?.experience_sharing || false,
+                  digital_support: training.pedagogical_methods?.digital_support || false
+                },
+                material_elements: {
+                  computer_provided: training.material_elements?.computer_provided || false,
+                  pedagogical_material: training.material_elements?.pedagogical_material || false,
+                  digital_support_provided: training.material_elements?.digital_support_provided || false
+                }
+              }}
+              participant={{
+                id: formData.participants.filter(p => p.selected).length > 0 
+                  ? formData.participants.find(p => p.selected)?.id || ''
+                  : '',
+                first_name: formData.participants.filter(p => p.selected).length > 0
+                  ? formData.participants.find(p => p.selected)?.first_name || ''
+                  : 'Participant',
+                last_name: formData.participants.filter(p => p.selected).length > 0
+                  ? formData.participants.find(p => p.selected)?.last_name || ''
+                  : 'à définir',
+                job_position: formData.participants.filter(p => p.selected).length > 0
+                  ? formData.participants.find(p => p.selected)?.job_position || ''
+                  : '',
+                company: company?.name || ''
+              }}
+              company={formData.client.name ? {
+                name: formData.client.name,
+                address: formData.client.address,
+                postal_code: formData.client.postal_code,
+                city: formData.client.city,
+                country: formData.client.country,
+                siret: '',
+                contact_name: formData.client.contact_name
+              } : undefined}
+              organizationSettings={{
+                organization_name: formData.organization.name,
+                siret: formData.organization.siret,
+                address: formData.organization.address,
+                postal_code: formData.organization.postal_code,
+                city: formData.organization.city,
+                country: formData.organization.country,
+                activity_declaration_number: formData.organization.registration_number,
+                representative_name: 'Représentant légal'
+              }}
+              viewContext="crm"
+            />
           </div>
         </div>
         

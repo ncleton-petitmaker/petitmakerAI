@@ -1,5 +1,4 @@
 export * from './SignatureCanvas';
-export * from './StudentCompletionCertificate';
 export * from './StudentCompletionCertificateButton';
 export * from './TrainingTimeline';
 export * from './ProfileMenu';
@@ -10,7 +9,5 @@ export * from './SatisfactionQuestionnaire';
 export * from './InternalRulesModal';
 export * from './ProfileManagement';
 export * from './ProfilePhoto';
-export * from './StudentAttendanceSheetButton';
-export * from './StudentAttendanceSheet';
-export * from './StudentTrainingAgreementButton';
-export * from './StudentTrainingAgreement'; 
+export * from './StudentGenericAttendanceSheetButton';
+export * from './StudentGenericTrainingAgreementButton'; 

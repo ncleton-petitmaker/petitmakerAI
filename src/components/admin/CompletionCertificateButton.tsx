@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Award } from 'lucide-react';
-import { CompletionCertificate } from './CompletionCertificate';
+import { CompletionCertificate } from '../shared/CompletionCertificate';
+import { Training, Participant } from '../shared/DocumentUtils';
 
 interface CompletionCertificateButtonProps {
   training: any;
@@ -10,6 +11,12 @@ interface CompletionCertificateButtonProps {
   variant?: 'primary' | 'secondary' | 'outline';
 }
 
+/**
+ * Bouton pour générer une attestation de fin de formation dans l'interface CRM
+ * 
+ * IMPORTANT: Ce composant utilise le composant unifié CompletionCertificate
+ * pour garantir une cohérence parfaite entre les documents.
+ */
 export const CompletionCertificateButton: React.FC<CompletionCertificateButtonProps> = ({
   training,
   participants,
@@ -22,8 +29,6 @@ export const CompletionCertificateButton: React.FC<CompletionCertificateButtonPr
 
   const handleOpenCertificate = () => {
     console.log("Ouverture du certificat, données de formation:", training);
-    console.log("Objectifs de la formation (type):", typeof training.objectives);
-    console.log("Objectifs de la formation (valeur):", training.objectives);
     
     // Si un seul participant, ouvrir directement l'attestation
     if (participants.length === 1) {
@@ -42,11 +47,6 @@ export const CompletionCertificateButton: React.FC<CompletionCertificateButtonPr
   };
 
   const handleSelectParticipant = (participant: any) => {
-    console.log("Sélection du participant:", participant);
-    console.log("Données de formation complètes:", training);
-    console.log("Type des objectifs:", typeof training.objectives);
-    console.log("Valeur des objectifs:", training.objectives);
-    console.log("Est-ce un tableau ?", Array.isArray(training.objectives));
     setSelectedParticipant(participant);
   };
 
@@ -62,6 +62,51 @@ export const CompletionCertificateButton: React.FC<CompletionCertificateButtonPr
   }
   
   buttonClasses += className;
+
+  // Formatage des données selon les interfaces partagées
+  const mapTrainingToSharedInterface = (training: any): Training => ({
+    id: training.id,
+    title: training.title,
+    duration: training.duration,
+    trainer_name: training.trainer_name || '',
+    location: training.location,
+    start_date: training.start_date,
+    end_date: training.end_date,
+    objectives: Array.isArray(training.objectives) ? training.objectives : 
+               typeof training.objectives === 'string' ? [training.objectives] : 
+               ['Objectifs à définir'],
+    evaluation_methods: {
+      profile_evaluation: training.evaluation_methods?.profile_evaluation || false,
+      skills_evaluation: training.evaluation_methods?.skills_evaluation || false,
+      knowledge_evaluation: training.evaluation_methods?.knowledge_evaluation || false,
+      satisfaction_survey: training.evaluation_methods?.satisfaction_survey || false
+    },
+    tracking_methods: {
+      attendance_sheet: training.tracking_methods?.attendance_sheet || false,
+      completion_certificate: training.tracking_methods?.completion_certificate || false
+    },
+    pedagogical_methods: {
+      needs_evaluation: training.pedagogical_methods?.needs_evaluation || false,
+      theoretical_content: training.pedagogical_methods?.theoretical_content || false,
+      practical_exercises: training.pedagogical_methods?.practical_exercises || false,
+      case_studies: training.pedagogical_methods?.case_studies || false,
+      experience_sharing: training.pedagogical_methods?.experience_sharing || false,
+      digital_support: training.pedagogical_methods?.digital_support || false
+    },
+    material_elements: {
+      computer_provided: training.material_elements?.computer_provided || false,
+      pedagogical_material: training.material_elements?.pedagogical_material || false,
+      digital_support_provided: training.material_elements?.digital_support_provided || false
+    }
+  });
+
+  const mapParticipantToSharedInterface = (participant: any): Participant => ({
+    id: participant.id,
+    first_name: participant.first_name,
+    last_name: participant.last_name,
+    job_position: participant.job_position || undefined,
+    company: participant.company_name || undefined
+  });
 
   return (
     <>
@@ -124,35 +169,14 @@ export const CompletionCertificateButton: React.FC<CompletionCertificateButtonPr
       )}
 
       {/* Affichage de l'attestation pour le participant sélectionné */}
-      {showCertificate && selectedParticipant && (() => {
-        console.log("Passage au certificat - Objectifs:", training.objectives);
-        console.log("Passage au certificat - Type des objectifs:", typeof training.objectives);
-        console.log("Passage au certificat - Est-ce un tableau ?", Array.isArray(training.objectives));
-        console.log("Passage au certificat - Méthodes d'évaluation:", training.evaluation_methods);
-        console.log("Passage au certificat - Méthodes de suivi:", training.tracking_methods);
-        console.log("Passage au certificat - Méthodes pédagogiques:", training.pedagogical_methods);
-        console.log("Passage au certificat - Éléments matériels:", training.material_elements);
-        return (
-          <CompletionCertificate
-            training={{
-              id: training.id,
-              title: training.title,
-              duration: training.duration,
-              trainer_name: training.trainer_name || '',
-              location: training.location,
-              start_date: training.start_date,
-              end_date: training.end_date,
-              objectives: training.objectives,
-              evaluation_methods: training.evaluation_methods,
-              tracking_methods: training.tracking_methods,
-              pedagogical_methods: training.pedagogical_methods,
-              material_elements: training.material_elements
-            }}
-            participant={selectedParticipant}
-            onCancel={handleCloseCertificate}
-          />
-        );
-      })()}
+      {showCertificate && selectedParticipant && (
+        <CompletionCertificate
+          training={mapTrainingToSharedInterface(training)}
+          participant={mapParticipantToSharedInterface(selectedParticipant)}
+          viewContext="crm"
+          onCancel={handleCloseCertificate}
+        />
+      )}
     </>
   );
 }; 

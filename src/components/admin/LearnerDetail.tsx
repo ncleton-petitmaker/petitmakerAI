@@ -27,7 +27,7 @@ import { PositioningQuestionnaire } from '../PositioningQuestionnaire';
 import { SatisfactionQuestionnaire } from '../SatisfactionQuestionnaire';
 import { generateWordLikePDF } from './pdfGenerator';
 import { QuestionnairePDF } from '../QuestionnairePDF';
-import { AttendanceSheetButton } from './AttendanceSheetButton';
+import { GenericAttendanceSheetButton } from './GenericAttendanceSheetButton';
 import { CompletionCertificateButton } from './CompletionCertificateButton';
 
 interface QuestionnaireStatus {
@@ -722,7 +722,7 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
                           </div>
                         </div>
                         <div className="flex items-center space-x-2">
-                          <AttendanceSheetButton 
+                          <GenericAttendanceSheetButton 
                             training={training.trainings}
                             participants={[{
                               id: learner.id,

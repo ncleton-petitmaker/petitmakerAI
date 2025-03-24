@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App.tsx';
 import './index.css';
+// Import silence function (it self-initializes)
+import './utils/ConsoleFilter';
 
 // Lazy load Google Analytics
 const loadGA = () => {

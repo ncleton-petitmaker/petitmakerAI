@@ -135,6 +135,16 @@ export const SatisfactionQuestionnaire: React.FC<SatisfactionQuestionnaireProps>
             setAnswers(formattedAnswers);
           } catch (error) {
             console.error("Error processing admin response data:", error);
+            // En cas d'erreur, initialiser avec des réponses vides
+            const emptyAnswers: Record<string, any> = {};
+            questions.forEach(question => {
+              if (question.type === 'text') {
+                emptyAnswers[question.id] = 'Pas de réponse';
+              } else if (question.type === 'rating') {
+                emptyAnswers[question.id] = 0;
+              }
+            });
+            setAnswers(emptyAnswers);
           }
           
           setIsLoading(false);

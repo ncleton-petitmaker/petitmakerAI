@@ -56,7 +56,6 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
     }
 
     try {
-      console.log("Fetching questionnaire status in QuestionnaireList");
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
@@ -83,7 +82,6 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
       
       // 2. Évaluations initiale et finale
       const evalType = 'initial_final_evaluation';
-      console.log("Checking evaluation responses with type:", evalType);
       
       const { data: evaluationData, error: evaluationError } = await supabase
         .from('questionnaire_responses')
@@ -118,10 +116,6 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
       if (satisfactionError) {
         console.error("Error checking satisfaction questionnaire:", satisfactionError);
       }
-      
-      console.log("Positioning data:", positioningData);
-      console.log("Evaluation data:", evaluationData);
-      console.log("Satisfaction data:", satisfactionData);
       
       // Mettre à jour les statuts des questionnaires en fonction des données trouvées
       const hasPositioning = positioningData && positioningData.length > 0;
@@ -167,18 +161,11 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
   };
 
   const fetchResponseData = async () => {
-    // Si l'entreprise n'est pas validée ou n'a pas de formations, ne pas charger les données
-    if (companyStatus !== 'valid' || !trainingAvailable) {
-      return;
-    }
-    
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      console.log("Fetching response data for user:", user.id);
-
-      // Fetch positioning questionnaire responses using select() au lieu de maybeSingle()
+      // Récupérer les réponses au questionnaire de positionnement
       const { data: positioningData, error: positioningError } = await supabase
         .from('questionnaire_responses')
         .select('*')
@@ -187,30 +174,23 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
 
       if (positioningError) {
         console.error("Error fetching positioning data:", positioningError);
-        throw positioningError;
+        return;
       }
-      
-      console.log("Raw positioning data:", positioningData);
 
-      // Fetch evaluation responses - adapter le type en fonction de la présence ou non de sous_type
-      const evalType = 'initial_final_evaluation';
-      console.log("Fetching evaluation data with type:", evalType);
-      
+      // Récupérer les réponses aux évaluations
       const { data: evaluationData, error: evaluationError } = await supabase
         .from('questionnaire_responses')
         .select('*')
         .eq('user_id', user.id)
-        .eq('type', evalType);
+        .eq('type', 'initial_final_evaluation');
 
       if (evaluationError) {
         console.error("Error fetching evaluation data:", evaluationError);
-        throw evaluationError;
+        return;
       }
-      
-      console.log("Raw evaluation data:", evaluationData);
 
-      // Organize the data - adapter le critère en fonction de la présence ou non de sous_type
-      let initialEval, finalEval;
+      let initialEval = null;
+      let finalEval = null;
       
       if (hasSousTypeColumn) {
         // Si la colonne sous_type existe, filtrer par sous_type
@@ -233,20 +213,12 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
         satisfaction: null
       });
       
-      console.log("Organized response data:", {
-        positioning: positioningResponse,
-        initial: initialEval,
-        final: finalEval
-      });
     } catch (error) {
       console.error("Error fetching response data:", error);
     }
   };
 
   useEffect(() => {
-    console.log("QuestionnaireList refreshTrigger changed:", refreshTrigger);
-    console.log("Company status:", companyStatus, "Training available:", trainingAvailable);
-    
     // Only fetch if company is valid and has trainings
     if (companyStatus === 'valid' && trainingAvailable) {
       fetchQuestionnaireStatus();
@@ -261,11 +233,14 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
       return;
     }
     
-    // Rafraîchir le statut des questionnaires toutes les 5 secondes
+    // Rafraîchir le statut des questionnaires toutes les 30 secondes au lieu de 5
     const intervalId = setInterval(() => {
-      console.log("Auto-refreshing questionnaire status");
+      // Vérifier si le composant est toujours monté avant de rafraîchir
+      if (document.hidden) {
+        return; // Ne pas rafraîchir si l'onglet est en arrière-plan
+      }
       fetchQuestionnaireStatus();
-    }, 5000);
+    }, 30000); // 30 secondes au lieu de 5
 
     // Nettoyer l'intervalle lorsque le composant est démonté
     return () => clearInterval(intervalId);
@@ -288,12 +263,10 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
         // Si nous avons des données, vérifier si sous_type existe dans le premier enregistrement
         if (data && data.length > 0) {
           const hasColSousType = 'sous_type' in data[0];
-          console.log('🔍 [DEBUG] QuestionnaireList - Colonne sous_type existe:', hasColSousType);
           return hasColSousType;
         }
         
         // Si aucune donnée n'est retournée, nous ne pouvons pas vérifier
-        console.log('🔍 [DEBUG] QuestionnaireList - Aucun enregistrement pour vérifier la structure de la table');
         return false;
       } catch (e) {
         console.error('Erreur lors de la vérification de la structure de la table:', e);
@@ -303,7 +276,6 @@ export const QuestionnaireList: React.FC<QuestionnaireListProps> = ({ refreshTri
 
     // Utiliser cette information pour adapter notre comportement
     checkTableColumns().then(hasCol => {
-      console.log('🔍 [DEBUG] QuestionnaireList - Adaptation du comportement en fonction de la présence de sous_type:', hasCol);
       setHasSousTypeColumn(hasCol);
     });
   }, []);

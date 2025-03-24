@@ -197,13 +197,43 @@ export const QuestionnairesView = () => {
   const fetchTrainings = async () => {
     try {
       setLoading(true);
-      const { data, error } = await supabase
+      
+      // D'abord, récupérer l'utilisateur connecté
+      const { data: { user } } = await supabase.auth.getUser();
+      const userId = user?.id;
+      
+      if (!userId) {
+        console.error('No authenticated user found');
+        throw new Error('No authenticated user found');
+      }
+      
+      // Récupérer le profil de l'utilisateur pour vérifier s'il est admin
+      const { data: userProfile, error: userProfileError } = await supabase
+        .from('user_profiles')
+        .select('is_admin, company_id')
+        .eq('id', userId)
+        .single();
+      
+      if (userProfileError) {
+        console.error('Error fetching user profile:', userProfileError);
+        throw userProfileError;
+      }
+      
+      let query = supabase
         .from('trainings')
         .select(`
           *,
           questionnaires:questionnaire_templates(*)
         `)
         .order('created_at', { ascending: false });
+      
+      // Si l'utilisateur n'est pas admin, filtrer par company_id
+      if (userProfile && !userProfile.is_admin && userProfile.company_id) {
+        console.log('Filtering trainings by company ID:', userProfile.company_id);
+        query = query.eq('company_id', userProfile.company_id);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
       setTrainings(data || []);
@@ -217,6 +247,8 @@ export const QuestionnairesView = () => {
 
   const fetchTemplatesForTraining = async (trainingId: string) => {
     try {
+      console.log('Fetching templates for training ID:', trainingId);
+      
       const { data, error } = await supabase
         .from('questionnaire_templates')
         .select('*')
@@ -225,13 +257,18 @@ export const QuestionnairesView = () => {
 
       if (error) throw error;
       
+      console.log('Templates retrieved:', data);
+      
       if (!data || data.length === 0) {
         // If no templates exist, start generating them
+        console.log('No templates found, generating default questionnaires');
         setGeneratingQuestionnaires(true);
         await generateDefaultQuestionnaires(trainingId);
       } else {
         // Trier les questionnaires dans l'ordre souhaité
-        setTemplates(sortQuestionnaires(data));
+        const sortedTemplates = sortQuestionnaires(data);
+        console.log('Sorted templates:', sortedTemplates);
+        setTemplates(sortedTemplates);
       }
     } catch (error) {
       console.error('Error fetching templates:', error);

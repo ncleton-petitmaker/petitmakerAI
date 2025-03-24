@@ -1,0 +1,1686 @@
+import React, { useRef, useEffect, useState, useMemo } from 'react';
+import { format } from 'date-fns';
+import { fr } from 'date-fns/locale';
+import SafeImage, { loadOrganizationSealDirectly } from '../../../shared/SafeImage';
+import { forceOrganizationSealInDOM } from '../../../../utils/SignatureUtils';
+import { supabase } from '../../../../lib/supabase';
+import { logDebug, logInfo, logError, logWarn, LOG_LEVELS } from '../../../../utils/LoggingUtils';
+import { OrganizationSettings } from '../../DocumentUtils';
+
+/**
+ * Template unifié pour les conventions de formation
+ * 
+ * Ce template combine l'apparence simple du template standard avec les
+ * fonctionnalités avancées de gestion de signature du template unifié.
+ */
+
+// Props standardisées pour le template unifié
+export interface UnifiedTrainingAgreementTemplateProps {
+  // Données du stagiaire - Modifié pour accepter un tableau de participants
+  participants: Array<{
+    id: string;
+    first_name: string;
+    last_name: string;
+    job_position?: string;
+    company?: string;
+    email?: string;
+    phone?: string;
+    status?: string;
+  }>;
+  
+  // Participant principal (pour rétrocompatibilité)
+  participant?: {
+    id: string;
+    first_name: string;
+    last_name: string;
+    job_position?: string;
+    company?: string;
+    email?: string;
+    phone?: string;
+    status?: string;
+  };
+  
+  // Données de la formation
+  training: {
+    id: string;
+    title: string;
+    duration: string;
+    trainer_name: string;
+    trainer_details?: string;
+    location: string;
+    start_date: string | null;
+    end_date: string | null;
+    objectives?: string[];
+    content?: string;
+    price?: number | null;
+    evaluation_methods?: {
+      profile_evaluation?: boolean;
+      skills_evaluation?: boolean;
+      knowledge_evaluation?: boolean;
+      satisfaction_survey?: boolean;
+    };
+    tracking_methods?: {
+      attendance_sheet?: boolean;
+      completion_certificate?: boolean;
+    };
+    pedagogical_methods?: {
+      needs_evaluation?: boolean;
+      theoretical_content?: boolean;
+      practical_exercises?: boolean;
+      case_studies?: boolean;
+      experience_sharing?: boolean;
+      digital_support?: boolean;
+    };
+    material_elements?: {
+      computer_provided?: boolean;
+      pedagogical_material?: boolean;
+      digital_support_provided?: boolean;
+    };
+  };
+  
+  // Données de l'entreprise (optionnelles)
+  company?: {
+    name: string;
+    address?: string;
+    postal_code?: string;
+    city?: string;
+    country?: string;
+    siret?: string;
+    contact_name?: string;
+    contact_email?: string;
+    contact_phone?: string;
+    isIndependent?: boolean;
+  };
+  
+  // Paramètres de l'organisme de formation
+  organizationSettings: OrganizationSettings;
+  
+  // Données de signatures
+  participantSignature?: string | null;
+  representativeSignature?: string | null;
+  trainerSignature?: string | null;
+  companySeal?: string | null; // Tampon d'entreprise
+  organizationSeal?: string | null; // Tampon de l'organisme de formation
+  
+  // Options d'affichage
+  viewContext?: 'crm' | 'student' | 'admin' | 'generic';
+  pdfMode?: boolean;
+  
+  // ID optionnel du formateur pour récupération de signature
+  trainerId?: string;
+  
+  // Callbacks
+  onRenderComplete?: () => void;
+}
+
+// Définition des paramètres par défaut pour l'organisation
+const DEFAULT_ORGANIZATION_SETTINGS: OrganizationSettings = {
+  organization_name: 'PETITMAKER',
+  address: '2 rue Héraclès',
+  siret: '928 386 044 00012',
+  activity_declaration_number: '32 59 10753 59',
+  representative_name: 'Nicolas Cleton',
+  representative_title: 'Président',
+  city: 'Villeneuve-d\'Ascq',
+  postal_code: '59650',
+  country: 'France'
+};
+
+// Niveau de log actuel - modifier cette valeur pour voir plus ou moins de logs
+const CURRENT_LOG_LEVEL = LOG_LEVELS.INFO; 
+
+// Fonction pour déterminer si nous sommes en mode admin/crm
+const isAdminOrCRM = () => {
+  // Vérifier si nous sommes en mode admin/CRM vs étudiant
+  const isClientSide = typeof window !== 'undefined';
+  if (!isClientSide) return true; // Par défaut en mode admin si SSR
+  
+  // Vérifier l'URL pour déterminer si nous sommes en mode admin/CRM
+  const path = window.location.pathname;
+  const isAdmin = path.includes('/admin') || 
+                path.includes('/crm') || 
+                path.includes('/dashboard');
+  return isAdmin;
+};
+
+// Fonction d'aide pour les logs conditionnels
+const log = (level: number, type: string, message: string, data?: any) => {
+  // Ne pas afficher les logs sauf si ce sont des erreurs critiques
+  if (level > LOG_LEVELS.ERROR) {
+    // Vérifier si nous sommes en mode développement
+    if (process.env.NODE_ENV !== 'development') {
+      return; // Ne rien faire en production sauf pour les erreurs
+    }
+  }
+  
+  // Continuer avec la logique de log normale
+  if (level <= CURRENT_LOG_LEVEL) {
+    if (data) {
+      console.log(`${type} ${message}`, data);
+    } else {
+      console.log(`${type} ${message}`);
+    }
+  }
+};
+
+/**
+ * Template unifié pour les conventions de formation
+ */
+export const UnifiedTrainingAgreementTemplate: React.FC<UnifiedTrainingAgreementTemplateProps> = ({
+  participant,
+  participants = [],
+  training,
+  company = { name: '' },
+  organizationSettings = DEFAULT_ORGANIZATION_SETTINGS,
+  participantSignature,
+  representativeSignature,
+  trainerSignature,
+  companySeal,
+  organizationSeal,
+  viewContext = 'crm',
+  pdfMode = false,
+  trainerId,
+  onRenderComplete
+}) => {
+  // Remplacer la fonction de log si on est en mode étudiant
+  // Fonction de log qui ne fait rien (pour le mode étudiant)
+  const noLog = () => {};
+  
+  // Utiliser une fonction qui ne fait rien en mode étudiant, sinon utiliser log normal
+  const effectiveLog = viewContext === 'student' ? noLog : log;
+  
+  // S'assurer que nous avons toujours un tableau de participants
+  const allParticipants = participants.length > 0 ? participants : (participant ? [participant] : []);
+  
+  // Vérifier la valeur initiale de company avant toute utilisation
+  effectiveLog(LOG_LEVELS.DEBUG, '🚨 [DEBUG]', 'Valeur initiale de company:', company);
+  effectiveLog(LOG_LEVELS.DEBUG, '🚨 [DEBUG]', `Valeur par défaut appliquée ?: ${company === null ? 'Oui (valeur par défaut)' : 'Non (company fourni)'}`);
+  effectiveLog(LOG_LEVELS.DEBUG, '🚨 [DEBUG]', `Est-ce que company a une propriété name? ${company && typeof company === 'object' && 'name' in company}`);
+  effectiveLog(LOG_LEVELS.DEBUG, '🚨 [DEBUG]', `Company isIndependent? ${company?.isIndependent === true ? 'Oui (indépendant)' : 'Non (entreprise standard)'}`);
+  effectiveLog(LOG_LEVELS.DEBUG, '🚨 [DEBUG]', `Nombre de participants: ${allParticipants.length}`);
+  
+  const documentRef = useRef<HTMLDivElement>(null);
+  const [signaturesInitialized, setSignaturesInitialized] = useState(false);
+
+  // État pour suivre les signatures et tampons déjà chargés avec succès
+  const [loadedSignatures, setLoadedSignatures] = useState<{
+    participantSig: boolean;
+    representativeSig: boolean;
+    trainerSig: boolean;
+    companySeal: boolean;
+    organizationSeal: boolean;
+  }>({
+    participantSig: false,
+    representativeSig: false,
+    trainerSig: false,
+    companySeal: false,
+    organizationSeal: false
+  });
+
+  // État global pour mémoriser les URLs de tampons déjà chargés
+  const [sealURLCache, setSealURLCache] = useState<{
+    companySeal: string | null;
+    organizationSeal: string | null;
+  }>({
+    companySeal: null,
+    organizationSeal: null
+  });
+
+  // Fonction pour marquer une signature comme chargée
+  const markSignatureAsLoaded = (type: 'participantSig' | 'representativeSig' | 'trainerSig' | 'companySeal' | 'organizationSeal') => {
+    setLoadedSignatures(prev => ({
+      ...prev,
+      [type]: true
+    }));
+    log(LOG_LEVELS.INFO, '🔒 [CHARGEMENT]', `Signature/tampon de type ${type} marqué(e) comme chargé(e)`);
+  };
+
+  // NOUVEAU: Hook pour forcer la récupération de la signature formateur côté apprenant
+  useEffect(() => {
+    // Variable pour suivre si la signature a déjà été trouvée
+    let signatureFound = false;
+    
+    const initializeTrainerSignature = async () => {
+      // Uniquement si on est en vue étudiant, sans signature de formateur et pas en mode PDF
+      if (viewContext === 'student' && !trainerSignature && !pdfMode && !signatureFound) {
+        log(LOG_LEVELS.DEBUG, '🆕 [TRAINER_FIX]', 'Tentative de récupération de la signature formateur côté étudiant');
+        
+        try {
+          // 0. Si on a un ID de formateur, l'utiliser en priorité
+          if (trainerId) {
+            log(LOG_LEVELS.DEBUG, '🆕 [TRAINER_FIX]', 'Recherche avec ID formateur:', trainerId);
+            
+            // Rechercher dans document_signatures spécifiquement pour ce formateur
+            const { data: trainerUserSigData, error: userSigError } = await supabase
+              .from('document_signatures')
+              .select('signature_url')
+              .eq('user_id', trainerId)
+              .eq('signature_type', 'trainer')
+              .order('created_at', { ascending: false })
+              .limit(1);
+              
+            if (!userSigError && trainerUserSigData && trainerUserSigData.length > 0 && trainerUserSigData[0].signature_url) {
+              log(LOG_LEVELS.DEBUG, '🆕 [TRAINER_FIX]', 'Signature trouvée via ID formateur:', trainerUserSigData[0].signature_url);
+              signatureFound = true;
+              injectTrainerSignature(trainerUserSigData[0].signature_url);
+              return;
+            }
+          }
+          
+          // 1. Première méthode: Rechercher dans document_signatures avec le format trainer_convention_ + ID
+          const { data: trainerSigData, error: sigError } = await supabase
+            .from('document_signatures')
+            .select('signature_url')
+            .eq('training_id', training.id)
+            .eq('type', 'convention')
+            .eq('signature_type', 'trainer')
+            .order('created_at', { ascending: false })
+            .limit(1);
+            
+          // Si on trouve avec cette méthode, on utilise cette signature
+          if (!sigError && trainerSigData && trainerSigData.length > 0 && trainerSigData[0].signature_url) {
+            log(LOG_LEVELS.DEBUG, '🆕 [TRAINER_FIX]', 'Signature formateur trouvée dans document_signatures:', trainerSigData[0].signature_url);
+            signatureFound = true;
+            injectTrainerSignature(trainerSigData[0].signature_url);
+            return; // On arrête ici si on a trouvé
+          }
+          
+          // 2. Deuxième méthode: Rechercher les objets dans le bucket signatures avec le préfixe "trainer_convention_"
+          const { data: storageFiles, error: storageError } = await supabase.storage
+            .from('signatures')
+            .list('', { 
+              search: `trainer_convention_${training.id}`,
+              sortBy: { column: 'created_at', order: 'desc' }
+            });
+            
+          if (!storageError && storageFiles && storageFiles.length > 0) {
+            const sigFile = storageFiles[0];
+            // Générer l'URL du fichier trouvé
+            const { data: urlData } = await supabase.storage
+              .from('signatures')
+              .getPublicUrl(sigFile.name);
+              
+            if (urlData && urlData.publicUrl) {
+              log(LOG_LEVELS.DEBUG, '🆕 [TRAINER_FIX]', 'Signature formateur trouvée dans le bucket:', urlData.publicUrl);
+              signatureFound = true;
+              injectTrainerSignature(urlData.publicUrl);
+              return; // On arrête ici si on a trouvé
+            }
+          }
+          
+          // 3. Méthode existante: Rechercher dans la table documents
+          const { data: trainerDocs, error } = await supabase
+            .from('documents')
+            .select('file_url')
+            .eq('title', "Signature du formateur")
+            .eq('training_id', training.id)
+            .eq('type', 'convention')
+            .order('created_at', { ascending: false })
+            .limit(1);
+          
+          if (error) {
+            log(LOG_LEVELS.ERROR, '🆕 [TRAINER_FIX]', 'Erreur lors de la recherche de signature formateur:', error);
+          } else if (trainerDocs && trainerDocs.length > 0 && trainerDocs[0].file_url) {
+            log(LOG_LEVELS.DEBUG, '🆕 [TRAINER_FIX]', 'Signature formateur trouvée dans la base documents:', trainerDocs[0].file_url);
+            signatureFound = true;
+            injectTrainerSignature(trainerDocs[0].file_url);
+          } else {
+            log(LOG_LEVELS.DEBUG, '🆕 [TRAINER_FIX]', 'Aucune signature formateur trouvée dans aucune source');
+          }
+        } catch (error) {
+          log(LOG_LEVELS.ERROR, '🆕 [TRAINER_FIX]', 'Erreur lors de la récupération de la signature formateur:', error);
+        }
+      }
+    };
+    
+    // Fonction pour injecter la signature dans le DOM
+    const injectTrainerSignature = (signatureUrl: string) => {
+      log(LOG_LEVELS.INFO, '🖊️ [TRAINER_SIG]', 'Injection de la signature du formateur:', signatureUrl);
+      
+      try {
+        // 1. Trouver l'élément img pour la signature du formateur
+        const signatureImg = document.querySelector('#trainer-signature-img') as HTMLImageElement;
+        if (signatureImg) {
+          // Sauvegarder les valeurs précédentes
+          const previousSrc = signatureImg.src;
+          const previousDisplay = signatureImg.style.display;
+          
+          // Définir la nouvelle source
+          signatureImg.src = signatureUrl;
+          signatureImg.style.display = 'block';
+          
+          // Ajouter un gestionnaire d'erreur
+          signatureImg.onerror = () => {
+            log(LOG_LEVELS.ERROR, '🖊️ [TRAINER_SIG]', 'Erreur lors du chargement de la signature:', signatureUrl);
+            // Restaurer les valeurs précédentes
+            signatureImg.src = previousSrc;
+            signatureImg.style.display = previousDisplay;
+          };
+          
+          // Ajouter un gestionnaire de chargement réussi
+          signatureImg.onload = () => {
+            log(LOG_LEVELS.INFO, '🖊️ [TRAINER_SIG]', 'Signature chargée avec succès');
+            
+            // Force un minimum de taille visible
+            signatureImg.style.minWidth = '100px';
+            signatureImg.style.minHeight = '30px';
+            
+            // Force le parent à être visible
+            const parentElement = signatureImg.parentElement;
+            if (parentElement) {
+              parentElement.style.display = 'block';
+              parentElement.style.visibility = 'visible';
+            }
+          };
+          
+          // Forcer la visibilité de tous les parents
+          let parent: HTMLElement | null = signatureImg.parentElement;
+          while (parent) {
+            // Rendre visible chaque parent
+            parent.style.display = 'block';
+            parent.style.visibility = 'visible';
+            
+            // Remonter au parent suivant
+            parent = parent.parentElement;
+          }
+          
+          log(LOG_LEVELS.INFO, '🖊️ [TRAINER_SIG]', 'Signature du formateur injectée avec succès');
+          return true;
+        } else {
+          log(LOG_LEVELS.ERROR, '🖊️ [TRAINER_SIG]', 'Élément de signature du formateur non trouvé');
+          return false;
+        }
+      } catch (error) {
+        log(LOG_LEVELS.ERROR, '🖊️ [TRAINER_SIG]', 'Erreur lors de l\'injection de la signature:', error);
+        return false;
+      }
+    };
+    
+    // Exécuter après un petit délai pour laisser le reste du composant s'initialiser
+    const timer = setTimeout(initializeTrainerSignature, 500);
+    return () => clearTimeout(timer);
+  }, [viewContext, trainerSignature, pdfMode, training.id, trainerId]);
+
+  // NOUVEAU: Hook pour forcer la récupération du tampon d'organisme côté apprenant
+  useEffect(() => {
+    // Variable pour suivre si le tampon a déjà été trouvé
+    let sealFound = false;
+    
+    const initializeOrganizationSeal = async () => {
+      // Uniquement si on est en vue étudiant, sans tampon d'organisation et pas en mode PDF
+      if (viewContext === 'student' && !organizationSeal && !pdfMode) {
+        log(LOG_LEVELS.DEBUG, '🔎 [ORG_SEAL]', 'Tentative de récupération du tampon d\'organisme côté étudiant');
+        
+        try {
+          // Essayer via la fonction loadOrganizationSealDirectly du composant SafeImage
+          const directSealUrl = await loadOrganizationSealDirectly();
+          if (directSealUrl) {
+            log(LOG_LEVELS.DEBUG, '✅ [ORG_SEAL]', 'Tampon trouvé via loadOrganizationSealDirectly:', directSealUrl);
+            
+            // Mise à jour directe du DOM
+            const sealImg = document.querySelector('#organization-seal-img') as HTMLImageElement;
+            if (sealImg) {
+              log(LOG_LEVELS.INFO, '✅ [ORG_SEAL]', 'Mise à jour directe du DOM avec le tampon d\'organisme');
+              sealImg.src = directSealUrl;
+              sealImg.style.display = 'block';
+            } else {
+              log(LOG_LEVELS.WARN, '⚠️ [ORG_SEAL]', 'Élément #organization-seal-img non trouvé dans le DOM');
+            }
+          } else {
+            log(LOG_LEVELS.WARN, '⚠️ [ORG_SEAL]', 'Aucun tampon d\'organisme trouvé');
+          }
+        } catch (error) {
+          log(LOG_LEVELS.ERROR, '❌ [ORG_SEAL]', 'Erreur lors de la récupération du tampon d\'organisme:', error);
+        }
+      }
+    };
+    
+    // Fonction pour injecter le tampon dans le DOM
+    const injectOrganizationSeal = (sealUrl: string) => {
+      log(LOG_LEVELS.INFO, '🔄 [INJECTION_SEAL]', 'Injection du tampon d\'organisme:', sealUrl);
+      
+      try {
+        // 1. Trouver l'élément img avec l'ID organization-seal-img
+        const sealImgElement = document.querySelector('#organization-seal-img') as HTMLImageElement;
+        if (sealImgElement) {
+          // Sauvegarder les valeurs précédentes
+          const previousSrc = sealImgElement.src;
+          const previousDisplay = sealImgElement.style.display;
+          
+          // Définir la nouvelle source
+          sealImgElement.src = sealUrl;
+          sealImgElement.style.display = 'block';
+          sealImgElement.setAttribute('alt', 'Tampon de l\'organisme de formation');
+          
+          // Ajouter un gestionnaire d'erreur au cas où l'image ne se charge pas
+          sealImgElement.onerror = () => {
+            log(LOG_LEVELS.ERROR, '🔄 [INJECTION_SEAL]', 'Erreur lors du chargement du tampon:', sealUrl);
+            // Restaurer les valeurs précédentes
+            sealImgElement.src = previousSrc;
+            sealImgElement.style.display = previousDisplay;
+          };
+          
+          // Ajouter un gestionnaire de chargement réussi
+          sealImgElement.onload = () => {
+            log(LOG_LEVELS.INFO, '🔄 [INJECTION_SEAL]', 'Tampon chargé avec succès');
+            
+            // Force un minimum de taille visible
+            sealImgElement.style.minWidth = '100px';
+            sealImgElement.style.minHeight = '100px';
+            
+            // Force le parent à être visible
+            const parentElement = sealImgElement.parentElement;
+            if (parentElement) {
+              parentElement.style.display = 'block';
+              parentElement.style.visibility = 'visible';
+            }
+          };
+          
+          // Forcer la visibilité de tous les parents
+          let parent: HTMLElement | null = sealImgElement.parentElement;
+          while (parent) {
+            // Rendre visible chaque parent
+            parent.style.display = 'block';
+            parent.style.visibility = 'visible';
+            
+            // Remonter au parent suivant
+            parent = parent.parentElement;
+          }
+          
+          log(LOG_LEVELS.INFO, '🔄 [INJECTION_SEAL]', 'Tampon d\'organisme injecté avec succès');
+          return true;
+        } else {
+          log(LOG_LEVELS.ERROR, '🔄 [INJECTION_SEAL]', 'Élément #organization-seal-img non trouvé');
+          return false;
+        }
+      } catch (error) {
+        log(LOG_LEVELS.ERROR, '🔄 [INJECTION_SEAL]', 'Erreur lors de l\'injection du tampon:', error);
+        return false;
+      }
+    };
+    
+    // Exécuter après un petit délai pour laisser le reste du composant s'initialiser
+    const timer = setTimeout(initializeOrganizationSeal, 500);
+    return () => clearTimeout(timer);
+  }, [viewContext, organizationSeal, pdfMode]);
+
+  // CORRECTION: Vérifier explicitement que les valeurs sont correctes
+  // S'assurer que les URL de signatures et tampons sont du bon type et non mélangés
+  const validateSignatures = () => {
+    if (companySeal && companySeal.includes('participant_convention')) {
+      log(LOG_LEVELS.ERROR, '⚠️ [CORRECTION]', 'Détection d\'un problème: companySeal contient une référence à participant');
+    }
+
+    if (organizationSeal && organizationSeal.includes('participant_convention')) {
+      log(LOG_LEVELS.ERROR, '⚠️ [CORRECTION]', 'Détection d\'un problème: organizationSeal contient une référence à participant');
+    }
+    
+    if (trainerSignature && trainerSignature.includes('participant_convention')) {
+      log(LOG_LEVELS.ERROR, '⚠️ [CORRECTION]', 'Détection d\'un problème: trainerSignature contient une référence à participant');
+    }
+    
+    // Vérifier les URL pour confirmer les types
+    if (trainerSignature) {
+      log(LOG_LEVELS.INFO, '🔎 [VERIFICATION]', 'URL de la signature formateur:', trainerSignature);
+    }
+    if (representativeSignature) {
+      log(LOG_LEVELS.INFO, '🔎 [VERIFICATION]', 'URL de la signature représentant:', representativeSignature);
+    }
+    if (participantSignature) {
+      log(LOG_LEVELS.INFO, '🔎 [VERIFICATION]', 'URL de la signature participant:', participantSignature);
+    }
+    if (companySeal) {
+      log(LOG_LEVELS.INFO, '🔎 [VERIFICATION]', 'URL du tampon entreprise:', companySeal);
+    }
+    if (organizationSeal) {
+      log(LOG_LEVELS.INFO, '🔎 [VERIFICATION]', 'URL du tampon organisme:', organizationSeal);
+    }
+  };
+
+  // Vérifier les signatures au chargement
+  useEffect(() => {
+    validateSignatures();
+  }, [participantSignature, representativeSignature, trainerSignature, companySeal, organizationSeal]);
+
+  // Fonction pour valider une URL de tampon
+  const validateSealURL = (url: string | null): string | null => {
+    if (!url) {
+      return null;
+    }
+    
+    // S'assurer que c'est une chaîne
+    if (typeof url !== 'string') {
+      log(LOG_LEVELS.WARN, '🚨 [VALIDATION]', 'URL de tampon invalide (type non-string)', typeof url);
+      return null;
+    }
+    
+    try {
+      // Extraire l'URL de base sans les paramètres de requête pour éviter les problèmes avec des URLs très longues
+      const baseUrl = url.split('?')[0];
+      
+      // Vérifier si c'est une URL valide
+      const parsedUrl = new URL(baseUrl);
+      
+      // Vérifier si c'est un tampon stocké dans le sous-dossier 'seals/' ou avec le type 'companySeal' ou 'organizationSeal'
+      const isSealInSealsFolder = parsedUrl.pathname.includes('/seals/');
+      const isSealInOrganizationSeals = parsedUrl.pathname.includes('/organization-seals/') || 
+                                      parsedUrl.pathname.includes('/organization_seal_');
+      const isSealByType = 
+        parsedUrl.pathname.includes('companySeal_') || 
+        parsedUrl.pathname.includes('seal_company_convention') ||
+        parsedUrl.pathname.includes('organizationSeal_') || 
+        parsedUrl.pathname.includes('seal_organization_convention');
+      
+      // Accepter également les URLs qui contiennent 'signatures' et 'organization_seal'
+      const isOrganizationSealInRoot = parsedUrl.pathname.includes('/signatures/organization_seal_');
+      
+      // Si c'est un tampon mais qu'il n'est pas dans le bon dossier, émettre un avertissement
+      if (!isSealInSealsFolder && !isSealInOrganizationSeals && (isSealByType || isOrganizationSealInRoot)) {
+        log(LOG_LEVELS.DEBUG, '🚨 [VALIDATION]', 'URL de tampon sans chemin /seals/ ou /organization-seals/:', baseUrl);
+        // On accepte quand même car c'est un tampon
+      }
+      
+      if (isSealInSealsFolder || isSealInOrganizationSeals || isSealByType || isOrganizationSealInRoot) {
+        log(LOG_LEVELS.INFO, '✅ [VALIDATION]', 'URL de tampon valide:', baseUrl);
+        return url;
+      }
+      
+      // Si l'URL contient "participant_convention", ce n'est probablement pas un tampon
+      if (baseUrl.includes('participant_convention')) {
+        log(LOG_LEVELS.ERROR, '❌ [VALIDATION]', 'URL qui semble être une signature incorrectement assignée comme tampon:', baseUrl);
+        return null;
+      }
+      
+      log(LOG_LEVELS.DEBUG, '🚨 [VALIDATION]', 'URL qui ne semble pas être un tampon (mais acceptée):', baseUrl);
+      // Si c'est une URL mais qui ne semble pas être un tampon, on accepte quand même
+      // car cela pourrait être un tampon importé d'ailleurs
+      return url;
+    } catch (error) {
+      log(LOG_LEVELS.WARN, '🚨 [VALIDATION]', 'URL de tampon invalide (erreur de parsing):', { url, error });
+      // Si ce n'est pas une URL valide, retourner null
+      return null;
+    }
+  };
+
+  // CORRECTION MAJEURE: S'assurer que les signatures sont bien distinctes
+  // Pour assurer que le tampon de l'organisme n'est pas remplacé par une signature
+  const safeOrganizationSeal = validateSealURL(organizationSeal || null);
+    
+  // Pour assurer que le tampon de l'entreprise n'est pas remplacé par une signature
+  const safeCompanySeal = validateSealURL(companySeal || null);
+    
+  // S'assurer que la signature du formateur n'est pas une signature de participant ni un tampon
+  // MODIFICATION MAJEURE: Ne JAMAIS utiliser representativeSignature comme fallback
+  const safeTrainerSignature = trainerSignature &&
+    !trainerSignature.includes('participant_convention') &&
+    !trainerSignature.includes('representative_convention') && // Ajout pour éviter la confusion avec le représentant
+    !trainerSignature.includes('seal_company_convention') &&
+    !trainerSignature.includes('companySeal') ?
+    trainerSignature : null; // Jamais de fallback vers representativeSignature
+
+  // Pour la signature d'entreprise, s'assurer qu'on utilise bien la signature du participant
+  const safeParticipantSignature = participantSignature || null;
+    
+  // Utiliser une signature effective pour le formateur, JAMAIS celle du représentant
+  const effectiveTrainerSignature = safeTrainerSignature;
+
+  // Fonction pour valider la signature du formateur
+  const isValidTrainerSignature = (url: string | null | undefined): boolean => {
+    if (!url) return false;
+    return !url.includes('seal_company_convention') && 
+           !url.includes('companySeal') && 
+           !url.includes('seal_organization_convention') && 
+           !url.includes('organizationSeal');
+  };
+  
+  // Double vérification pour s'assurer qu'on n'utilise pas un tampon comme signature
+  const isSignatureURL = (url: string | null): boolean => {
+    if (!url) return false;
+    return url.includes('signatures/');
+  };
+  
+  const isSealURL = (url: string | null): boolean => {
+    if (!url) return false;
+    
+    // Extraire l'URL de base sans les paramètres de requête
+    const baseUrl = url.split('?')[0];
+    
+    // Log pour vérifier l'URL exacte qui est vérifiée
+    log(LOG_LEVELS.INFO, '🔍 [VERIFICATION_URL]', 'Vérification si URL est un tampon:', baseUrl);
+    
+    // Ajout de conditions plus larges pour accepter les tampons d'organisation
+    return baseUrl.includes('seals/') || 
+           baseUrl.includes('companySeal_') || 
+           baseUrl.includes('seal_company_convention') ||
+           baseUrl.includes('organizationSeal_') || 
+           baseUrl.includes('organization_seal') ||
+           baseUrl.includes('seal_organization_convention') ||
+           baseUrl.includes('/organization-seals/') ||
+           baseUrl.includes('/organization_seal_') ||
+           // Ajouter cette condition pour accepter les tampons d'organisation stockés directement dans signatures/
+           (baseUrl.includes('signatures/') && (
+             baseUrl.includes('organization') || 
+             baseUrl.includes('tampon_org') || 
+             baseUrl.includes('org_seal')
+           ));
+  };
+  
+  // Logs de vérification
+  log(LOG_LEVELS.INFO, '🔍 [VERIFICATION_FINALE]', 'URL signatures et tampons:', JSON.stringify({
+    participant: {
+      original: participantSignature,
+      safe: safeParticipantSignature,
+      isSignature: participantSignature ? isSignatureURL(participantSignature) : false,
+      isSeal: participantSignature ? isSealURL(participantSignature) : false
+    },
+    trainer: {
+      original: trainerSignature, 
+      safe: safeTrainerSignature,
+      effectiveTrainer: effectiveTrainerSignature,
+      isSignature: trainerSignature ? isSignatureURL(trainerSignature) : false,
+      isSeal: trainerSignature ? isSealURL(trainerSignature) : false
+    },
+    companySeal: {
+      original: companySeal,
+      safe: safeCompanySeal,
+      isSignature: companySeal ? isSignatureURL(companySeal) : false,
+      isSeal: companySeal ? isSealURL(companySeal) : false
+    },
+    organizationSeal: {
+      original: organizationSeal,
+      safe: safeOrganizationSeal,
+      isSignature: organizationSeal ? isSignatureURL(organizationSeal) : false,
+      isSeal: organizationSeal ? isSealURL(organizationSeal) : false
+    }
+  }));
+  
+  log(LOG_LEVELS.INFO, '🔧 [CORRECTION]', 'Signatures finales après validation:', JSON.stringify({
+    participantSig: !!participantSignature,
+    representativeSig: !!representativeSignature,
+    trainerSig: !!trainerSignature,
+    effectiveTrainerSig: !!effectiveTrainerSignature,
+    companySeal: !!companySeal,
+    safeCompanySeal: !!safeCompanySeal,
+    organizationSeal: !!organizationSeal,
+    safeOrganizationSeal: !!safeOrganizationSeal
+  }));
+    
+  useEffect(() => {
+    log(LOG_LEVELS.INFO, '📂 [DEBUG]', 'UnifiedTrainingAgreementTemplate chargé');
+    log(LOG_LEVELS.DEBUG, '📂 [DEBUG]', 'Données participant et entreprise', JSON.stringify({ 
+      company, 
+      participant, 
+      signatures: {
+        participant: participantSignature ? 'Présente' : 'Absente',
+        representative: representativeSignature ? 'Présente' : 'Absente', 
+        trainer: trainerSignature ? 'Présente' : 'Absente',
+        companySeal: companySeal ? 'Présent' : 'Absent',
+        organizationSeal: organizationSeal ? 'Présent' : 'Absent'
+      }
+    }));
+    
+    // Log détaillé des données participant
+    log(LOG_LEVELS.DEBUG, '📂 [DEBUG] Données complètes du participant:', JSON.stringify({
+      id: participant?.id,
+      name: `${participant?.first_name} ${participant?.last_name}`,
+      email: participant?.email || 'Non spécifié',
+      job_position: participant?.job_position || 'Non spécifié',
+      status: participant?.status || 'Non spécifié',
+      company: participant?.company || 'Non spécifié'
+    }));
+    
+    // Vérifier signatures disponibles
+    log(LOG_LEVELS.INFO, '📂 [DEBUG] Signatures disponibles:', JSON.stringify({
+      participant: participantSignature ? 'Oui' : 'Non',
+      representative: representativeSignature ? 'Oui' : 'Non', 
+      trainer: trainerSignature ? 'Oui' : 'Non',
+      companySeal: companySeal ? 'Oui' : 'Non'
+    }));
+    
+    // Appliquer l'initialisation des signatures après un délai
+    const timer = setTimeout(() => {
+      setSignaturesInitialized(true);
+    }, 300);
+    
+    // Notifier quand le composant est prêt
+    if (onRenderComplete) {
+      setTimeout(() => {
+        onRenderComplete();
+      }, 500);
+    }
+    
+    return () => clearTimeout(timer);
+  }, [onRenderComplete, company, participant?.company]);
+
+  // Log des valeurs de signature pour débogage
+  useEffect(() => {
+    log(LOG_LEVELS.INFO, '🔍 [DEBUG]', 'TrainingAgreementTemplate - Tampons et signatures reçus:', JSON.stringify({
+      participantSignature: participantSignature ? "PRÉSENTE" : "ABSENTE",
+      representativeSignature: representativeSignature ? "PRÉSENTE" : "ABSENTE",
+      trainerSignature: trainerSignature ? "PRÉSENTE" : "ABSENTE",
+      companySeal: companySeal ? "PRÉSENT" : "ABSENT",
+      organizationSeal: organizationSeal ? "PRÉSENT" : "ABSENT"
+    }));
+    
+    if (organizationSeal) {
+      log(LOG_LEVELS.INFO, '✅ [DEBUG]', 'Tampon de l\'organisme URL:', organizationSeal);
+    }
+  }, [participantSignature, representativeSignature, trainerSignature, companySeal, organizationSeal]);
+
+  // Formatage des dates
+  const formatDate = (dateString: string | null) => {
+    if (!dateString) return '';
+    try {
+      const date = new Date(dateString);
+      return format(date, 'dd/MM/yyyy', { locale: fr });
+    } catch (e) {
+      log(LOG_LEVELS.ERROR, '❌ [DATE]', `Erreur de formatage de date: ${String(e)}`);
+      return dateString;
+    }
+  };
+
+  // Dates de formation
+  const getTrainingDates = () => {
+    const startDate = formatDate(training.start_date);
+    const endDate = formatDate(training.end_date);
+    
+    if (startDate && endDate && startDate !== endDate) {
+      return `du ${startDate} au ${endDate}`;
+    } else if (startDate) {
+      return `le ${startDate}`;
+    } else {
+      return 'Dates à définir';
+    }
+  };
+  
+  // Obtenir les objectifs de formation
+  const getObjectives = () => {
+    if (Array.isArray(training.objectives) && training.objectives.length > 0) {
+      return training.objectives;
+    }
+    return ['Objectifs à définir'];
+  };
+
+  // Méthodes d'évaluation
+  const getEvaluationMethods = () => {
+    const methods = [];
+    
+    if (training.evaluation_methods?.profile_evaluation) methods.push("Évaluation du profil avant formation");
+    if (training.evaluation_methods?.skills_evaluation) methods.push("Évaluation des compétences acquises");
+    if (training.evaluation_methods?.knowledge_evaluation) methods.push("Évaluation des connaissances");
+    if (training.evaluation_methods?.satisfaction_survey) methods.push("Questionnaire de satisfaction");
+    
+    return methods.length > 0 ? methods : ["Évaluation à définir"];
+  };
+
+  // Méthodes pédagogiques
+  const getPedagogicalMethods = () => {
+    const methods = [];
+    
+    if (training.pedagogical_methods?.needs_evaluation) methods.push("Évaluation des besoins");
+    if (training.pedagogical_methods?.theoretical_content) methods.push("Apports théoriques");
+    if (training.pedagogical_methods?.practical_exercises) methods.push("Exercices pratiques");
+    if (training.pedagogical_methods?.case_studies) methods.push("Études de cas");
+    if (training.pedagogical_methods?.experience_sharing) methods.push("Partage d'expérience");
+    if (training.pedagogical_methods?.digital_support) methods.push("Support de cours numérique");
+    
+    return methods.length > 0 ? methods : ["Méthodes pédagogiques à définir"];
+  };
+
+  // Éléments matériels
+  const getMaterialElements = () => {
+    const elements = [];
+    
+    if (training.material_elements?.computer_provided) elements.push("Ordinateur fourni");
+    if (training.material_elements?.pedagogical_material) elements.push("Matériel pédagogique");
+    if (training.material_elements?.digital_support_provided) elements.push("Support de cours au format numérique");
+    
+    return elements.length > 0 ? elements : ["Éléments matériels à définir"];
+  };
+  
+  // Fonction pour ajouter un paramètre anti-cache aux URLs d'images
+  const getAntiCacheSignatureUrl = (url: string, isForSeal: boolean = false): string => {
+    if (!url) return '';
+    
+    // Si l'URL est déjà dans le cache de tampons et qu'il s'agit d'un tampon, utiliser la version en cache
+    if (isForSeal) {
+      if (sealURLCache.companySeal && url.includes(sealURLCache.companySeal.split('?')[0])) {
+        log(LOG_LEVELS.INFO, '🔒 [ANTI_CACHE]', 'Utilisation de l\'URL en cache pour le tampon entreprise');
+        return sealURLCache.companySeal;
+      }
+      if (sealURLCache.organizationSeal && url.includes(sealURLCache.organizationSeal.split('?')[0])) {
+        log(LOG_LEVELS.INFO, '🔒 [ANTI_CACHE]', 'Utilisation de l\'URL en cache pour le tampon organisme');
+        return sealURLCache.organizationSeal;
+      }
+    }
+    
+    // Vérifier si c'est une URL
+    try {
+      const parsedUrl = new URL(url);
+      
+      // Ajouter un paramètre de timestamp pour éviter la mise en cache
+      const timestamp = new Date().toISOString().replace(/[^0-9]/g, '');
+      
+      // Si c'est une URL de tampon (dans le dossier seals/) et qu'on n'a pas encore de version en cache
+      if (isForSeal && (url.includes('/seals/') || url.includes('seal_company_convention') || url.includes('seal_organization_convention'))) {
+        // Pour les tampons, utiliser un paramètre plus stable (sans forcereload)
+        return `${url}?t=${timestamp}&anticache=seal`;
+      }
+      
+      // Pour les autres signatures, ajouter simplement un timestamp
+      return `${url}?t=${timestamp}`;
+    } catch (e) {
+      // Si ce n'est pas une URL valide, retourner telle quelle
+      log(LOG_LEVELS.WARN, '🔍 [DEBUG]', 'URL invalide pour getAntiCacheSignatureUrl:', url);
+      return url;
+    }
+  };
+
+  // Fonction pour formater le prix
+  const formatPrice = (price: number | null | undefined): string => {
+    if (price === null || price === undefined) return 'Sur devis';
+    return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(price);
+  };
+
+  // Récupération des données formatées
+  const objectives = getObjectives();
+  const evaluationMethods = getEvaluationMethods();
+  const pedagogicalMethods = getPedagogicalMethods();
+  const materialElements = getMaterialElements();
+  
+  // Formatage des données d'entreprise avec validations renforcées
+  const isValidString = (value: any): boolean => {
+    return value !== null && value !== undefined && value !== '' && typeof value === 'string' && value.trim().length > 0;
+  };
+
+  // Ajouter des logs avant tout traitement pour comprendre le contexte
+  log(LOG_LEVELS.INFO, '📊 [DEBUG]', 'Contexte de rendu:', { 
+    viewContext, 
+    pdfMode,
+    hasProfessionalCompany: !!company,
+    hasParticipantCompany: !!participant?.company,
+    participantCompanyIsEmpty: participant?.company === '',
+    participantIsIndependent: participant?.status === 'auto-entrepreneur' || participant?.status === 'freelance',
+    companyHasIsIndependentFlag: company?.isIndependent === true
+  });
+  
+  // Fonction pour garantir une valeur texte sécurisée
+  const safeText = (value: any, defaultValue: string = 'À compléter'): string => {
+    if (value === null || value === undefined || value === '' || (typeof value === 'string' && value.trim() === '')) {
+      return defaultValue;
+    }
+    return String(value);
+  };
+
+  // Vérifier les données d'entreprise avec des validations renforcées
+  const companyName = isValidString(company?.name) ? company.name : 
+                      isValidString(participant?.company) ? participant?.company : 
+                      participant?.status === 'auto-entrepreneur' ? `${participant?.first_name} ${participant?.last_name} (Auto-entrepreneur)` :
+                      'À compléter';
+                      
+  // Fonction pour déterminer si le texte de l'entreprise doit être mis en évidence comme manquant
+  const shouldHighlight = (value: string): boolean => {
+    return value === 'À compléter' || !value || value.trim() === '';
+  };
+
+  // Formater l'adresse complète de l'entreprise pour "Fait en double exemplaire"
+  const getFormattedCompanyAddress = (): string => {
+    if (!isValidString(companyAddress)) return '';
+    
+    let formatted = companyAddress;
+    if (company?.postal_code && company?.city) {
+      formatted += `, ${company.postal_code} ${company.city}`;
+    }
+    if (company?.country && company.country !== 'France') {
+      formatted += `, ${company.country}`;
+    }
+    return formatted;
+  };
+                      
+  // Déterminer le texte à afficher pour l'entreprise
+  const displayCompanyInfo = (): React.ReactNode => {
+    if (isValidString(companyName)) {
+      // Une entreprise est spécifiée
+      return (
+        <>
+          <p data-debug="company-name">L'entreprise : <span style={{background: 'transparent'}}>{companyName}</span></p>
+          <p data-debug="company-address">Adresse de l'entreprise : <span style={{background: shouldHighlight(companyAddress) ? '#ffeeee' : 'transparent'}}>{companyAddress || 'À compléter'}{company?.postal_code && company?.city ? `, ${company.postal_code} ${company.city}` : ''}</span></p>
+          <p data-debug="company-siret">SIRET de l'entreprise : <span style={{background: shouldHighlight(companySiret) ? '#ffeeee' : 'transparent'}}>{companySiret || 'À compléter'}</span></p>
+        </>
+      );
+    } else if (participant?.status === 'auto-entrepreneur' || participant?.status === 'freelance') {
+      // Cas spécial pour auto-entrepreneur ou freelance
+      return (
+        <>
+          <p data-debug="company-name">Apprenant indépendant : <span style={{background: 'transparent'}}>{participant?.first_name} {participant?.last_name}</span></p>
+          <p data-debug="company-status">Statut : <span style={{background: 'transparent'}}>{participant?.status || 'Auto-entrepreneur'}</span></p>
+          <p data-debug="company-siret">SIRET : <span style={{background: shouldHighlight(companySiret) ? '#ffeeee' : 'transparent'}}>{companySiret || 'À compléter'}</span></p>
+        </>
+      );
+    } else {
+      // Cas par défaut - information manquante
+      return (
+        <>
+          <p data-debug="company-name">L'entreprise : <span style={{background: '#ffeeee'}}>À compléter</span></p>
+          <p data-debug="company-address">Adresse de l'entreprise : <span style={{background: '#ffeeee'}}>À compléter</span></p>
+          <p data-debug="company-siret">SIRET de l'entreprise : <span style={{background: '#ffeeee'}}>À compléter</span></p>
+        </>
+      );
+    }
+  };
+  
+  const companyAddress = safeText(company?.address);
+  
+  const companySiret = safeText(company?.siret);
+  
+  log(LOG_LEVELS.INFO, '📂 [DEBUG]', 'Données formatées d\'entreprise avec validation:', JSON.stringify({ 
+    companyName,
+    companyAddress,
+    companySiret,
+    'priorité name': isValidString(company?.name) ? 'company.name' : isValidString(participant?.company) ? 'participant.company' : 'valeur défaut',
+    'priorité address': isValidString(company?.address) ? 'company.address' : 'valeur défaut',
+    'priorité siret': isValidString(company?.siret) ? 'company.siret' : 'valeur défaut'
+  }));
+  
+  // Logs détaillés sur la source des données
+  log(LOG_LEVELS.INFO, '📂 [DEBUG]', 'Sources des données d\'entreprise:', {
+    'company objet complet': company,
+    'company?.name existe': !!company?.name,
+    'participant.company existe': !!participant?.company,
+    'valeur participant.company': participant?.company,
+    'valeur company?.name': company?.name,
+    'valeur company?.address': company?.address,
+    'valeur company?.siret': company?.siret
+  });
+  
+  // Vérifier si les valeurs sont bien définies
+  log(LOG_LEVELS.INFO, '📂 [DEBUG]', 'Vérification des types:', {
+    'type de company': typeof company,
+    'company est null': company === null,
+    'company est undefined': company === undefined,
+    'type de company?.name': typeof company?.name,
+    'type de participant.company': typeof participant?.company,
+    'JSON stringifié': JSON.stringify(company),
+    'pdfMode activé': pdfMode
+  });
+  
+  // Log pour debugger si les cases à cocher sont correctement définies
+  log(LOG_LEVELS.INFO, '🔍 [DEBUG]', 'Valeurs des cases à cocher:', JSON.stringify({
+    'pedagogical_methods': training.pedagogical_methods,
+    'material_elements': training.material_elements,
+    'needs_evaluation': training.pedagogical_methods?.needs_evaluation,
+    'theoretical_content': training.pedagogical_methods?.theoretical_content,
+    'practical_exercises': training.pedagogical_methods?.practical_exercises
+  }));
+  
+  // Log pour le debug des signatures/tampons
+  log(LOG_LEVELS.INFO, '🔎 [DIAGNOSTIC_TAMPONS]', 'Props de signatures reçues:', JSON.stringify({
+    participantSignature: participantSignature ? `${participantSignature.substring(0, 50)}...` : null,
+    representativeSignature: representativeSignature ? `${representativeSignature.substring(0, 50)}...` : null,
+    trainerSignature: trainerSignature ? `${trainerSignature.substring(0, 50)}...` : null,
+    companySeal: companySeal ? `${companySeal.substring(0, 50)}...` : null,
+    organizationSeal: organizationSeal ? `${organizationSeal.substring(0, 50)}...` : null,
+  }));
+
+  // Vérification des tampons spécifiquement
+  log(LOG_LEVELS.INFO, '🔎 [DIAGNOSTIC_TAMPONS]', 'Analyse des tampons:', JSON.stringify({
+    companySealProvided: !!companySeal,
+    organizationSealProvided: !!organizationSeal,
+    companySealType: companySeal ? typeof companySeal : 'non fourni',
+    organizationSealType: organizationSeal ? typeof organizationSeal : 'non fourni',
+    companySealIsURL: companySeal?.startsWith('http'),
+    organizationSealIsURL: organizationSeal?.startsWith('http'),
+  }));
+
+  useEffect(() => {
+    log(LOG_LEVELS.INFO, '🔎 [DIAGNOSTIC_TAMPONS]', 'Signatures et tampons après montage du composant:', {
+      participantSignature: participantSignature ? 'présent' : 'absent',
+      representativeSignature: representativeSignature ? 'présent' : 'absent', 
+      trainerSignature: trainerSignature ? 'présent' : 'absent',
+      companySeal: companySeal ? 'présent' : 'absent',
+      organizationSeal: organizationSeal ? 'présent' : 'absent',
+      viewContext
+    });
+  }, [participantSignature, representativeSignature, trainerSignature, companySeal, organizationSeal, viewContext]);
+
+  useEffect(() => {
+    // Log lors du chargement des signatures dans le composant pour identifier les substitutions
+    if (signaturesInitialized) {
+      log(LOG_LEVELS.INFO, '🔎 [DIAGNOSTIC_TAMPONS]', 'Signatures initialisées - valeurs utilisées:', {
+        participantSig: participantSignature ? 'présent' : 'absent',
+        representativeSig: representativeSignature ? 'présent' : 'absent',
+        effectiveTrainerSig: effectiveTrainerSignature ? 'présent' : 'absent',
+        companySealValue: companySeal ? 'présent' : 'absent',
+        organizationSealValue: organizationSeal ? 'présent' : 'absent'
+      });
+    }
+  }, [signaturesInitialized]);
+
+  // Correction pour validateSealType
+  const validateSealType = (url: string | null | undefined, expectedType: 'company' | 'organization'): boolean => {
+    // Si l'URL est undefined ou null, retourner false directement
+    if (!url) return false;
+
+    // Log pour diagnostic
+    log(LOG_LEVELS.INFO, '🔍 [VERIFICATION_TAMPON]', `Validation du tampon ${expectedType}: ${url}`);
+    
+    // Vérifier explicitement le type de tampon
+    if (expectedType === 'company') {
+      // Pour les tampons d'entreprise
+      return url.includes('seal_company_convention') || 
+             url.includes('companySeal') ||
+             url.includes('seals/company');
+    } else if (expectedType === 'organization') {
+      // Pour les tampons d'organisation, être plus permissif
+      return url.includes('seal_organization_convention') || 
+             url.includes('organizationSeal') || 
+             url.includes('organization_seal') ||
+             url.includes('/organization-seals/') || 
+             url.includes('/organization_seal_') ||
+             // Ajouter des conditions qui permettent d'identifier un tampon d'organisation quel que soit le chemin
+             (url.includes('signatures/') && (
+               url.includes('organization') || 
+               url.includes('tampon_org') || 
+               url.includes('org_seal')
+             ));
+    }
+    return false;
+  };
+
+  // Zone de signature du formateur
+  const renderTrainerSignature = () => {
+    // Logs détaillés pour le débogage de la signature formateur
+    log(LOG_LEVELS.INFO, '🆕 [TRAINER_RENDER]', 'Rendu de la signature formateur:', {
+      trainerSignature,
+      safeTrainerSignature,
+      representativeSignature,
+      isValidTrainer: trainerSignature ? isValidTrainerSignature(trainerSignature) : false,
+      viewContext,
+      usesRepresentativeAsFallback: false
+    });
+    
+    // Si nous sommes en vue étudiant, on utilise une approche plus permissive
+    if (viewContext === 'student') {
+      return (
+        <div 
+          className="h-28 border border-gray-300 relative" 
+          id="trainer-signature-container" 
+          data-signature-container="trainer" 
+          data-signature-type="trainer"
+        >
+          {trainerSignature ? (
+            <div 
+              className="w-full h-full flex flex-col items-center justify-center overflow-hidden" 
+              data-signature-wrapper="trainer"
+              style={{ opacity: signaturesInitialized ? 1 : 0, transition: 'opacity 0.3s ease-in-out' }}
+            >
+              <SafeImage 
+                src={getAntiCacheSignatureUrl(trainerSignature)} 
+                alt="Signature du formateur" 
+                className="max-h-20 max-w-[95%] object-contain"
+                id="trainer-signature-img"
+                data-signature="true"
+                data-signature-type="trainer"
+                data-signature-url={trainerSignature}
+                onLoad={() => {
+                  log(LOG_LEVELS.INFO, '✅ [DEBUG]', 'Signature formateur chargée avec succès:', trainerSignature);
+                  markSignatureAsLoaded('trainerSig');
+                }}
+                onError={() => {
+                  log(LOG_LEVELS.ERROR, '❌ [ERROR]', 'Erreur de chargement de la signature formateur:', trainerSignature);
+                }}
+              />
+            </div>
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-gray-50" data-signature-placeholder="trainer">
+              <p className="text-gray-400 italic text-center">Signature en attente</p>
+            </div>
+          )}
+        </div>
+      );
+    }
+    
+    // Cas standard (vue CRM) - CORRECTION MAJEURE: Ne JAMAIS utiliser representativeSignature comme fallback
+    // pour éviter que la signature du représentant ne s'affiche à la place de celle du formateur
+    return (
+      <div 
+        className="h-28 border border-gray-300 relative" 
+        id="trainer-signature-container" 
+        data-signature-container="trainer" 
+        data-signature-type="trainer"
+      >
+        {/* N'utiliser que safeTrainerSignature, jamais representativeSignature */}
+        {safeTrainerSignature && typeof safeTrainerSignature === 'string' && isValidTrainerSignature(safeTrainerSignature) ? (
+          <div 
+            className="w-full h-full flex flex-col items-center justify-center overflow-hidden" 
+            data-signature-wrapper="trainer"
+            style={{ opacity: signaturesInitialized ? 1 : 0, transition: 'opacity 0.3s ease-in-out' }}
+          >
+            <SafeImage 
+              src={getAntiCacheSignatureUrl(safeTrainerSignature)} 
+              alt="Signature du formateur" 
+              className="max-h-20 max-w-[95%] object-contain"
+              id="trainer-signature-img"
+              data-signature="true"
+              data-signature-type="trainer"
+              data-signature-url={safeTrainerSignature}
+              onLoad={() => {
+                log(LOG_LEVELS.INFO, '✅ [DEBUG]', 'Signature formateur chargée avec succès:', safeTrainerSignature);
+                markSignatureAsLoaded('trainerSig');
+              }}
+              onError={() => {
+                log(LOG_LEVELS.ERROR, '❌ [ERROR]', 'Erreur de chargement de la signature formateur:', safeTrainerSignature);
+              }}
+            />
+          </div>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-gray-50" data-signature-placeholder="trainer">
+            <p className="text-gray-400 italic text-center">Signature en attente</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+  
+  // Zone de tampon organisme
+  const renderOrganizationSeal = () => {
+    // Préparation de l'URL validée du tampon - s'assurer que organizationSeal n'est pas undefined
+    const validatedSeal = validateSealURL(organizationSeal || null);
+    
+    // Validation du type de tampon
+    const sealIsValid = validateSealType(validatedSeal, 'organization');
+    
+    // Si le tampon est déjà chargé, utiliser la version en cache
+    const isAlreadyLoaded = loadedSignatures.organizationSeal && sealURLCache.organizationSeal;
+    
+    log(LOG_LEVELS.INFO, '🆕 [SEAL_RENDER]', 'Rendu du tampon organisme:', {
+      organizationSeal,
+      validated: sealIsValid,
+      viewContext,
+      isInCache: isAlreadyLoaded
+    });
+    
+    // Déterminer l'URL finale à utiliser
+    const finalSealURL = isAlreadyLoaded 
+      ? sealURLCache.organizationSeal 
+      : (validatedSeal && sealIsValid ? getAntiCacheSignatureUrl(validatedSeal, true) : null);
+    
+    return (
+      <div 
+        className="h-28 border border-gray-300 relative" 
+        id="organization-seal-container" 
+        data-signature-container="organizationSeal" 
+        data-signature-type="organizationSeal"
+      >
+        {finalSealURL ? (
+          <div 
+            className="w-full h-full flex items-center justify-center overflow-hidden" 
+            data-signature-wrapper="organizationSeal"
+            style={{ opacity: signaturesInitialized ? 1 : 0, transition: 'opacity 0.3s ease-in-out' }}
+          >
+            <SafeImage 
+              src={finalSealURL} 
+              alt="Tampon de l'organisme" 
+              className="max-h-24 max-w-[95%] object-contain"
+              id="organization-seal-img"
+              data-signature="true"
+              data-signature-type="organizationSeal"
+              data-signature-url={finalSealURL}
+              onLoad={() => {
+                log(LOG_LEVELS.INFO, '✅ [DEBUG]', 'Tampon organisme chargé avec succès:', finalSealURL);
+                // Enregistrer l'URL qui a bien fonctionné dans le cache
+                if (!sealURLCache.organizationSeal) {
+                  setSealURLCache(prev => ({
+                    ...prev,
+                    organizationSeal: finalSealURL
+                  }));
+                  log(LOG_LEVELS.INFO, '💾 [CACHE]', 'URL du tampon organisme mise en cache:', finalSealURL);
+                }
+                markSignatureAsLoaded('organizationSeal');
+              }}
+              onError={() => {
+                log(LOG_LEVELS.ERROR, '❌ [ERROR]', 'Erreur de chargement du tampon organisme:', finalSealURL);
+              }}
+            />
+          </div>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-gray-50" data-signature-placeholder="organizationSeal">
+            <p className="text-gray-400 italic text-center">Tampon en attente</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Zone de signature du représentant ou de l'apprenant
+  const renderParticipantSignature = () => {
+    // Variables pour la clarté
+    const hasParticipantSignature = participantSignature && typeof participantSignature === 'string' && isSignatureURL(participantSignature);
+    const hasRepresentativeSignature = representativeSignature && typeof representativeSignature === 'string' && isSignatureURL(representativeSignature);
+    
+    // URL effective à afficher (représentant en priorité si présent)
+    const effectiveSignature = hasRepresentativeSignature ? representativeSignature : (hasParticipantSignature ? participantSignature : null);
+    
+    // Si la signature est déjà chargée, ne pas regénérer le composant
+    const isSignatureLoaded = hasRepresentativeSignature ? loadedSignatures.representativeSig : loadedSignatures.participantSig;
+    
+    // Type de signature (pour le texte affiché)
+    const signatureType = hasRepresentativeSignature ? "representative" : "participant";
+    const signatureLabel = hasRepresentativeSignature ? "Signature du dirigeant" : "Signature de l'apprenant";
+    
+    return (
+      <div 
+        className="h-28 border border-gray-300 relative" 
+        id="participant-signature-container" 
+        data-signature-container={signatureType} 
+        data-signature-type={signatureType}
+      >
+        {effectiveSignature ? (
+          <div 
+            className="w-full h-full flex flex-col items-center justify-center overflow-hidden" 
+            data-signature-wrapper={signatureType}
+            style={{ opacity: signaturesInitialized ? 1 : 0, transition: 'opacity 0.3s ease-in-out' }}
+          >
+            <SafeImage 
+              src={getAntiCacheSignatureUrl(effectiveSignature)} 
+              alt={signatureLabel} 
+              className="max-h-20 max-w-[95%] object-contain"
+              id={`${signatureType}-signature-img`}
+              data-signature="true"
+              data-signature-type={signatureType}
+              data-signature-url={effectiveSignature}
+              onLoad={() => {
+                log(LOG_LEVELS.INFO, '✅ [DEBUG]', `${signatureLabel} chargée avec succès`, effectiveSignature);
+                if (hasRepresentativeSignature) {
+                  markSignatureAsLoaded('representativeSig');
+                } else {
+                  markSignatureAsLoaded('participantSig');
+                }
+              }}
+              onError={() => {
+                log(LOG_LEVELS.ERROR, '❌ [ERROR]', `Erreur de chargement de la ${signatureLabel.toLowerCase()}:`, effectiveSignature);
+              }}
+            />
+          </div>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-gray-50" data-signature-placeholder={signatureType}>
+            <p className="text-gray-400 italic text-center">Signature en attente</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Zone de tampon de l'entreprise
+  const renderCompanySeal = () => {
+    // Préparation de l'URL validée du tampon - s'assurer que companySeal n'est pas undefined
+    const validatedSeal = validateSealURL(companySeal || null);
+    
+    // Validation du type de tampon
+    const sealIsValid = validateSealType(validatedSeal, 'company');
+    
+    // S'assurer que le tampon n'est pas une signature en vérifiant son nom
+    const isTrulySeal = validatedSeal ? 
+      (validatedSeal.includes('seal') || validatedSeal.includes('stamp') || validatedSeal.includes('tampon')) : 
+      false;
+    
+    // Si le tampon est déjà chargé, utiliser la version en cache
+    const isAlreadyLoaded = loadedSignatures.companySeal && sealURLCache.companySeal;
+    
+    log(LOG_LEVELS.INFO, '🔍 [COMPANY_SEAL]', 'Vérification du tampon entreprise:', {
+      validatedSeal: validatedSeal ? 'URL valide' : 'Pas d\'URL',
+      sealIsValid,
+      isTrulySeal,
+      isInCache: loadedSignatures.companySeal,
+      hasCachedURL: !!sealURLCache.companySeal
+    });
+    
+    // Déterminer l'URL finale à utiliser
+    const finalSealURL = isAlreadyLoaded 
+      ? sealURLCache.companySeal 
+      : (validatedSeal && sealIsValid ? getAntiCacheSignatureUrl(validatedSeal, true) : null);
+    
+    return (
+      <div 
+        className="h-28 border border-gray-300 relative" 
+        id="company-seal-container" 
+        data-seal-container="company" 
+        data-seal-type="company"
+      >
+        {finalSealURL ? (
+          <div 
+            className="w-full h-full flex items-center justify-center overflow-hidden" 
+            data-seal-wrapper="company"
+            style={{ opacity: signaturesInitialized ? 1 : 0, transition: 'opacity 0.3s ease-in-out' }}
+          >
+            <SafeImage 
+              src={finalSealURL} 
+              alt="Tampon de l'entreprise" 
+              className="max-h-24 max-w-[95%] object-contain"
+              id="company-seal-img"
+              data-seal="true"
+              data-seal-type="company"
+              data-seal-url={finalSealURL}
+              onLoad={() => {
+                log(LOG_LEVELS.INFO, '✅ [DEBUG]', 'Tampon entreprise chargé avec succès:', finalSealURL);
+                // Enregistrer l'URL qui a bien fonctionné dans le cache
+                if (!sealURLCache.companySeal) {
+                  setSealURLCache(prev => ({
+                    ...prev,
+                    companySeal: finalSealURL
+                  }));
+                  log(LOG_LEVELS.INFO, '💾 [CACHE]', 'URL du tampon entreprise mise en cache:', finalSealURL);
+                }
+                markSignatureAsLoaded('companySeal');
+              }}
+              onError={() => {
+                log(LOG_LEVELS.ERROR, '❌ [ERROR]', 'Erreur de chargement du tampon entreprise:', finalSealURL);
+              }}
+            />
+          </div>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-gray-50" data-seal-placeholder="company">
+            <p className="text-gray-400 italic text-center">Tampon en attente</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Effet pour éviter les rechargements multiples des signatures
+  useEffect(() => {
+    // Ne déclencher qu'une seule fois après le montage initial
+    if (signaturesInitialized) {
+      log(LOG_LEVELS.INFO, '🔒 [SIGNATURES]', 'Les signatures sont déjà initialisées, pas de rechargement');
+      return;
+    }
+
+    // Initialiser les signatures après un court délai
+    const timer = setTimeout(() => {
+      log(LOG_LEVELS.INFO, '🔄 [SIGNATURES]', 'Initialisation des signatures et tampons');
+      setSignaturesInitialized(true);
+    }, 200);
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Effet pour éviter les rechargements de signatures déjà chargées
+  useEffect(() => {
+    // Journaliser l'état actuel des signatures chargées
+    log(LOG_LEVELS.INFO, '🔍 [SIGNATURES]', 'État actuel des signatures chargées:', loadedSignatures);
+    
+    // Vérifier si toutes les signatures disponibles sont chargées
+    const allSignaturesLoaded = (
+      (!participantSignature || loadedSignatures.participantSig) &&
+      (!representativeSignature || loadedSignatures.representativeSig) &&
+      (!trainerSignature || loadedSignatures.trainerSig) &&
+      (!companySeal || loadedSignatures.companySeal) &&
+      (!organizationSeal || loadedSignatures.organizationSeal)
+    );
+    
+    if (allSignaturesLoaded && signaturesInitialized) {
+      log(LOG_LEVELS.INFO, '✅ [SIGNATURES]', 'Toutes les signatures disponibles sont chargées');
+    }
+  }, [loadedSignatures, participantSignature, representativeSignature, trainerSignature, companySeal, organizationSeal]);
+
+  // Fonction pour formater l'adresse de l'organisme de formation
+  const formatOrganizationAddress = (settings: OrganizationSettings): string => {
+    const parts = [settings.address];
+    
+    if (settings.postal_code || settings.city) {
+      const locationParts = [settings.postal_code, settings.city].filter(Boolean);
+      parts.push(locationParts.join(' '));
+    }
+    
+    if (settings.country && settings.country.toLowerCase() !== 'france') {
+      parts.push(settings.country);
+    }
+    
+    return parts.filter(Boolean).join(', ');
+  };
+
+  // Fonction pour obtenir les informations de l'organisme de formation
+  const getOrganizationInfo = (settings: OrganizationSettings) => {
+    return {
+      name: settings.organization_name,
+      address: formatOrganizationAddress(settings),
+      siret: settings.siret || 'SIRET non renseigné',
+      activityNumber: settings.activity_declaration_number || 'Numéro de déclaration d\'activité non renseigné',
+      representative: settings.representative_name ? 
+        `${settings.representative_name}${settings.representative_title ? `, ${settings.representative_title}` : ''}` :
+        'Représentant non renseigné'
+    };
+  };
+
+  return (
+    <div ref={documentRef} className="bg-white p-8 shadow-sm border border-gray-200 mx-auto" 
+      style={{ maxWidth: '800px' }}
+         data-debug={`template-${pdfMode ? 'pdf' : 'normal'}-${viewContext}`}>
+      <div className="text-center mb-8">
+        <h1 className="text-2xl font-bold mb-2">CONVENTION DE FORMATION PROFESSIONNELLE</h1>
+        <p className="text-sm text-gray-600">(Articles L.6353-1 du Code du travail)</p>
+      </div>
+      
+      <div className="mb-6">
+        <p><strong>Entre</strong></p>
+        <p>L'organisme de formation : {organizationSettings.organization_name}</p>
+        <p>Numéro de déclaration d'activité de l'organisme de formation : {organizationSettings.activity_declaration_number}</p>
+        <p>Numéro SIRET de l'organisme de formation : {organizationSettings.siret}</p>
+        <p>Adresse de l'organisme de formation : {organizationSettings.address}
+          {organizationSettings.postal_code && organizationSettings.city 
+            ? `, ${organizationSettings.postal_code} ${organizationSettings.city}` 
+            : ''}
+          {organizationSettings.country && organizationSettings.country !== 'France'
+            ? `, ${organizationSettings.country}`
+            : ''}
+        </p>
+      </div>
+      
+      <div className="mb-6">
+        <p><strong>Et</strong></p>
+        {displayCompanyInfo()}
+        {/* Test visible si les données manquent */}
+        {(companyName === 'À compléter' || !companyName || companyAddress === 'À compléter' || !companyAddress || companySiret === 'À compléter' || !companySiret) && (
+          <div style={{
+            background: '#ffcccc', 
+            padding: '5px', 
+            marginTop: '5px', 
+            border: '1px solid red', 
+            borderRadius: '3px',
+            fontSize: '12px'
+          }}>
+            Attention : Certaines données d'entreprise sont manquantes. Contexte : {viewContext}, Mode PDF: {pdfMode ? 'Oui' : 'Non'}
+          </div>
+        )}
+      </div>
+      
+      <div className="mb-6">
+        <p>Pour le(s) bénéficiaire(s) : (ci-après dénommé(s) le(s) stagiaire(s))</p>
+        <table className="w-full border mt-2">
+          <tbody>
+            <tr>
+              <th className="border p-2 text-center">Stagiaire</th>
+              <th className="border p-2 text-center">Fonction</th>
+            </tr>
+            {allParticipants.map((participant, index) => (
+              <tr key={participant.id || index}>
+                <td className="border p-2 text-center">{participant.first_name} {participant.last_name}</td>
+                <td className="border p-2 text-center">{participant.job_position || 'À compléter'}</td>
+              </tr>
+            ))}
+            {allParticipants.length === 0 && (
+              <tr>
+                <td colSpan={2} className="border p-2 text-center text-gray-500">Aucun stagiaire n'est inscrit à cette formation</td>
+            </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">I – OBJET</h2>
+        <p>L'action de formation entre dans la catégorie : « Les actions de formation » prévue à l'article L.6313-1 du Code du travail.</p>
+        <p className="mt-2">En exécution de la présente convention, l'organisme de formation s'engage à organiser l'action de formation professionnelle intitulée : {training.title}</p>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">II – NATURE ET CARACTERISTIQUES DE L'ACTION DE FORMATION</h2>
+        <p>Permettre au stagiaire de :</p>
+        <ul className="list-disc pl-8 mt-2">
+          {objectives.map((objective, index) => (
+            <li key={index} className="mb-1">{objective}</li>
+          ))}
+        </ul>
+        
+        <p className="mt-4">La durée de la formation est fixée à {training.duration}</p>
+        <p className="mt-1">Horaires de Stage : de 9h00 à 12h30 et de 13h30 à 17h00</p>
+        
+        <p className="mt-4">Le programme détaillé de l'action de formation figure en annexe de la présente convention.</p>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">III – NIVEAU DE CONNAISSANCES PREALABLES NÉCESSAIRE</h2>
+        <p>Aucun prérequis n'est nécessaire.</p>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">IV – ORGANISATION DE L'ACTION DE FORMATION</h2>
+        <p>L'action de formation aura lieu (dates ou période) : {getTrainingDates()}</p>
+        <p>Lieu de formation : {training.location}</p>
+        
+        <p className="mt-4 italic">Dans le cas où la formation a lieu au sein de l'entreprise bénéficiaire, l'entreprise s'engage à assurer la sécurité des participants. L'environnement de la formation doit se dérouler dans des conditions techniques et sanitaires appropriées.</p>
+        
+        <p className="mt-4">Les conditions générales dans lesquelles la formation est dispensée, notamment les moyens pédagogiques et techniques, sont les suivantes :</p>
+        <ul className="list-disc pl-8 mt-2">
+          {training.pedagogical_methods?.needs_evaluation && <li>Évaluation des besoins et du profil du participant</li>}
+          {training.pedagogical_methods?.theoretical_content && <li>Apport théorique et méthodologique</li>}
+          {training.pedagogical_methods?.practical_exercises && <li>Questionnaires et exercices pratiques</li>}
+          {training.pedagogical_methods?.case_studies && <li>Études de cas</li>}
+          {training.pedagogical_methods?.experience_sharing && <li>Retours d'expériences</li>}
+          {training.pedagogical_methods?.digital_support && <li>Support de cours numérique</li>}
+          {(!training.pedagogical_methods || 
+           (!training.pedagogical_methods.needs_evaluation && 
+           !training.pedagogical_methods.theoretical_content && 
+           !training.pedagogical_methods.practical_exercises && 
+           !training.pedagogical_methods.case_studies && 
+           !training.pedagogical_methods.experience_sharing && 
+           !training.pedagogical_methods.digital_support)) && 
+            <li>À compléter</li>
+          }
+        </ul>
+        
+        <p className="mt-4">Éléments matériels :</p>
+        <ul className="list-disc pl-8 mt-2">
+          {training.material_elements?.computer_provided && <li>Mise à disposition du matériel informatique</li>}
+          {training.material_elements?.pedagogical_material && <li>Mise à disposition du matériel pédagogique</li>}
+          {training.material_elements?.digital_support_provided && <li>Support de cours au format numérique</li>}
+          {(!training.material_elements ||
+           (!training.material_elements.computer_provided && 
+           !training.material_elements.pedagogical_material && 
+           !training.material_elements.digital_support_provided)) && 
+            <li>À compléter</li>
+          }
+        </ul>
+        
+        <p className="mt-2">Les conditions détaillées figurent en annexe de la présente convention.</p>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">V – MOYENS PERMETTANT D'APPRECIER LES RESULTATS DE L'ACTION</h2>
+        <ul className="list-disc pl-8 mt-2">
+          {training.evaluation_methods?.profile_evaluation && <li>Evaluation individuelle du profil, des attentes et des besoins</li>}
+          {training.evaluation_methods?.skills_evaluation && <li>Evaluation des compétences en début et fin de formation</li>}
+          {training.evaluation_methods?.knowledge_evaluation && <li>Évaluation des connaissances à chaque étape</li>}
+          {training.evaluation_methods?.satisfaction_survey && <li>Questionnaire d'évaluation de la satisfaction</li>}
+          {(!training.evaluation_methods ||
+           (!training.evaluation_methods.profile_evaluation && 
+           !training.evaluation_methods.skills_evaluation && 
+           !training.evaluation_methods.knowledge_evaluation && 
+           !training.evaluation_methods.satisfaction_survey)) && 
+           <li>À compléter</li>
+          }
+        </ul>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">VI – SANCTION DE LA FORMATION</h2>
+        <p>En application de l'article L.6353-1 du Code du travail, une attestation mentionnant les objectifs, la nature et la durée de l'action et les résultats de l'évaluation des acquis de la formation sera remise au stagiaire à l'issue de la formation.</p>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">VII – MOYENS PERMETTANT DE SUIVRE L'EXECUTION DE L'ACTION</h2>
+        <ul className="list-disc pl-8 mt-2">
+          {training.tracking_methods?.attendance_sheet && <li>Feuille d'émargement</li>}
+          {training.tracking_methods?.completion_certificate && <li>Attestation de fin de formation</li>}
+          {(!training.tracking_methods ||
+            (!training.tracking_methods.attendance_sheet && !training.tracking_methods.completion_certificate)) && 
+            <li>À compléter</li>
+          }
+        </ul>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">VIII – NON-RÉALISATION DE LA PRESTATION DE FORMATION</h2>
+        <p>En application de l'article L. 6354-1 du Code du travail, il est convenu entre les signataires de la présente convention, que faute de réalisation totale ou partielle de la prestation de formation, l'organisme prestataire doit rembourser au cocontractant les sommes indûment perçues de ce fait.</p>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">IX – DISPOSITIONS FINANCIERES</h2>
+        <p>Le prix de l'action de formation est fixé à : {formatPrice(training.price)} {training.price ? 'HT + TVA (20%) : ' + (training.price * 0.2).toFixed(2) + '€ = ' + (training.price * 1.2).toFixed(2) + '€ TTC' : ''}</p>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">X – INTERRUPTION DU STAGE</h2>
+        <p>En cas de cessation anticipée de la formation du fait de l'organisme de formation ou en cas de renoncement par le bénéficiaire pour un autre motif que la force majeure dûment reconnue, le présent contrat est résilié. Dans ce cas, seules les prestations effectivement dispensées sont dues au prorata temporis de leur valeur prévue au présent contrat.</p>
+        <p className="mt-2">Si le stagiaire est empêché de suivre la formation par suite de force majeure dûment reconnue, la convention de formation professionnelle est résiliée. Dans ce cas, seules les prestations effectivement dispensées sont dues au prorata temporis de leur valeur prévue au présent contrat.</p>
+      </div>
+      
+      <div className="mt-4">
+        <h2 className="font-bold text-red-600 border-b border-red-600 pb-1 mb-4">XI – CAS DE DIFFEREND</h2>
+        <p className="mb-6">Si une contestation ou un différend n'ont pu être réglés à l'amiable, seul le tribunal de commerce dans le ressort de la juridiction du siège social du centre de formation sera compétent pour régler le litige.</p>
+      </div>
+      
+      {/* Section de l'organisme de formation */}
+        })()}
+      </div>
+      
+      <div className="mt-8 flex justify-between">
+        <div className="w-1/2 pr-4">
+          <p><strong>Pour l'entreprise</strong></p>
+          <p>Le dirigeant</p>
+          <p>(Signature et cachet)</p>
+          
+          <div className="mt-2 flex flex-col space-y-2">
+            {/* Zone de signature du représentant */}
+            {renderParticipantSignature()}
+            
+            {/* Zone de tampon entreprise */}
+            {renderCompanySeal()}
+          </div>
+        </div>
+        <div className="w-1/2">
+          <p><strong>Pour l'organisme de formation</strong></p>
+          <p>(Signature et cachet)</p>
+          
+          <div className="mt-2 flex flex-col space-y-2">
+            {/* 
+              Affichage de la signature du formateur seulement pour l'organisme,
+              en évitant d'utiliser la signature du représentant
+            */}
+            {renderTrainerSignature()}
+            
+            {/* Zone de tampon organisme */}
+            {renderOrganizationSeal()}
+          </div>
+        </div>
+      </div>
+      
+      <div className="mt-8">
+        <p>Fait en double exemplaire, à {organizationSettings.city || '_______________'}{getFormattedCompanyAddress() ? ` et à ${getFormattedCompanyAddress()}` : ''}, le {new Date().toLocaleDateString('fr-FR')}</p>
+        {/* ... reste du code des signatures ... */}
+      </div>
+    </div>
+  );
+};
+
+export default UnifiedTrainingAgreementTemplate; 

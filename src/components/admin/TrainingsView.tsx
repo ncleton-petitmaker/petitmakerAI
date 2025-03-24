@@ -15,13 +15,16 @@ import {
   Clock,
   User,
   MapPin,
-  DollarSign
+  DollarSign,
+  CheckCircle2,
+  UserPlus,
+  X
 } from 'lucide-react';
 import { LoadingSpinner } from '../LoadingSpinner';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { TrainingForm } from './TrainingForm';
-import { TrainingAgreementForm } from './TrainingAgreementForm';
-import { AttendanceSheetButton } from './AttendanceSheetButton';
+import { TrainingAgreementButton } from './TrainingAgreementButton';
+import { GenericAttendanceSheetButton } from './GenericAttendanceSheetButton';
 import { CompletionCertificateButton } from './CompletionCertificateButton';
 
 // Interface pour les formations dans la vue
@@ -110,6 +113,9 @@ export const TrainingsView = () => {
   const [selectedTraining, setSelectedTraining] = useState<Training | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
   const [isCreatingTables, setIsCreatingTables] = useState(false);
+  const [showLearnersModal, setShowLearnersModal] = useState(false);
+  const [selectedTrainingLearners, setSelectedTrainingLearners] = useState<Learner[]>([]);
+  const [associatingTrainingId, setAssociatingTrainingId] = useState<string | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -359,10 +365,10 @@ export const TrainingsView = () => {
       
       // Récupérer les apprenants pour chaque formation
       const trainingsWithLearners = await Promise.all(trainingsData.map(async (training) => {
-        // Récupérer les apprenants directement associés à la formation
+        // Récupérer UNIQUEMENT les apprenants directement associés à la formation via training_id
         const { data: directLearners, error: directLearnersError } = await supabase
           .from('user_profiles')
-          .select('id, first_name, last_name, job_position, training_id')
+          .select('id, first_name, last_name, job_position, training_id, company_id')
           .eq('training_id', training.id);
         
         if (directLearnersError) {
@@ -370,30 +376,8 @@ export const TrainingsView = () => {
           return { ...training, learners: [] };
         }
         
-        // Récupérer les apprenants associés via l'entreprise
-        let companyLearners: any[] = [];
-        if (training.company_id) {
-          const { data: companyLearnersData, error: companyLearnersError } = await supabase
-            .from('user_profiles')
-            .select('id, first_name, last_name, job_position')
-            .eq('company_id', training.company_id);
-          
-          if (companyLearnersError) {
-            console.error('Erreur lors de la récupération des apprenants de l\'entreprise:', companyLearnersError);
-          } else {
-            companyLearners = companyLearnersData || [];
-          }
-        }
-        
-        // Combiner les deux listes d'apprenants en évitant les doublons
-        const allLearners = [...directLearners || []];
-        companyLearners.forEach(learner => {
-          if (!allLearners.some(l => l.id === learner.id)) {
-            allLearners.push(learner);
-          }
-        });
-        
-        return { ...training, learners: allLearners };
+        console.log(`Formation ${training.id} - Apprenants associés:`, directLearners);
+        return { ...training, learners: directLearners || [] };
       }));
       
       setTrainings(trainingsWithLearners);
@@ -639,6 +623,11 @@ export const TrainingsView = () => {
           if (!companyError && companyData) {
             newTraining.company_name = companyData.name;
           }
+          
+          // Associer automatiquement les apprenants de l'entreprise à la nouvelle formation
+          if (data[0].id && data[0].company_id) {
+            await handleAutoAssociateLearners(data[0].id, data[0].company_id);
+          }
         } catch (error) {
           console.error('Error fetching company name:', error);
         }
@@ -674,6 +663,29 @@ export const TrainingsView = () => {
     console.log('Objectifs:', trainingData.objectives);
     
     try {
+      // Vérifier si le company_id a changé
+      let companyChanged = false;
+      let originalCompanyId = null;
+      
+      // Récupérer la formation originale pour comparer le company_id
+      if (trainingData.id) {
+        const { data: originalTraining, error: originalError } = await supabase
+          .from('trainings')
+          .select('company_id')
+          .eq('id', trainingData.id)
+          .single();
+        
+        if (!originalError && originalTraining) {
+          originalCompanyId = originalTraining.company_id;
+          companyChanged = originalCompanyId !== trainingData.company_id;
+          console.log('Changement d\'entreprise détecté:', {
+            originalCompanyId,
+            newCompanyId: trainingData.company_id,
+            changed: companyChanged
+          });
+        }
+      }
+      
       // Définir les champs autorisés pour éviter d'envoyer des champs non reconnus
       const allowedFields = [
         'title', 'description', 'dates', 'schedule', 'location', 'price',
@@ -805,6 +817,12 @@ export const TrainingsView = () => {
       
       // Rafraîchir la liste des formations et fermer le formulaire
       console.log('Mise à jour réussie, rafraîchissement de la liste...');
+      
+      // Si l'entreprise a changé, associer automatiquement les apprenants
+      if (companyChanged && trainingData.company_id) {
+        await handleAutoAssociateLearners(trainingData.id, trainingData.company_id);
+      }
+      
       await fetchTrainings();
       setShowAddForm(false);
       setSelectedTraining(null);
@@ -835,16 +853,17 @@ export const TrainingsView = () => {
     try {
       setIsLoading(true);
       
-      // Créer une copie des données sans les champs non nécessaires
-      const { 
-        accessibility_info, 
-        id, 
-        created_at, 
-        updated_at, 
-        extractedPeriods, 
-        extractedTimeSlots, 
-        ...trainingDataToDuplicate 
-      } = trainingData;
+      // Créer une copie des données et filtrer les propriétés qui ne sont pas des colonnes dans la table
+      let trainingDataToDuplicate = { ...trainingData };
+      
+      // Supprimer les champs qui ne doivent pas être dupliqués
+      delete trainingDataToDuplicate.id;
+      delete trainingDataToDuplicate.created_at;
+      delete trainingDataToDuplicate.updated_at;
+      delete trainingDataToDuplicate.accessibility_info;
+      delete trainingDataToDuplicate.extractedPeriods;
+      delete trainingDataToDuplicate.extractedTimeSlots;
+      delete trainingDataToDuplicate.learners; // Supprimer la propriété learners qui cause l'erreur
       
       // Add a suffix to indicate this is a duplicate
       trainingDataToDuplicate.title = `${trainingDataToDuplicate.title || 'Formation'} (copie)`;
@@ -932,41 +951,6 @@ export const TrainingsView = () => {
     }
   };
 
-  const handleGenerateAgreement = (training: Training) => {
-    console.log('Génération de la convention pour la formation:', training.id);
-    console.log('Données de formation complètes:', JSON.stringify(training, null, 2));
-    console.log('Méthodes d\'évaluation:', training.evaluation_methods);
-    console.log('Moyens pédagogiques:', training.pedagogical_methods);
-    console.log('Éléments matériels:', training.material_elements);
-    
-    setSelectedTraining(training);
-    setShowAgreementForm(true);
-  };
-
-  const handleAgreementSubmit = (agreementData: any) => {
-    try {
-      // Enregistrer les données de l'accord dans le localStorage pour démonstration
-      // Dans une application réelle, vous pourriez les enregistrer dans la base de données
-      const agreementKey = `training_agreement_${selectedTraining?.id}`;
-      localStorage.setItem(agreementKey, JSON.stringify({
-        trainingId: selectedTraining?.id,
-        trainingTitle: selectedTraining?.title,
-        agreementData,
-        createdAt: new Date().toISOString()
-      }));
-      
-      // Afficher un message de confirmation
-      alert('Convention de formation enregistrée avec succès. Vous pouvez maintenant générer le PDF.');
-      
-      // Fermer le formulaire
-      setShowAgreementForm(false);
-      setSelectedTraining(null);
-    } catch (error) {
-      console.error('Erreur lors de l\'enregistrement de la convention:', error);
-      alert('Une erreur est survenue lors de l\'enregistrement de la convention.');
-    }
-  };
-
   // Fonction pour créer les tables manquantes
   const createMissingTables = async () => {
     try {
@@ -987,6 +971,70 @@ export const TrainingsView = () => {
       setError(`Erreur lors de la création des tables: ${error.message || 'Erreur inconnue'}`);
     } finally {
       setIsCreatingTables(false);
+    }
+  };
+
+  // Fonction pour associer automatiquement tous les apprenants d'une entreprise à une formation
+  const handleAutoAssociateLearners = async (trainingId: string, companyId: string) => {
+    try {
+      setAssociatingTrainingId(trainingId);
+      console.log(`Association automatique des apprenants de l'entreprise ${companyId} à la formation ${trainingId}`);
+      
+      // Récupérer tous les apprenants de l'entreprise
+      const { data: companyLearners, error: learnersError } = await supabase
+        .from('user_profiles')
+        .select('id')
+        .eq('company_id', companyId);
+      
+      if (learnersError) {
+        console.error('Erreur lors de la récupération des apprenants de l\'entreprise:', learnersError);
+        alert('Erreur lors de la récupération des apprenants. Veuillez réessayer.');
+        return;
+      }
+      
+      if (!companyLearners || companyLearners.length === 0) {
+        console.log('Aucun apprenant trouvé pour cette entreprise');
+        alert('Aucun apprenant trouvé pour cette entreprise.');
+        return;
+      }
+      
+      console.log(`${companyLearners.length} apprenants trouvés pour l'entreprise ${companyId}`);
+      
+      // Mettre à jour le champ training_id de tous les apprenants de l'entreprise
+      const { error: updateError } = await supabase
+        .from('user_profiles')
+        .update({ training_id: trainingId })
+        .eq('company_id', companyId);
+      
+      if (updateError) {
+        console.error('Erreur lors de l\'association automatique des apprenants:', updateError);
+        alert('Erreur lors de l\'association des apprenants. Veuillez réessayer.');
+        return;
+      }
+      
+      console.log(`${companyLearners.length} apprenants associés automatiquement à la formation ${trainingId}`);
+      
+      // Afficher une notification de succès
+      alert(`${companyLearners.length} apprenants ont été associés à cette formation avec succès.`);
+      
+      // Rafraîchir la liste des formations pour afficher les apprenants associés
+      await fetchTrainings();
+    } catch (error) {
+      console.error('Erreur lors de l\'association automatique des apprenants:', error);
+      alert('Une erreur est survenue lors de l\'association des apprenants.');
+    } finally {
+      setAssociatingTrainingId(null);
+    }
+  };
+
+  // Fonction pour afficher la modal des apprenants
+  const handleShowLearners = (training: Training) => {
+    if (training.learners && training.learners.length > 0) {
+      setSelectedTrainingLearners(training.learners);
+      setSelectedTraining(training);
+      setShowLearnersModal(true);
+    } else {
+      alert('Aucun apprenant associé à cette formation.');
     }
   };
 
@@ -1104,6 +1152,19 @@ export const TrainingsView = () => {
                       <span>{training.company_name || 'Entreprise non définie'}</span>
                     </div>
                     <div className="flex items-center">
+                      <Users className="h-3 w-3 mr-1 text-blue-500" />
+                      {training.learners && training.learners.length > 0 ? (
+                        <button 
+                          onClick={() => handleShowLearners(training)}
+                          className="text-blue-600 font-medium hover:underline"
+                        >
+                          {training.learners.length} apprenant{training.learners.length > 1 ? 's' : ''}
+                        </button>
+                      ) : (
+                        <span className="text-gray-400">Aucun apprenant</span>
+                      )}
+                    </div>
+                    <div className="flex items-center">
                       <Calendar className="h-3 w-3 mr-1" />
                       <span>
                         {formatDate(training.start_date)}
@@ -1132,15 +1193,15 @@ export const TrainingsView = () => {
                       Modifier
                     </button>
                     
-                    <button
-                      onClick={() => handleGenerateAgreement(training)}
+                    <TrainingAgreementButton 
+                      training={training}
+                      participants={training.learners || []}
+                      buttonText="Convention"
+                      variant="outline"
                       className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
-                    >
-                      <FileText className="h-3 w-3 mr-1" />
-                      Convention
-                    </button>
+                    />
                     
-                    <AttendanceSheetButton 
+                    <GenericAttendanceSheetButton 
                       training={training}
                       participants={training.learners || []}
                       buttonText="Émargement"
@@ -1155,6 +1216,27 @@ export const TrainingsView = () => {
                       variant="outline"
                       className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
                     />
+                    
+                    {training.company_id && (
+                      <button
+                        onClick={() => handleAutoAssociateLearners(training.id, training.company_id as string)}
+                        className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
+                        title="Associer tous les apprenants de l'entreprise à cette formation"
+                        disabled={associatingTrainingId === training.id}
+                      >
+                        {associatingTrainingId === training.id ? (
+                          <>
+                            <LoadingSpinner size="small" />
+                            <span className="ml-1">Association...</span>
+                          </>
+                        ) : (
+                          <>
+                            <UserPlus className="h-3 w-3 mr-1 text-green-500" />
+                            Associer apprenants
+                          </>
+                        )}
+                      </button>
+                    )}
                     
                     <button
                       onClick={() => handleDeleteTraining(training.id)}
@@ -1207,6 +1289,19 @@ export const TrainingsView = () => {
                         {training.trainer_name && (
                           <div className="text-sm text-gray-500">Formateur: {training.trainer_name}</div>
                         )}
+                        <div className="text-sm text-gray-500 mt-1">
+                          <Users className="h-3 w-3 inline mr-1 text-blue-500" />
+                          {training.learners && training.learners.length > 0 ? (
+                            <button 
+                              onClick={() => handleShowLearners(training)}
+                              className="text-blue-600 font-medium hover:underline"
+                            >
+                              {training.learners.length} apprenant{training.learners.length > 1 ? 's' : ''}
+                            </button>
+                          ) : (
+                            <span className="text-gray-400">Aucun apprenant</span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center">
@@ -1229,36 +1324,36 @@ export const TrainingsView = () => {
                           {getStatusLabel(training.status)}
                         </span>
                       </td>
-                      <td className="px-6 py-4 text-sm text-gray-900">
-                        {training.price ? `${training.price} €` : 'Non défini'}
+                      <td className="px-6 py-4">
+                        <div className="text-sm text-gray-900">{training.price ? `${training.price} €` : 'Prix non défini'}</div>
                       </td>
-                      <td className="px-6 py-4 text-right text-sm font-medium">
-                        <div className="flex flex-wrap justify-end gap-2">
+                      <td className="px-6 py-4">
+                        <div className="flex flex-wrap gap-2">
                           <button
                             onClick={() => {
                               setEditingTraining(training);
                               setShowAddForm(true);
                             }}
-                            className="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                            className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
                           >
                             <Edit className="h-3 w-3 mr-1" />
                             Modifier
                           </button>
                           
-                          <button
-                            onClick={() => handleGenerateAgreement(training)}
-                            className="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                          >
-                            <FileText className="h-3 w-3 mr-1" />
-                            Convention
-                          </button>
+                          <TrainingAgreementButton 
+                            training={training}
+                            participants={training.learners || []}
+                            buttonText="Convention"
+                            variant="outline"
+                            className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
+                          />
                           
-                          <AttendanceSheetButton 
+                          <GenericAttendanceSheetButton 
                             training={training}
                             participants={training.learners || []}
                             buttonText="Émargement"
                             variant="outline"
-                            className="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                            className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
                           />
                           
                           <CompletionCertificateButton
@@ -1266,12 +1361,33 @@ export const TrainingsView = () => {
                             participants={training.learners || []}
                             buttonText="Attestation"
                             variant="outline"
-                            className="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                            className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
                           />
+                          
+                          {training.company_id && (
+                            <button
+                              onClick={() => handleAutoAssociateLearners(training.id, training.company_id as string)}
+                              className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
+                              title="Associer tous les apprenants de l'entreprise à cette formation"
+                              disabled={associatingTrainingId === training.id}
+                            >
+                              {associatingTrainingId === training.id ? (
+                                <>
+                                  <LoadingSpinner size="small" />
+                                  <span className="ml-1">Association...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <UserPlus className="h-3 w-3 mr-1 text-green-500" />
+                                  Associer apprenants
+                                </>
+                              )}
+                            </button>
+                          )}
                           
                           <button
                             onClick={() => handleDeleteTraining(training.id)}
-                            className="inline-flex items-center px-2.5 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                            className="inline-flex items-center px-2 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
                           >
                             <Trash2 className="h-3 w-3 mr-1 text-red-500" />
                             Supprimer
@@ -1287,41 +1403,88 @@ export const TrainingsView = () => {
         )}
       </div>
 
-      {/* Training form modal */}
-      {showAddForm && (
-        <div className="fixed inset-0 bg-black bg-opacity-100 flex items-center justify-center z-[100] overflow-hidden p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden">
-            <TrainingForm 
-              companies={companies}
-              training={editingTraining}
-              onSubmit={editingTraining ? handleUpdateTraining : handleAddTraining}
-              onCancel={() => {
-                setShowAddForm(false);
-                setEditingTraining(null);
-              }}
-              onDuplicate={handleDuplicateTraining}
-            />
+      {/* Modal pour afficher la liste des apprenants */}
+      {showLearnersModal && selectedTraining && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-medium">
+                Apprenants associés à la formation
+              </h3>
+              <button
+                onClick={() => setShowLearnersModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            
+            <div className="mb-2 text-sm text-gray-500">
+              <strong>Formation :</strong> {selectedTraining.title}
+            </div>
+            
+            {selectedTrainingLearners.length > 0 ? (
+              <div className="mt-4">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Nom
+                      </th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Poste
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {selectedTrainingLearners.map((learner) => (
+                      <tr key={learner.id} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="text-sm font-medium text-gray-900">
+                            {learner.first_name} {learner.last_name}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="text-sm text-gray-500">
+                            {learner.job_position || 'Non spécifié'}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-center py-4 text-gray-500">
+                Aucun apprenant associé à cette formation.
+              </div>
+            )}
+            
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => setShowLearnersModal(false)}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300"
+              >
+                Fermer
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Training agreement form modal */}
-      {showAgreementForm && selectedTraining && (
-        <div className="fixed inset-0 bg-black bg-opacity-100 flex items-center justify-center z-[100] overflow-hidden p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-5xl w-full max-h-[90vh] overflow-hidden">
-            <TrainingAgreementForm 
-              training={selectedTraining}
-              company={selectedCompany}
-              learners={learners}
-              onSubmit={handleAgreementSubmit}
-              onCancel={() => {
-                setShowAgreementForm(false);
-                setSelectedTraining(null);
-              }}
-            />
-          </div>
-        </div>
+      {/* Modal pour ajouter/modifier une formation */}
+      {showAddForm && (
+        <TrainingForm
+          training={editingTraining}
+          companies={companies}
+          onSubmit={editingTraining ? handleUpdateTraining : handleAddTraining}
+          onCancel={() => {
+            setShowAddForm(false);
+            setEditingTraining(null);
+          }}
+          onDuplicate={handleDuplicateTraining}
+        />
       )}
     </div>
   );
-}; 
+};

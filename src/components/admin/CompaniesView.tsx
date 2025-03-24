@@ -12,7 +12,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Building2,
-  Info
+  Info,
+  CheckCircle2,
+  AlertCircle,
+  X
 } from 'lucide-react';
 import { CompanyForm } from './CompanyForm';
 import { CompanyLearners } from './CompanyLearners';
@@ -28,6 +31,25 @@ interface Company {
   created_at: string;
   siret?: string | null;
   email?: string | null;
+  address?: string | null;
+  postal_code?: string | null;
+  country?: string | null;
+}
+
+interface UnreferencedCompany {
+  name: string;
+  learnerCount: number;
+  learnerIds: string[];
+}
+
+interface ValidationResult {
+  success: boolean;
+  message: string;
+  details: {
+    companiesCreated: number;
+    learnersUpdated: number;
+    errors: string[];
+  };
 }
 
 export const CompaniesView = () => {
@@ -42,12 +64,17 @@ export const CompaniesView = () => {
   const [totalCompanies, setTotalCompanies] = useState(0);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [selectedCompanyForLearners, setSelectedCompanyForLearners] = useState<{id: string, name: string} | null>(null);
+  const [unreferencedCompanies, setUnreferencedCompanies] = useState<UnreferencedCompany[]>([]);
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
+  const [showValidationResult, setShowValidationResult] = useState(false);
   const itemsPerPage = 10;
   const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
     fetchCompanies();
+    fetchUnreferencedCompanies();
     
     // Vérifier si nous avons des paramètres d'état pour ouvrir le formulaire d'édition
     if (location.state && location.state.openCompanyEdit && location.state.companyToEdit) {
@@ -63,7 +90,7 @@ export const CompaniesView = () => {
       
       let query = supabase
         .from('companies')
-        .select('id, name, industry, size, city, status, created_at, email, siret', { count: 'exact' });
+        .select('id, name, industry, size, city, status, created_at, email, siret, address, postal_code, country', { count: 'exact' });
       
       // Apply filters
       if (searchTerm) {
@@ -91,6 +118,50 @@ export const CompaniesView = () => {
       console.error('Error fetching companies:', error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const fetchUnreferencedCompanies = async () => {
+    try {
+      // Récupérer tous les apprenants qui ont une entreprise renseignée mais pas de company_id
+      const { data, error } = await supabase
+        .from('user_profiles')
+        .select('id, company')
+        .eq('is_admin', false)
+        .is('company_id', null)
+        .not('company', 'is', null);
+      
+      if (error) throw error;
+      
+      if (!data || data.length === 0) {
+        setUnreferencedCompanies([]);
+        return;
+      }
+      
+      // Regrouper les apprenants par nom d'entreprise
+      const companyGroups: Record<string, string[]> = {};
+      
+      data.forEach(learner => {
+        if (!learner.company) return;
+        
+        if (!companyGroups[learner.company]) {
+          companyGroups[learner.company] = [];
+        }
+        
+        companyGroups[learner.company].push(learner.id);
+      });
+      
+      // Convertir en tableau pour l'affichage
+      const unreferencedList: UnreferencedCompany[] = Object.keys(companyGroups).map(companyName => ({
+        name: companyName,
+        learnerCount: companyGroups[companyName].length,
+        learnerIds: companyGroups[companyName]
+      }));
+      
+      setUnreferencedCompanies(unreferencedList);
+      console.log('Unreferenced companies:', unreferencedList);
+    } catch (error) {
+      console.error('Error fetching unreferenced companies:', error);
     }
   };
 
@@ -156,7 +227,7 @@ export const CompaniesView = () => {
     
     // Log the start of company update
     console.log('CompaniesView - Starting company update with data:', companyData);
-    console.log('CompaniesView - Siret value in update data:', companyData.siret);
+    console.log('CompaniesView - Address value in update data:', companyData.address);
 
     try {
       // Ensure we have the company ID
@@ -180,8 +251,15 @@ export const CompaniesView = () => {
         console.log('CompaniesView - Original company data:', {
           id: originalCompany.id,
           email: originalCompany.email,
-          siret: originalCompany.siret
+          siret: originalCompany.siret,
+          address: originalCompany.address
         });
+        
+        // Vérification détaillée pour l'adresse
+        console.log('CompaniesView - Checking address update:');
+        console.log('  - Update address value:', companyData.address);
+        console.log('  - Original address value:', originalCompany.address);
+        console.log('  - Is address being changed?', companyData.address !== originalCompany.address);
         
         // Vérification détaillée pour le champ siret
         console.log('CompaniesView - Checking siret preservation:');
@@ -214,18 +292,22 @@ export const CompaniesView = () => {
         id: companyData.id,
         ...companyData,
         email: companyData.email,
-        siret: companyData.siret
+        siret: companyData.siret,
+        address: companyData.address
       });
 
-      const { error } = await supabase
+      const { error, data } = await supabase
         .from('companies')
         .update(companyData)
-        .eq('id', companyData.id);
+        .eq('id', companyData.id)
+        .select();
 
       if (error) {
         console.error('CompaniesView - Supabase update error:', error);
         throw error;
       }
+      
+      console.log('CompaniesView - Supabase update response:', data);
 
       // Close the form and refresh the list
       setEditingCompany(null);
@@ -347,6 +429,112 @@ export const CompaniesView = () => {
     navigate(`/admin/companies/${companyId}`);
   };
 
+  const handleValidateUnreferencedCompanies = async () => {
+    if (unreferencedCompanies.length === 0) {
+      alert('Aucune entreprise non référencée à valider.');
+      return;
+    }
+    
+    try {
+      setIsValidating(true);
+      
+      const result: ValidationResult = {
+        success: true,
+        message: 'Validation terminée avec succès',
+        details: {
+          companiesCreated: 0,
+          learnersUpdated: 0,
+          errors: []
+        }
+      };
+      
+      // Récupérer la première formation disponible pour associer les apprenants
+      const { data: availableTrainings, error: trainingsError } = await supabase
+        .from('trainings')
+        .select('id')
+        .limit(1);
+      
+      if (trainingsError) {
+        throw new Error(`Erreur lors de la récupération des formations: ${trainingsError.message}`);
+      }
+      
+      if (!availableTrainings || availableTrainings.length === 0) {
+        throw new Error('Aucune formation disponible pour associer les apprenants');
+      }
+      
+      const trainingId = availableTrainings[0].id;
+      
+      // Pour chaque entreprise non référencée
+      for (const unreferencedCompany of unreferencedCompanies) {
+        try {
+          // 1. Créer l'entreprise dans la table companies
+          const { data: newCompany, error: createError } = await supabase
+            .from('companies')
+            .insert({
+              name: unreferencedCompany.name,
+              status: 'active',
+              created_at: new Date().toISOString()
+            })
+            .select('id')
+            .single();
+          
+          if (createError) {
+            result.details.errors.push(`Erreur lors de la création de l'entreprise ${unreferencedCompany.name}: ${createError.message}`);
+            continue;
+          }
+          
+          result.details.companiesCreated++;
+          
+          // 2. Mettre à jour les profils des apprenants avec le company_id
+          const { error: updateError } = await supabase
+            .from('user_profiles')
+            .update({ 
+              company_id: newCompany.id,
+              training_id: trainingId
+            })
+            .in('id', unreferencedCompany.learnerIds);
+          
+          if (updateError) {
+            result.details.errors.push(`Erreur lors de la mise à jour des apprenants pour l'entreprise ${unreferencedCompany.name}: ${updateError.message}`);
+            continue;
+          }
+          
+          result.details.learnersUpdated += unreferencedCompany.learnerIds.length;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Erreur inconnue';
+          result.details.errors.push(`Erreur lors du traitement de l'entreprise ${unreferencedCompany.name}: ${errorMessage}`);
+        }
+      }
+      
+      // Mettre à jour le résultat final
+      if (result.details.errors.length > 0) {
+        result.success = false;
+        result.message = `Validation terminée avec ${result.details.errors.length} erreur(s)`;
+      }
+      
+      setValidationResult(result);
+      setShowValidationResult(true);
+      
+      // Rafraîchir les données
+      fetchCompanies();
+      fetchUnreferencedCompanies();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Une erreur inconnue est survenue';
+      setValidationResult({
+        success: false,
+        message: `Échec de la validation: ${errorMessage}`,
+        details: {
+          companiesCreated: 0,
+          learnersUpdated: 0,
+          errors: [errorMessage]
+        }
+      });
+      setShowValidationResult(true);
+    } finally {
+      setIsValidating(false);
+    }
+  };
+
   const totalPages = Math.ceil(totalCompanies / itemsPerPage);
 
   return (
@@ -369,6 +557,17 @@ export const CompaniesView = () => {
             <Plus className="-ml-1 mr-2 h-5 w-5" />
             Ajouter une entreprise
           </button>
+          
+          {unreferencedCompanies.length > 0 && (
+            <button
+              onClick={handleValidateUnreferencedCompanies}
+              disabled={isValidating}
+              className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <CheckCircle2 className="-ml-1 mr-2 h-5 w-5" />
+              {isValidating ? 'Validation en cours...' : `Valider les entreprises (${unreferencedCompanies.length})`}
+            </button>
+          )}
           
           <button
             onClick={exportCompanies}
@@ -674,6 +873,65 @@ export const CompaniesView = () => {
           companyName={selectedCompanyForLearners.name}
           onClose={() => setSelectedCompanyForLearners(null)}
         />
+      )}
+
+      {/* Validation Result Modal */}
+      {showValidationResult && validationResult && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            <div className={`px-6 py-4 border-b ${validationResult.success ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'} flex items-center justify-between`}>
+              <h3 className={`text-lg font-medium ${validationResult.success ? 'text-green-800' : 'text-red-800'} flex items-center`}>
+                {validationResult.success ? (
+                  <CheckCircle2 className="h-5 w-5 mr-2 text-green-600" />
+                ) : (
+                  <AlertCircle className="h-5 w-5 mr-2 text-red-600" />
+                )}
+                {validationResult.message}
+              </h3>
+              <button
+                onClick={() => setShowValidationResult(false)}
+                className="text-gray-400 hover:text-gray-500"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-6">
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <p className="text-sm font-medium text-gray-500">Entreprises créées</p>
+                    <p className="text-2xl font-bold text-gray-900">{validationResult.details.companiesCreated}</p>
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <p className="text-sm font-medium text-gray-500">Apprenants mis à jour</p>
+                    <p className="text-2xl font-bold text-gray-900">{validationResult.details.learnersUpdated}</p>
+                  </div>
+                </div>
+                
+                {validationResult.details.errors.length > 0 && (
+                  <div>
+                    <h4 className="font-medium text-gray-900 mb-2">Erreurs rencontrées :</h4>
+                    <ul className="bg-red-50 p-4 rounded-lg space-y-2">
+                      {validationResult.details.errors.map((error, index) => (
+                        <li key={index} className="text-sm text-red-800">• {error}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            <div className="px-6 py-4 border-t border-gray-200 flex justify-end">
+              <button
+                onClick={() => setShowValidationResult(false)}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
