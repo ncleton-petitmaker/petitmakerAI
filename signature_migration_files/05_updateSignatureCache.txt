@@ -1,0 +1,28 @@
+// Remplacez la fonction updateSignatureCache existante par celle-ci
+const updateSignatureCache = (participantSig: string | null, companySeal: string | null, organizationSeal: string | null, trainerSig: string | null, representativeSig: string | null) => {
+  try {
+    // Mettre à jour le cache global
+    GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+      participantSig,
+      companySeal,
+      organizationSeal,
+      trainerSig,
+      representativeSig
+    });
+    
+    // Mettre à jour le localStorage
+    const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+    const cacheData = {
+      participantSig,
+      companySeal,
+      organizationSeal,
+      trainerSig,
+      representativeSig
+    };
+    localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+    
+    console.log('🔄 [CACHE] Cache de signatures mis à jour:', cacheData);
+  } catch (e) {
+    console.error('❌ [CACHE] Erreur lors de la mise à jour du cache:', e);
+  }
+}; 

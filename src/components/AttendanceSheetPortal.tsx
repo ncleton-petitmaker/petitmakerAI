@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { StudentAttendanceSheet } from './StudentAttendanceSheet';
 import { supabase } from '../lib/supabase';
+import { GenericAttendanceSheet } from './shared/GenericAttendanceSheet';
+import { Participant, Training } from './shared/DocumentUtils';
 
 interface AttendanceSheetPortalProps {
   training: {
@@ -30,7 +31,7 @@ export const AttendanceSheetPortal: React.FC<AttendanceSheetPortalProps> = ({
   onDocumentOpen,
   onDocumentClose
 }) => {
-  const [participant, setParticipant] = useState<any>(null);
+  const [participant, setParticipant] = useState<Participant | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [portalElement, setPortalElement] = useState<HTMLElement | null>(null);
   
@@ -115,14 +116,27 @@ export const AttendanceSheetPortal: React.FC<AttendanceSheetPortalProps> = ({
     return null;
   }
   
+  // Formater les données de training pour le composant GenericAttendanceSheet
+  const formattedTraining: Training = {
+    id: training.id,
+    title: training.title,
+    duration: training.duration,
+    trainer_name: training.trainer_name,
+    location: training.location,
+    start_date: training.start_date,
+    end_date: training.end_date
+  };
+  
   // Créer le portail avec le contenu
   return createPortal(
-    <StudentAttendanceSheet
-      training={training}
+    <GenericAttendanceSheet
+      training={formattedTraining}
       participant={participant}
       onCancel={onCancel}
+      viewContext="student"
       onDocumentOpen={onDocumentOpen}
       onDocumentClose={onDocumentClose}
+      signedDates={[]}
     />,
     portalElement
   );

@@ -1,0 +1,110 @@
+const loadSignaturesFromSupabase = async () => {
+  try {
+    // Vérifier si nous avons chargé les signatures récemment
+    const now = Date.now();
+    const timeSinceLastLoad = now - lastSignatureLoadTimeRef.current;
+    
+    // Si moins de 5 secondes se sont écoulées, ne pas recharger
+    if (timeSinceLastLoad < 5000 && 
+        (participantSignature || companySeal || representativeSignature) && 
+        lastSignatureLoadTimeRef.current > 0) {
+      console.log('⏱️ [LOAD] Chargement des signatures ignoré (dernière charge < 5s)');
+      return;
+    }
+    
+    // Marquer le temps de chargement
+    lastSignatureLoadTimeRef.current = now;
+    console.log('🔍 [LOAD] Chargement des signatures depuis Supabase...');
+    
+    // Récupérer les signatures de participant depuis document_signatures
+    const { data: participantSigData, error: participantSigError } = await supabase
+      .from('document_signatures')
+      .select('*')
+      .eq('user_id', participant.id)
+      .eq('training_id', training.id)
+      .eq('type', 'convention')
+      .eq('signature_type', 'participant')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    
+    if (participantSigError) {
+      console.error('❌ [LOAD] Erreur lors de la récupération de la signature du participant:', participantSigError);
+    } else if (participantSigData && participantSigData.length > 0) {
+      const sigUrl = optimizeSealUrl(participantSigData[0].signature_url);
+      console.log('✅ [LOAD] Signature du participant trouvée:', sigUrl);
+      safeSetParticipantSignature(sigUrl);
+      setHasParticipantSignature(true);
+    } else {
+      console.log('ℹ️ [LOAD] Aucune signature de participant trouvée');
+      safeSetParticipantSignature(null);
+    }
+    
+    // Récupérer les signatures de représentant depuis document_signatures
+    const { data: representativeSigData, error: representativeSigError } = await supabase
+      .from('document_signatures')
+      .select('*')
+      .eq('user_id', participant.id)
+      .eq('training_id', training.id)
+      .eq('type', 'convention')
+      .eq('signature_type', 'representative')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    
+    if (representativeSigError) {
+      console.error('❌ [LOAD] Erreur lors de la récupération de la signature du représentant:', representativeSigError);
+    } else if (representativeSigData && representativeSigData.length > 0) {
+      const sigUrl = optimizeSealUrl(representativeSigData[0].signature_url);
+      console.log('✅ [LOAD] Signature du représentant trouvée:', sigUrl);
+      safeSetRepresentativeSignature(sigUrl);
+      setHasRepresentativeSignature(true);
+    } else {
+      console.log('ℹ️ [LOAD] Aucune signature de représentant trouvée');
+      safeSetRepresentativeSignature(null);
+    }
+    
+    // Récupérer le tampon d'entreprise depuis document_signatures
+    const { data: companySealData, error: companySealError } = await supabase
+      .from('document_signatures')
+      .select('*')
+      .eq('user_id', participant.id)
+      .eq('training_id', training.id)
+      .eq('type', 'convention')
+      .eq('signature_type', 'companyseal')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    
+    if (companySealError) {
+      console.error('❌ [LOAD] Erreur lors de la récupération du tampon d\'entreprise:', companySealError);
+    } else if (companySealData && companySealData.length > 0) {
+      const sealUrl = optimizeSealUrl(companySealData[0].signature_url);
+      console.log('✅ [LOAD] Tampon d\'entreprise trouvé:', sealUrl);
+      safeSetCompanySeal(sealUrl);
+    } else {
+      console.log('ℹ️ [LOAD] Aucun tampon d\'entreprise trouvé');
+      safeSetCompanySeal(null);
+    }
+    
+    // Si une signature est présente, on considère que la convention est signée
+    const isSigned = !!participantSignature || !!representativeSignature;
+    setIsSigned(isSigned);
+    
+    // Récupérer le tampon de l'organisme
+    const orgSeal = await fetchOrganizationSeal();
+    
+    // Récupérer la signature du formateur
+    const trainerSig = await loadTrainerSignature();
+    
+    // Mettre à jour le cache global
+    updateSignatureCache(
+      participantSignature, 
+      companySeal, 
+      orgSeal, 
+      trainerSig,
+      representativeSignature
+    );
+    
+    console.log('✅ [LOAD] Chargement des signatures terminé');
+  } catch (error) {
+    console.error('❌ [LOAD] Erreur lors du chargement des signatures:', error);
+  }
+}; 

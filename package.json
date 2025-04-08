@@ -25,10 +25,12 @@
     "@mui/material": "^6.4.7",
     "@react-three/drei": "^9.99.5",
     "@react-three/fiber": "^8.15.16",
+    "@tanstack/react-query": "^5.71.5",
     "@types/pdfmake": "^0.2.11",
     "@types/react-beautiful-dnd": "^13.1.8",
     "@types/react-datepicker": "^6.2.0",
     "canvas": "^3.1.0",
+    "clsx": "^2.1.1",
     "framer-motion": "^11.0.8",
     "gsap": "^3.12.5",
     "hammerjs": "^2.0.8",
@@ -49,6 +51,7 @@
     "react-intersection-observer": "^9.8.1",
     "react-router-dom": "^6.22.2",
     "react-signature-canvas": "^1.1.0-alpha.1",
+    "tailwind-merge": "^3.1.0",
     "three": "^0.162.0"
   },
   "devDependencies": {

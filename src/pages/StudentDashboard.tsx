@@ -76,8 +76,16 @@ export const StudentDashboard = () => {
       if (profileData) {
         // Vérifier si le profil est complet
         if (!profileData.first_name || !profileData.last_name || !profileData.company) {
-          console.log('Profile incomplete, redirecting to profile form');
-          navigate('/espace-stagiaires');
+          console.log('Profile incomplete, redirecting to profile form', {
+            first_name: !!profileData.first_name,
+            last_name: !!profileData.last_name,
+            company: !!profileData.company
+          });
+          
+          // Ajouter un petit délai pour éviter les redirections trop rapides
+          setTimeout(() => {
+            navigate('/espace-stagiaires');
+          }, 300);
           return;
         }
           
@@ -195,6 +203,9 @@ export const StudentDashboard = () => {
           .insert({
             id: user.id,
             email: user.email,
+            first_name: '',
+            last_name: '',
+            company: '',
             created_at: new Date().toISOString()
           })
           .select('*')
@@ -204,7 +215,10 @@ export const StudentDashboard = () => {
           
         // Rediriger vers le formulaire de profil pour les nouveaux utilisateurs
         console.log('New profile created, redirecting to profile form');
-        navigate('/espace-stagiaires');
+        // Ajouter un petit délai pour éviter les problèmes de synchronisation
+        setTimeout(() => {
+          navigate('/espace-stagiaires');
+        }, 300);
         return;
       }
     } catch (error) {
@@ -530,7 +544,9 @@ export const StudentDashboard = () => {
                   
                   {/* Questionnaire List */}
                   <div className="mt-6">
-                    <QuestionnaireList refreshTrigger={refreshTrigger} />
+                    {companyStatus === 'valid' && (
+                      <QuestionnaireList refreshTrigger={refreshTrigger} />
+                    )}
                   </div>
                 </div>
               </div>
@@ -554,13 +570,18 @@ export const StudentDashboard = () => {
 
       {/* Modals */}
       {showQuestionnaire && (
-        <PositioningQuestionnaire 
+        <PositioningQuestionnaire
           onClose={() => {
+            console.log('🔍 [DEBUG] Closing questionnaire from StudentDashboard');
+            setShowQuestionnaire(false);
+          }}
+          type="positioning"
+          companyStatus={companyStatus}
+          onSubmitSuccess={() => {
+            console.log('🔍 [DEBUG] Questionnaire submitted successfully');
             setShowQuestionnaire(false);
             setRefreshTrigger(prev => prev + 1);
-          }} 
-          onSubmitSuccess={handleProfileUpdate}
-          companyStatus={companyStatus}
+          }}
         />
       )}
 

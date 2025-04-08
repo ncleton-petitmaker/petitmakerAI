@@ -1,0 +1,198 @@
+const handleSignatureSave = async (signatureDataUrl: string, type: SignatureType | 'participant' | 'companySeal' | 'representative' = SignatureType.PARTICIPANT) => {
+  // Vérifier l'authentification
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) {
+    alert('Vous devez être connecté pour signer ce document.');
+    return;
+  }
+  
+  if (isSaving) return;
+  setIsSaving(true);
+  
+  // Empêcher la fermeture accidentelle de la page pendant l'enregistrement
+  const preventUnload = (e: BeforeUnloadEvent) => {
+    e.preventDefault();
+    e.returnValue = 'Enregistrement en cours. Êtes-vous sûr de vouloir quitter?';
+  };
+  window.addEventListener('beforeunload', preventUnload);
+  
+  try {
+    // Convertir le type si nécessaire
+    const signatureType = typeof type === 'string' ? getSignatureTypeFromString(type) : type;
+    
+    console.log(`🔍 [SAVE] Sauvegarde du ${isSealType(signatureType) ? 'tampon' : 'signature'} directement dans storage puis dans document_signatures`);
+    
+    try {
+      // Génération d'un nom unique pour le fichier de signature
+      const timestamp = Date.now();
+      const userId = participant.id;
+      const trainingId = training.id;
+      
+      // Utiliser la fonction standardisée pour générer le nom du fichier
+      const fileName = generateStandardSignatureFilename(
+        signatureType,
+        DocumentType.CONVENTION,
+        trainingId,
+        userId
+      );
+      
+      console.log(`🔍 [SAVE] Enregistrement du fichier dans storage avec nom: ${fileName}`);
+      
+      // 1. Enregistrer d'abord le fichier dans le bucket storage
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('signatures')
+        .upload(fileName, 
+          // Convertir le data URL en Blob
+          await (await fetch(signatureDataUrl)).blob(), 
+          { contentType: 'image/png', upsert: true });
+      
+      if (uploadError) {
+        throw new Error(`Erreur lors de l'upload du fichier: ${uploadError.message}`);
+      }
+      
+      console.log('✅ [SAVE] Fichier enregistré avec succès dans le bucket:', uploadData);
+      
+      // 2. Récupérer l'URL publique du fichier
+      const { data: urlData } = await supabase.storage
+        .from('signatures')
+        .getPublicUrl(fileName);
+      
+      if (!urlData || !urlData.publicUrl) {
+        throw new Error("Impossible d'obtenir l'URL publique du fichier");
+      }
+      
+      const publicUrl = urlData.publicUrl;
+      console.log('✅ [SAVE] URL publique générée:', publicUrl);
+      
+      // 3. Enregistrer l'entrée dans document_signatures
+      const { data: signatureData, error: signatureError } = await supabase
+        .from('document_signatures')
+        .insert([{
+          user_id: participant.id,
+          signature_url: publicUrl,
+          signature_type: signatureType.toLowerCase(),
+          training_id: training.id,
+          type: DocumentType.CONVENTION,
+          path: fileName,
+          created_by: session.user.id
+        }])
+        .select();
+      
+      if (signatureError) {
+        console.error('❌ [SAVE] Erreur lors de l\'enregistrement dans document_signatures:', signatureError);
+        throw new Error(`Erreur lors de l'enregistrement dans document_signatures: ${signatureError.message}`);
+      }
+      
+      console.log('✅ [SAVE] Signature enregistrée dans document_signatures:', signatureData);
+      
+      // 4. Anticacher l'URL
+      const antiCacheUrl = `${publicUrl.split('?')[0]}?t=${timestamp}&forcereload=true`;
+      
+      // 5. Précharger l'image avant de mettre à jour l'interface
+      const img = new Image();
+      img.onload = () => {
+        console.log(`✅ [SAVE] Image de ${isSealType(signatureType) ? 'tampon' : 'signature'} préchargée avec succès`);
+        
+        // Mettre à jour les états selon le type
+        if (signatureType === SignatureType.COMPANY_SEAL) {
+          safeSetCompanySeal(antiCacheUrl);
+          toast.success('Tampon appliqué avec succès !');
+        } else if (signatureType === SignatureType.REPRESENTATIVE) {
+          safeSetRepresentativeSignature(antiCacheUrl);
+          setIsSigned(true);
+          setHasRepresentativeSignature(true);
+          toast.success('Signature du représentant légal enregistrée avec succès !');
+          
+          // Mettre à jour le statut dans user_profiles si nécessaire
+          supabase.from('user_profiles')
+            .update({ has_signed_agreement: true })
+            .eq('user_id', participant.id)
+            .then(({ error }) => {
+              if (error) {
+                console.error('❌ [SAVE] Erreur lors de la mise à jour du statut has_signed_agreement:', error);
+              } else {
+                console.log('✅ [SAVE] Statut has_signed_agreement mis à jour avec succès');
+              }
+            });
+        } else {
+          // Pour une signature normale de participant
+          safeSetParticipantSignature(antiCacheUrl);
+          setIsSigned(true);
+          setHasParticipantSignature(true);
+          toast.success('Signature enregistrée avec succès !');
+          
+          // Mettre à jour le statut dans user_profiles
+          supabase.from('user_profiles')
+            .update({ has_signed_agreement: true })
+            .eq('user_id', participant.id)
+            .then(({ error }) => {
+              if (error) {
+                console.error('❌ [SAVE] Erreur lors de la mise à jour du statut has_signed_agreement:', error);
+              } else {
+                console.log('✅ [SAVE] Statut has_signed_agreement mis à jour avec succès');
+              }
+            });
+        }
+        
+        // Mettre à jour le cache global avec la nouvelle signature
+        updateSignatureCache(
+          signatureType === SignatureType.PARTICIPANT ? antiCacheUrl : participantSignature,
+          signatureType === SignatureType.COMPANY_SEAL ? antiCacheUrl : companySeal,
+          organizationSeal,
+          trainerSignature,
+          signatureType === SignatureType.REPRESENTATIVE ? antiCacheUrl : representativeSignature
+        );
+        
+        // Activer la génération du PDF
+        setCanGeneratePDF(true);
+        
+        // Afficher la confetti si c'est une signature de participant ou représentant
+        if (signatureType === SignatureType.PARTICIPANT || signatureType === SignatureType.REPRESENTATIVE) {
+          setShowConfetti(true);
+          setTimeout(() => {
+            setShowConfetti(false);
+          }, 5000);
+        }
+      };
+      
+      img.onerror = (error) => {
+        console.error('❌ [SAVE] Erreur lors du préchargement de l\'image:', error);
+        
+        // En cas d'erreur de préchargement, on met quand même à jour les états
+        if (signatureType === SignatureType.COMPANY_SEAL) {
+          safeSetCompanySeal(antiCacheUrl);
+        } else if (signatureType === SignatureType.REPRESENTATIVE) {
+          safeSetRepresentativeSignature(antiCacheUrl);
+          setIsSigned(true);
+          setHasRepresentativeSignature(true);
+        } else {
+          safeSetParticipantSignature(antiCacheUrl);
+          setIsSigned(true);
+          setHasParticipantSignature(true);
+        }
+        
+        // Mettre à jour le cache global
+        updateSignatureCache(
+          signatureType === SignatureType.PARTICIPANT ? antiCacheUrl : participantSignature,
+          signatureType === SignatureType.COMPANY_SEAL ? antiCacheUrl : companySeal,
+          organizationSeal,
+          trainerSignature,
+          signatureType === SignatureType.REPRESENTATIVE ? antiCacheUrl : representativeSignature
+        );
+      };
+      
+      // Déclencher le chargement de l'image
+      img.src = antiCacheUrl;
+    } catch (error: any) {
+      console.error('❌ [SAVE] Erreur lors de la sauvegarde de la signature:', error);
+      toast.error(`Erreur lors de la sauvegarde: ${error.message}`);
+    }
+  } catch (error: any) {
+    console.error('❌ [SAVE] Erreur globale:', error);
+    toast.error(`Une erreur est survenue: ${error.message}`);
+  } finally {
+    // Supprimer l'écouteur d'événement beforeunload
+    window.removeEventListener('beforeunload', preventUnload);
+    setIsSaving(false);
+  }
+}; 

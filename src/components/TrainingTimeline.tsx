@@ -227,23 +227,19 @@ const phases = [
 ];
 
 export const TrainingTimeline = ({ 
-  questionnaireCompleted = false, 
-  training = null, 
-  refreshTrigger = 0, 
-  onDocumentOpen, 
-  onDocumentClose 
-}: {
-  questionnaireCompleted?: boolean;
-  training?: any;
-  refreshTrigger?: number;
-  onDocumentOpen?: () => void;
-  onDocumentClose?: () => void;
-}) => {
+  questionnaireCompleted: initialQuestionnaireCompleted = false,
+  training,
+  refreshTrigger,
+  onDocumentOpen,
+  onDocumentClose
+}: TrainingTimelineProps) => {
+  const [userId, setUserId] = useState<string | null>(null);
   const [evaluationStatus, setEvaluationStatus] = useState({
     initial: false,
     final: false,
     satisfaction: false
   });
+  const [questionnaireCompleted, setQuestionnaireCompleted] = useState(initialQuestionnaireCompleted);
   const [evaluationScores, setEvaluationScores] = useState({
     initial: null as number | null,
     final: null as number | null
@@ -255,7 +251,6 @@ export const TrainingTimeline = ({
   const [readOnly, setReadOnly] = useState(false);
   const [showInternalRules, setShowInternalRules] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [userId, setUserId] = useState<string | null>(null);
   const [hasSousTypeColumn, setHasSousTypeColumn] = useState<boolean | null>(null);
   const [attendanceSheetSigned, setAttendanceSheetSigned] = useState(false);
   const [trainingAgreementSigned, setTrainingAgreementSigned] = useState(false);
@@ -267,28 +262,44 @@ export const TrainingTimeline = ({
   const [userProfile, setUserProfile] = useState<any>(null);
   const [isAttendanceSheetButtonCalled, setIsAttendanceSheetButtonCalled] = useState(false);
   const [isTrainingAgreementButtonCalled, setIsTrainingAgreementButtonCalled] = useState(false);
+  const [questionnaireResponses, setQuestionnaireResponses] = useState<any>(null);
 
   const fetchQuestionnaireStatus = async () => {
     try {
-      // Get user data if not already set
-      if (!userId) {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-        setUserId(user.id);
-      }
-      
-      // Assurer qu'on a un userId valide avant de continuer
-      const currentUserId = userId || null;
-      if (!currentUserId) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const currentUserId = user.id;
+
+      // Récupérer d'abord les templates actifs pour cette formation
+      const { data: templates, error: templatesError } = await supabase
+        .from('questionnaire_templates')
+        .select('id, type')
+        .eq('training_id', training.id)
+        .eq('is_active', true);
+
+      if (templatesError) {
+        console.error('Error fetching templates:', templatesError);
         return;
       }
-      
-      // Check if user has completed positioning questionnaire
+
+      // Organiser les templates par type
+      const templatesByType = templates?.reduce((acc: any, template) => {
+        acc[template.type] = template.id;
+        return acc;
+      }, {});
+
+      if (!templatesByType) {
+        console.error('No templates found for training');
+        return;
+      }
+
+      // Check positioning questionnaire
       const { data: positioningResponses, error: positioningError } = await supabase
         .from('questionnaire_responses')
         .select('id, score')
         .eq('user_id', currentUserId)
-        .eq('type', 'positioning');
+        .eq('type', 'positioning')
+        .eq('template_id', templatesByType['positioning']);
 
       if (positioningError) {
         console.error('Error checking positioning questionnaire:', positioningError);
@@ -297,103 +308,69 @@ export const TrainingTimeline = ({
       
       const hasPositioningResponses = positioningResponses && positioningResponses.length > 0;
       
-      // Check initial evaluation
-      const evalType = 'initial_final_evaluation';
-      
-      const { data: evaluationResponses, error: evalError } = await supabase
+      // Check evaluations (initial and final)
+      const { data: evaluationResponses, error: evaluationError } = await supabase
         .from('questionnaire_responses')
         .select('id, score, sous_type')
         .eq('user_id', currentUserId)
-        .eq('type', evalType);
+        .eq('type', 'initial_final_evaluation')
+        .eq('template_id', templatesByType['initial_final_evaluation']);
 
-      if (evalError) {
-        console.error('Error checking evaluations:', evalError);
+      if (evaluationError) {
+        console.error('Error checking evaluations:', evaluationError);
         return;
       }
-      
-      // Adapter la logique en fonction de la présence ou non de sous_type
-      let hasInitialResponses, hasFinalResponses;
-      let initialScore = null;
-      let finalScore = null;
 
-      if (hasSousTypeColumn) {
-        // Si la colonne sous_type existe, filtrer par sous_type
-        const initialEvals = evaluationResponses && evaluationResponses.filter(item => item.sous_type === 'initial');
-        const finalEvals = evaluationResponses && evaluationResponses.filter(item => item.sous_type === 'final');
-        
-        hasInitialResponses = initialEvals && initialEvals.length > 0;
-        hasFinalResponses = finalEvals && finalEvals.length > 0;
-        
-        // Récupérer les scores
-        if (hasInitialResponses && initialEvals[0].score) {
-          initialScore = initialEvals[0].score;
-        }
-        
-        if (hasFinalResponses && finalEvals[0].score) {
-          finalScore = finalEvals[0].score;
-        }
-      } else {
-        // Sinon, on ne peut pas distinguer initial de final
-        // On suppose que s'il y a des données d'évaluation, les deux sont complétés
-        hasInitialResponses = evaluationResponses && evaluationResponses.length > 0;
-        hasFinalResponses = evaluationResponses && evaluationResponses.length > 1;
-        
-        // Récupérer les scores
-        if (hasInitialResponses && evaluationResponses[0].score) {
-          initialScore = evaluationResponses[0].score;
-        }
-        
-        if (hasFinalResponses && evaluationResponses[1].score) {
-          finalScore = evaluationResponses[1].score;
-        }
+      // Vérifier les évaluations initiales et finales
+      const hasInitialEval = evaluationResponses?.some(r => r.sous_type === 'initial') || false;
+      const hasFinalEval = evaluationResponses?.some(r => r.sous_type === 'final') || false;
+
+      // Check satisfaction questionnaire
+      const { data: satisfactionResponses, error: satisfactionError } = await supabase
+        .from('questionnaire_responses')
+        .select('id')
+        .eq('user_id', currentUserId)
+        .eq('type', 'satisfaction')
+        .eq('template_id', templatesByType['satisfaction']);
+
+      if (satisfactionError) {
+        console.error('Error checking satisfaction questionnaire:', satisfactionError);
+        return;
       }
 
-      // Update user profile if needed
-      if (hasPositioningResponses || hasInitialResponses || hasFinalResponses) {
-        const profileUpdate: any = {};
-        
-        if (hasPositioningResponses) {
-          profileUpdate.questionnaire_completed = true;
-        }
-        
-        if (hasInitialResponses) {
-          profileUpdate.initial_evaluation_completed = true;
-        }
-        
-        if (hasFinalResponses) {
-          profileUpdate.final_evaluation_completed = true;
-        }
-        
-        await supabase
-          .from('user_profiles')
-          .update(profileUpdate)
-          .eq('id', currentUserId);
-      }
-      
-      // Fetch updated user profile data
-      const { data: profileData, error: getProfileError } = await supabase
+      const hasSatisfactionResponses = satisfactionResponses && satisfactionResponses.length > 0;
+
+      // Mettre à jour les états locaux
+      setQuestionnaireCompleted(hasPositioningResponses);
+      setEvaluationStatus({
+        initial: hasInitialEval,
+        final: hasFinalEval,
+        satisfaction: hasSatisfactionResponses
+      });
+
+      // Mettre à jour le profil utilisateur si nécessaire
+      const { data: profile } = await supabase
         .from('user_profiles')
         .select('questionnaire_completed, initial_evaluation_completed, final_evaluation_completed, satisfaction_completed')
         .eq('id', currentUserId)
         .single();
-      
-      if (getProfileError) {
-        console.error('Error fetching updated profile:', getProfileError);
-        return;
+
+      if (profile && (
+        profile.questionnaire_completed !== hasPositioningResponses ||
+        profile.initial_evaluation_completed !== hasInitialEval ||
+        profile.final_evaluation_completed !== hasFinalEval ||
+        profile.satisfaction_completed !== hasSatisfactionResponses
+      )) {
+        await supabase
+          .from('user_profiles')
+          .update({
+            questionnaire_completed: hasPositioningResponses,
+            initial_evaluation_completed: hasInitialEval,
+            final_evaluation_completed: hasFinalEval,
+            satisfaction_completed: hasSatisfactionResponses
+          })
+          .eq('id', currentUserId);
       }
-      
-      // Update local state with fetched data
-      setEvaluationStatus({
-        initial: profileData?.initial_evaluation_completed || false,
-        final: profileData?.final_evaluation_completed || false,
-        satisfaction: profileData?.satisfaction_completed || false
-      });
-      
-      // Update evaluation scores
-      setEvaluationScores({
-        initial: initialScore,
-        final: finalScore
-      });
     } catch (error) {
       console.error('Error in fetchQuestionnaireStatus:', error);
     }
@@ -516,48 +493,68 @@ export const TrainingTimeline = ({
     return item.status || 'pending';
   }
 
-  const handleItemClick = (item: TimelineItem) => {
-    console.log('🔍 [DEBUG] handleItemClick - START', item);
-    
-    // Vérifier si l'élément est un questionnaire ou un document
-    const isQuestionnaire = item.action && (
-      item.action.includes('questionnaire') || 
-      item.action.includes('evaluation') || 
-      item.action === 'satisfaction'
-    );
-    
-    const isDocument = item.action && (
-      item.action === 'completion-certificate' || 
-      item.action === 'attendance-sheet' || 
-      item.action === 'training-agreement' ||
-      item.action === 'internal-rules'
-    );
-    
-    // Si c'est un questionnaire ou un document et que l'entreprise est en attente, bloquer l'action
-    if ((isQuestionnaire || isDocument) && companyStatus !== 'valid') {
-      console.log('🔍 [DEBUG] Blocking action, company status:', companyStatus);
-      return;
+  const fetchQuestionnaireResponses = async (userId: string, type: string, templateId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('questionnaire_responses')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('type', type)
+        .eq('template_id', templateId)
+        .single();
+
+      if (error) throw error;
+      return data;
+    } catch (error) {
+      console.error('Error fetching questionnaire responses:', error);
+      return null;
     }
-    
-    if (!item.action) {
-      console.log('🔍 [DEBUG] No action defined for item, returning');
-      return;
-    }
+  };
+
+  const handleItemClick = async (item: TimelineItem) => {
+    console.log('🔍 [DEBUG] handleItemClick - START');
     
     if (item.action === 'questionnaire') {
-      console.log('🔍 [DEBUG] Setting showQuestionnaire to true');
+      console.log('🔍 [DEBUG] Setting up positioning questionnaire');
       setCurrentQuestionnaire(null);
       setReadOnly(questionnaireCompleted);
-      setShowQuestionnaire(true);
+
+      if (questionnaireCompleted) {
+        // Récupérer d'abord les templates actifs pour cette formation
+        const { data: templates } = await supabase
+          .from('questionnaire_templates')
+          .select('id, type')
+          .eq('training_id', training.id)
+          .eq('is_active', true)
+          .eq('type', 'positioning');
+
+        if (templates && templates.length > 0) {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user) {
+            const responses = await fetchQuestionnaireResponses(user.id, 'positioning', templates[0].id);
+            setQuestionnaireResponses(responses);
+          }
+        }
+
+        setShowQuestionnaireReport(true);
+        setShowQuestionnaire(false);
+      } else {
+        setShowQuestionnaireReport(false);
+        setShowQuestionnaire(true);
+      }
+
       console.log('🔍 [DEBUG] Opening positioning questionnaire with:', { 
         readOnly: questionnaireCompleted, 
-        currentQuestionnaire: null 
+        currentQuestionnaire: null,
+        showQuestionnaireReport: questionnaireCompleted,
+        showQuestionnaire: !questionnaireCompleted
       });
     } else if (item.action === 'initial-evaluation') {
       console.log('🔍 [DEBUG] Setting up initial evaluation');
       setCurrentQuestionnaire('initial');
       setReadOnly(evaluationStatus.initial);
       setShowQuestionnaireReport(true);
+      setShowQuestionnaire(false);
       console.log('🔍 [DEBUG] Opening initial evaluation questionnaire with:', { 
         readOnly: evaluationStatus.initial, 
         currentQuestionnaire: 'initial' 
@@ -567,6 +564,7 @@ export const TrainingTimeline = ({
       setCurrentQuestionnaire('final');
       setReadOnly(evaluationStatus.final);
       setShowQuestionnaireReport(true);
+      setShowQuestionnaire(false);
       console.log('🔍 [DEBUG] Opening final evaluation questionnaire with:', { 
         readOnly: evaluationStatus.final, 
         currentQuestionnaire: 'final' 
@@ -575,11 +573,10 @@ export const TrainingTimeline = ({
       console.log('🔍 [DEBUG] Setting showSatisfactionQuestionnaire to true');
       const isSatisfactionCompleted = evaluationStatus.satisfaction;
       setReadOnly(isSatisfactionCompleted);
+      setShowSatisfactionQuestionnaire(true);
       
       if (isSatisfactionCompleted && !satisfactionData) {
         fetchSatisfactionData();
-      } else {
-      setShowSatisfactionQuestionnaire(true);
       }
     } else if (item.action === 'internal-rules') {
       console.log('🔍 [DEBUG] Setting showInternalRules to true');
@@ -1243,8 +1240,6 @@ export const TrainingTimeline = ({
         
         if (isSatisfactionCompleted && !satisfactionData) {
           fetchSatisfactionData();
-        } else {
-          setShowSatisfactionQuestionnaire(true);
         }
       }
     } else {
@@ -1757,11 +1752,10 @@ export const TrainingTimeline = ({
               setShowQuestionnaire(false);
               if (onDocumentClose) onDocumentClose();
             }}
-            readOnly={readOnly}
-            type={currentQuestionnaire}
+            type="positioning"
             companyStatus={companyStatus}
             onSubmitSuccess={() => {
-              console.log('Questionnaire submitted successfully');
+              console.log('🔍 [DEBUG] Questionnaire submitted successfully');
               setShowQuestionnaire(false);
               if (onDocumentClose) onDocumentClose();
               fetchQuestionnaireStatus();
@@ -1771,12 +1765,18 @@ export const TrainingTimeline = ({
         
         {showQuestionnaireReport && (
           <PositioningQuestionnaire
-            onClose={() => setShowQuestionnaireReport(false)}
+            onClose={() => {
+              setShowQuestionnaireReport(false);
+              setQuestionnaireResponses(null);
+            }}
             readOnly={readOnly}
-            type={currentQuestionnaire}
+            type={currentQuestionnaire ? "initial_final_evaluation" : "positioning"}
+            sous_type={currentQuestionnaire}
             companyStatus={companyStatus}
+            adminResponseData={questionnaireResponses}
             onSubmitSuccess={() => {
               setShowQuestionnaireReport(false);
+              setQuestionnaireResponses(null);
               if (onDocumentClose) onDocumentClose();
               fetchQuestionnaireStatus();
             }}

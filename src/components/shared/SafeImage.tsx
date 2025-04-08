@@ -14,22 +14,92 @@ import {
   DocumentType 
 } from '../../types/SignatureTypes';
 
-// Au début du fichier, après les imports, ajouter le système de cache avec timestamp
-// Système de cache global pour les URLs avec timestamp
-type ImageCacheEntry = {
+// Configuration
+const CACHE_VALIDITY_DURATION = 30 * 1000; // 30 seconds
+const MIN_RETRY_INTERVAL = 3000; // 3 seconds (increased from 1 second)
+const URL_CHANGE_THRESHOLD = 400; // 400 ms (increased from 200 ms)
+
+// Systèmes de cache globaux pour les images
+interface ImageCacheEntry {
   url: string;
   timestamp: number;
-  lastAttempt: number;
+  retries: number;
+  lastRetry: number;
+  status: 'pending' | 'success' | 'error';
+}
+
+const globalImageCache: Record<string, ImageCacheEntry> = {};
+
+// Fonctions utilitaires de gestion du cache
+const checkCacheEntry = (cacheKey: string): ImageCacheEntry | null => {
+  const entry = globalImageCache[cacheKey];
+  
+  if (!entry) return null;
+  
+  const now = Date.now();
+  const isValid = (now - entry.timestamp) < CACHE_VALIDITY_DURATION;
+  
+  return isValid ? entry : null;
 };
 
-// Cache global pour les URLs d'images traitées avec limites de temps
-const GLOBAL_IMAGE_URL_CACHE: Map<string, ImageCacheEntry> = new Map();
+const addToCacheOrUpdateEntry = (cacheKey: string, url: string, status: 'pending' | 'success' | 'error' = 'pending'): void => {
+  const existingEntry = globalImageCache[cacheKey];
+  
+  if (!existingEntry) {
+    globalImageCache[cacheKey] = {
+      url,
+      timestamp: Date.now(),
+      retries: 0,
+      lastRetry: 0,
+      status
+    };
+    return;
+  }
+  
+  // Mise à jour d'une entrée existante
+  globalImageCache[cacheKey] = {
+    ...existingEntry,
+    url,
+    timestamp: Date.now(),
+    status,
+    retries: status === 'error' ? existingEntry.retries + 1 : existingEntry.retries
+  };
+};
 
-// Durée de validité du cache en ms (30 secondes)
-const CACHE_VALIDITY_DURATION = 30000;
+const canRetryImage = (cacheKey: string): boolean => {
+  const entry = globalImageCache[cacheKey];
+  if (!entry) return true;
+  
+  const now = Date.now();
+  return (now - entry.lastRetry) >= MIN_RETRY_INTERVAL;
+};
 
-// Durée minimale entre deux tentatives de chargement de la même image
-const MIN_RETRY_INTERVAL = 3000;
+const markImageRetry = (cacheKey: string): void => {
+  const entry = globalImageCache[cacheKey];
+  if (entry) {
+    globalImageCache[cacheKey] = {
+      ...entry,
+      lastRetry: Date.now(),
+      retries: entry.retries + 1
+    };
+  }
+};
+
+// Type d'interface pour les propriétés du composant SafeImage
+interface SafeImageProps {
+  src: string | null;
+  alt: string;
+  className?: string;
+  style?: React.CSSProperties;
+  onLoad?: () => void;
+  onError?: () => void;
+  fallbackSrc?: string;
+  id?: string;
+  [key: string]: any;
+  isSignature?: boolean;
+  isOrganizationSeal?: boolean; // Nouvelle prop pour les tampons d'organisation
+  pdfMode?: boolean; // Nouveau mode pour la génération PDF
+}
 
 // Fonction pour récupérer une URL depuis le cache ou null si expirée
 const getFromImageCache = (originalUrl: string): string | null => {
@@ -37,7 +107,7 @@ const getFromImageCache = (originalUrl: string): string | null => {
   
   // Générer une clé normalisée (sans paramètres de timestamp)
   const baseUrl = originalUrl.split('?')[0];
-  const entry = GLOBAL_IMAGE_URL_CACHE.get(baseUrl);
+  const entry = globalImageCache[baseUrl];
   
   if (!entry) return null;
   
@@ -49,7 +119,7 @@ const getFromImageCache = (originalUrl: string): string | null => {
   }
   
   // Sinon supprimer l'entrée expirée
-  GLOBAL_IMAGE_URL_CACHE.delete(baseUrl);
+  delete globalImageCache[baseUrl];
   return null;
 };
 
@@ -61,36 +131,13 @@ const addToImageCache = (originalUrl: string, processedUrl: string): void => {
   const baseUrl = originalUrl.split('?')[0];
   
   // Ajouter au cache avec timestamp actuel
-  GLOBAL_IMAGE_URL_CACHE.set(baseUrl, {
+  globalImageCache[baseUrl] = {
     url: processedUrl,
     timestamp: Date.now(),
-    lastAttempt: Date.now()
-  });
-};
-
-// Fonction pour vérifier si une nouvelle tentative est autorisée
-const canRetryImage = (originalUrl: string): boolean => {
-  if (!originalUrl) return true;
-  
-  const baseUrl = originalUrl.split('?')[0];
-  const entry = GLOBAL_IMAGE_URL_CACHE.get(baseUrl);
-  
-  if (!entry) return true;
-  
-  const now = Date.now();
-  
-  // Si la dernière tentative est trop récente, interdire une nouvelle tentative
-  if (now - entry.lastAttempt < MIN_RETRY_INTERVAL) {
-    return false;
-  }
-  
-  // Mettre à jour le timestamp de dernière tentative
-  GLOBAL_IMAGE_URL_CACHE.set(baseUrl, { 
-    ...entry,
-    lastAttempt: now
-  });
-  
-  return true;
+    retries: 0,
+    lastRetry: Date.now(),
+    status: 'pending'
+  };
 };
 
 // Fonction utilitaire pour désactiver la plupart des logs côté apprenant
@@ -133,23 +180,6 @@ function safeWarn(...args: any[]): void {
 // Cache global pour les images déjà chargées avec succès
 // Cela permet d'éviter les rechargements inutiles qui causent des clignotements
 const loadedImagesCache = new Map<string, boolean>();
-
-interface SafeImageProps {
-  src: string | null | undefined;
-  alt: string;
-  className?: string;
-  id?: string;
-  onLoad?: () => void;
-  onError?: () => void;
-  // Pour les signatures et tampons
-  signatureType?: SignatureType;
-  documentType?: DocumentType;
-  trainingId?: string;
-  userId?: string;
-  companyId?: string;
-  // Pour toutes les autres props
-  [key: string]: any;
-}
 
 /**
  * Extrait le bucket et le chemin du fichier à partir d'une URL Supabase
@@ -227,14 +257,12 @@ const getOrganizationSealUrl = async (): Promise<string | null> => {
         if (sealData && sealData.publicUrl) {
           // Ajouter le tampon trouvé au système
           try {
-            await SignatureService.saveSignature(
-              sealData.publicUrl,
-              {
+            await SignatureService.saveSignature({
                 signature_type: SignatureType.ORGANIZATION_SEAL,
-                type: DocumentType.CONVENTION,
+                document_type: DocumentType.CONVENTION,
                 training_id: 'default',
                 user_id: 'default',
-                signature_data: sealData.publicUrl
+                file_url: sealData.publicUrl       
               }
             );
             safeLog('✅', 'Tampon d\'organisation migré vers le nouveau système');
@@ -268,14 +296,12 @@ const getOrganizationSealUrl = async (): Promise<string | null> => {
         if (response.ok) {
           // Ajouter le tampon trouvé au système
           try {
-            await SignatureService.saveSignature(
-              sealUrl,
-              {
+            await SignatureService.saveSignature({
                 signature_type: SignatureType.ORGANIZATION_SEAL,
-                type: DocumentType.CONVENTION,
+                document_type: DocumentType.CONVENTION,
                 training_id: 'default',
                 user_id: 'default',
-                signature_data: sealUrl
+                file_url: sealUrl        
               }
             );
             safeLog('✅', 'Tampon d\'organisation des paramètres migré vers le nouveau système');
@@ -538,249 +564,187 @@ const prepareSrcUrl = async (src: string | null | undefined,
   }
 };
 
-/**
- * Composant SafeImage amélioré avec gestion des erreurs et optimisations
- */
 const SafeImage: React.FC<SafeImageProps> = ({
   src,
   alt,
   className = '',
-  id,
+  style = {},
   onLoad,
   onError,
-  signatureType,
-  documentType,
-  trainingId,
-  userId,
-  companyId,
-  ...props
+  fallbackSrc,
+  id,
+  isSignature = false,
+  isOrganizationSeal = false, // Support spécifique pour les tampons d'organisation
+  pdfMode = false, // Mode PDF pour éviter les paramètres aléatoires
+  ...rest
 }) => {
-  // État pour stocker l'URL de l'image à afficher
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  // État pour gérer le chargement
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  // Compteur d'erreurs pour limiter les tentatives
-  const [errorCount, setErrorCount] = useState<number>(0);
-  // URL finale à afficher après préparation
-  const [finalSrc, setFinalSrc] = useState<string | null>(null);
-  // État de verrouillage pour éviter les rechargements multiples
-  const [imageLocked, setImageLocked] = useState<boolean>(false);
-  // Référence pour stocker le timestamp du dernier changement d'URL
-  const lastUrlChangeTimestamp = useRef<number>(Date.now());
-  // Référence pour stocker le composant démonté
-  const unmountedRef = useRef<boolean>(false);
-
-  /**
-   * Prépare l'URL de l'image en fonction du contexte
-   */
-  const prepareImage = async () => {
+  const [imgSrc, setImgSrc] = useState<string | null>(src);
+  const [error, setError] = useState<boolean>(false);
+  const [recentlyLoaded, setRecentlyLoaded] = useState<boolean>(false);
+  const lastSrcRef = useRef<string | null>(null);
+  const lastChangeTimeRef = useRef<number>(Date.now());
+  const cacheKeyRef = useRef<string>(`img_${id || crypto.randomUUID()}`);
+  
+  // Mode PDF: Précharger l'image si on est en mode PDF pour garantir qu'elle sera rendue
+  useEffect(() => {
+    if (pdfMode && src) {
+      // Pour le mode PDF, on précharge l'image sans paramètres aléatoires
+      const img = new Image();
+      img.onload = () => {
+        console.log('✅ [PDF] Image préchargée avec succès:', src);
+        // On utilise directement l'URL source sans paramètres aléatoires
+        setImgSrc(src);
+        setError(false);
+        
+        // Appel du callback onLoad si fourni
+        if (onLoad) onLoad();
+      };
+      img.onerror = () => {
+        console.error('❌ [PDF] Erreur de préchargement de l\'image:', src);
+        setError(true);
+        
+        // Appel du callback onError si fourni
+        if (onError) onError();
+      };
+      img.src = src;
+    }
+  }, [src, pdfMode, onLoad, onError]);
+  
+  // Gestion spéciale des tampons d'organisation qui peuvent changer plus fréquemment
+  const effectiveThreshold = isOrganizationSeal ? 100 : URL_CHANGE_THRESHOLD;
+  const effectiveRetryInterval = isOrganizationSeal ? 1000 : MIN_RETRY_INTERVAL;
+  
+  // Effet pour gérer le chargement et la mise en cache des images
+  useEffect(() => {
+    // Si on est en mode PDF, le préchargement est géré par l'autre effet
+    if (pdfMode) return;
+    
     if (!src) {
-      setFinalSrc(null);
-      setIsLoading(false);
+      setImgSrc(null);
+      setError(true);
       return;
     }
     
-    try {
-      // Vérifier si on peut réessayer (pour limiter le nombre de tentatives)
-      if (!canRetryImage(src)) {
-        console.log(`⏱️ [IMAGE] Tentative trop rapide pour ${alt}, ignorée`);
-        return;
-      }
-      
-      setIsLoading(true);
-      
-      // Préparation de l'URL
-      const preparedSrc = await prepareSrcUrl(
-        src,
-        signatureType,
-        documentType,
-        trainingId,
-        userId,
-        companyId
-      );
-      
-      // Si l'URL n'a pas changé ou si le composant est démonté, ne rien faire
-      if (unmountedRef.current) return;
-      
-      if (preparedSrc) {
-        console.log('✅ [IMAGE] URL préparée pour', `${alt}:`, preparedSrc);
-        
-        // Vérifier si l'URL a changé depuis la dernière préparation
-        if (preparedSrc !== finalSrc) {
-          setFinalSrc(preparedSrc);
-          setImageUrl(preparedSrc);
-        }
-      } else {
-        console.warn('⚠️ [IMAGE] Impossible de préparer l\'URL pour', alt);
-        setFinalSrc(null);
-      }
-    } catch (error) {
-      console.error('❌ [IMAGE] Erreur lors de la préparation de l\'image:', error);
-      setFinalSrc(null);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  /**
-   * Vérifie si un tampon existe et tente de trouver une alternative si nécessaire
-   */
-  const checkSealAndFallback = async (sealUrl: string, type?: SignatureType): Promise<string | null> => {
-    try {
-      // Extraire le chemin Supabase pour vérifier l'existence du fichier
-      const pathInfo = extractSupabasePath(sealUrl);
-      
-      if (pathInfo) {
-        const { bucket, path } = pathInfo;
-        
-        // Vérifier si le fichier existe
-        const exists = await checkFileExists(bucket, path);
-        
-        if (exists) {
-          // Le fichier existe, ajouter un anti-cache
-          const timestamp = Date.now();
-          return addCacheBuster(sealUrl);
-        } else {
-          console.warn(`⚠️ [IMAGE] Tampon non trouvé: ${sealUrl}`);
-          
-          // Si c'est un tampon d'organisation, essayer de trouver une alternative
-          if (type === SignatureType.ORGANIZATION_SEAL || sealUrl.includes('organization')) {
-            console.log(`🔍 [IMAGE] Recherche d'un tampon d'organisation alternatif`);
-            return await getOrganizationSealUrl();
-          }
-          
-          // Pour les autres tampons, essayer d'optimiser l'URL
-          if (type === SignatureType.COMPANY_SEAL || sealUrl.includes('company') || sealUrl.includes('seal')) {
-            console.log(`🔍 [IMAGE] Tentative d'optimisation du tampon d'entreprise`);
-            return optimizeSealUrl(sealUrl);
-          }
-        }
-      }
-      
-      // Si nous ne pouvons pas vérifier ou le fichier n'existe pas, retourner l'URL d'origine
-      return sealUrl;
-    } catch (error) {
-      console.error(`❌ [IMAGE] Erreur lors de la vérification du tampon:`, error);
-      return sealUrl;
-    }
-  };
-
-  /**
-   * Gère les erreurs de chargement d'image
-   */
-  const handleError = () => {
-    // Incrementer le compteur d'erreurs
-    const newErrorCount = errorCount + 1;
-    setErrorCount(newErrorCount);
-    
-    console.log('❌', 'Erreur de chargement pour', `${alt} (tentative ${newErrorCount}): ${finalSrc}`);
-    
-    // Si nous avons moins de 3 tentatives, essayer à nouveau avec une autre stratégie
-    if (newErrorCount < 3 && finalSrc) {
-      // Si c'est une URL Supabase, tenter d'ajouter un nouveau paramètre anti-cache
-      if (finalSrc.includes('supabase.co')) {
-        const timestamp = Date.now();
-        const newUrl = addCacheBuster(finalSrc);
-        console.log('🔄', 'Nouvelle tentative avec URL anti-cache:', newUrl);
-        setImageUrl(newUrl);
-        setFinalSrc(newUrl);
-        lastUrlChangeTimestamp.current = timestamp;
-      }
-    }
-    
-    // Appeler le gestionnaire d'erreur externe si fourni
-    if (onError) {
-      onError();
-    }
-  };
-
-  /**
-   * Gère le chargement réussi de l'image
-   */
-  const handleLoad = () => {
-    console.log('✅', 'Chargement réussi pour', `${alt}: ${finalSrc}`);
-    
-    // Marquer cette image comme chargée dans le cache global
-    if (finalSrc) {
-      loadedImagesCache.set(finalSrc, true);
-      // Verrouiller l'image pour éviter les rechargements inutiles
-      setImageLocked(true);
-    }
-    
-    // Appeler le gestionnaire de chargement externe si fourni
-    if (onLoad) {
-      onLoad();
-    }
-  };
-
-  // Effet pour initialiser et nettoyer le composant
-  useEffect(() => {
-    // Réinitialiser l'état de démontage au montage du composant
-    unmountedRef.current = false;
-    
-    // Nettoyage lors du démontage du composant
-    return () => {
-      unmountedRef.current = true;
-    };
-  }, []);
-
-  // Effet pour préparer l'image au chargement initial ou lorsque src change
-  useEffect(() => {
-    // Si l'image est verrouillée et que l'URL n'a pas changé, ne rien faire
-    if (imageLocked && src === finalSrc) {
-      return;
-    }
-    
-    // Réinitialiser le verrouillage si la source change
-    if (src !== finalSrc) {
-      setImageLocked(false);
-    }
-    
-    // Vérifier le cache pour éviter les rechargements inutiles
-    if (src) {
-      const cachedUrl = getFromImageCache(src);
-      if (cachedUrl && cachedUrl === finalSrc) {
-        console.log(`🔒 [IMAGE] Utilisation de l'URL en cache pour ${alt}`);
-        return;
-      }
-    }
-    
-    // Limiter la fréquence des mises à jour pour éviter les clignotements
     const now = Date.now();
-    if (now - lastUrlChangeTimestamp.current < 200) {
-      console.log(`⏱️ [IMAGE] Modification d'URL trop rapide pour ${alt}, ignorée`);
+    const timeSinceLastChange = now - lastChangeTimeRef.current;
+    
+    // Si la source est différente ET que le changement est trop rapide,
+    // on loggue un avertissement mais on continue pour prendre en compte la dernière URL.
+    // Cela peut causer des re-renderings rapides, mais garantit l'affichage de la dernière image.
+    if (src !== lastSrcRef.current && timeSinceLastChange < effectiveThreshold) { 
+      safeLog('⚠️', `Changement d'URL trop rapide ignoré (${timeSinceLastChange}ms < ${effectiveThreshold}ms):`, src);
+    }
+    
+    // Vérifier le cache avant de changer la source
+    const cacheKey = cacheKeyRef.current;
+    const cachedEntry = checkCacheEntry(cacheKey);
+    
+    if (cachedEntry && cachedEntry.url === src && cachedEntry.status === 'success') {
+      safeLog('🔄', 'Utilisation de l\'URL en cache (statut: succès):', src);
+      setImgSrc(src);
+      setError(false);
       return;
     }
     
-    // Mettre à jour le timestamp de dernière modification
-    lastUrlChangeTimestamp.current = now;
+    if (cachedEntry && cachedEntry.url === src && cachedEntry.status === 'error') {
+      if (!canRetryImage(cacheKey)) {
+        safeLog('⏱️', 'Attente avant nouvelle tentative pour URL en échec:', src);
+      return;
+    }
     
-    // Préparer l'image
-    prepareImage();
-  }, [src, signatureType, documentType, trainingId, userId, companyId]);
+      safeLog('🔄', 'Nouvelle tentative pour URL en échec:', src);
+      markImageRetry(cacheKey);
+    }
+    
+    // Mise à jour des références
+    lastSrcRef.current = src;
+    lastChangeTimeRef.current = now;
+    
+    // Ajout de paramètre de cache-busting pour les signatures et tampons
+    // Mais uniquement si on n'est pas en mode PDF
+    let finalSrc = src;
+    if ((isSignature || isOrganizationSeal) && !pdfMode) {
+      const cacheBuster = `cb=${Date.now()}`;
+      finalSrc = src.includes('?') ? `${src}&${cacheBuster}` : `${src}?${cacheBuster}`;
+    }
+    
+    // Mise à jour de l'état
+    setImgSrc(finalSrc);
+    setError(false);
+    
+    // Ajout au cache
+    addToCacheOrUpdateEntry(cacheKey, src, 'pending');
+    
+  }, [src, isSignature, isOrganizationSeal, effectiveThreshold, pdfMode]);
+  
+  // Gestion des événements de chargement et d'erreur
+  const handleError = () => {
+    safeLog('❌', 'Erreur de chargement de l\'image:', imgSrc);
+    setError(true);
+    
+    // Mise à jour du cache avec erreur
+    addToCacheOrUpdateEntry(cacheKeyRef.current, lastSrcRef.current || '', 'error');
+    
+    // Appel du callback onError si fourni
+    if (onError) onError();
+    
+    // Si c'est un tampon d'organisation, on fait une nouvelle tentative plus rapidement
+    if (isOrganizationSeal && imgSrc) {
+      setTimeout(() => {
+        const cacheBuster = `retry=${Date.now()}`;
+        const retrySrc = imgSrc.includes('?') 
+          ? imgSrc.replace(/cb=\d+/, `cb=${Date.now()}`) 
+          : `${imgSrc}?${cacheBuster}`;
+        
+        safeLog('🔄', 'Nouvelle tentative rapide pour le tampon d\'organisation:', retrySrc);
+        setImgSrc(retrySrc);
+      }, effectiveRetryInterval);
+    }
+  };
+
+  const handleLoad = () => {
+    safeLog('✅', 'Image chargée avec succès:', imgSrc);
+    setError(false);
+    setRecentlyLoaded(true);
+    
+    // Mise à jour du cache avec succès
+    addToCacheOrUpdateEntry(cacheKeyRef.current, lastSrcRef.current || '', 'success');
+    
+    // Appel du callback onLoad si fourni
+    if (onLoad) onLoad();
+    
+    // Réinitialiser l'état recentlyLoaded après un court délai
+    setTimeout(() => {
+      setRecentlyLoaded(false);
+    }, 1000);
+  };
 
   // Rendu du composant
-  if (isLoading) {
-    return <div className={`flex items-center justify-center ${className}`}>Chargement...</div>;
+  if (!imgSrc) {
+    return (
+      <div className={`${className || ''} text-center text-gray-500`} style={style}>
+        Chargement...
+      </div>
+    );
   }
 
-  if (!finalSrc) {
+  if (error) {
     return (
-      <div className={`flex items-center justify-center ${className}`}>
-        <span className="text-gray-400 italic text-sm">Image non disponible</span>
+      <div className={`${className || ''} text-center text-gray-500`} style={style}>
+        Image non disponible
       </div>
     );
   }
 
   return (
     <img
-      src={finalSrc}
-      alt={alt}
-      className={className}
-      id={id}
+      src={imgSrc}
+      alt={alt || 'Image'}
       onError={handleError}
       onLoad={handleLoad}
-      {...props}
+      className={className}
+      style={style}
+      {...rest}
     />
   );
 };

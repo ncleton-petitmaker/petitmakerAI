@@ -103,6 +103,18 @@ export interface DocumentRecord {
 }
 
 /**
+ * Interface pour la sauvegarde d'un document
+ */
+export interface DocumentSaveOptions {
+  signature_type: SignatureType;
+  document_type: DocumentType;
+  training_id?: string;
+  user_id?: string;
+  metadata?: SignatureMetadata;
+  file_url: string;
+}
+
+/**
  * Utilitaire pour vérifier si un type de signature est un tampon
  */
 export const isSealType = (type: SignatureType): boolean => {

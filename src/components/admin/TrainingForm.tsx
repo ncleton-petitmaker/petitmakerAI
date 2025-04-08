@@ -110,6 +110,51 @@ interface TrainingFormProps {
   onDuplicate?: (trainingData: Training) => void;
 }
 
+interface TrainingFormData {
+  title: string;
+  company_id: string;
+  trainer_id: string;
+  target_audience: string;
+  prerequisites: string;
+  duration: string;
+  dates: string;
+  schedule: string;
+  min_participants: number;
+  max_participants: number;
+  registration_deadline: string;
+  location: string;
+  price: number;
+  objectives: string[];
+  content: string;
+  start_date: string | null;
+  end_date: string | null;
+  evaluation_methods: {
+    profile_evaluation: boolean;
+    skills_evaluation: boolean;
+    knowledge_evaluation: boolean;
+    satisfaction_survey: boolean;
+  };
+  tracking_methods: {
+    attendance_sheet: boolean;
+    completion_certificate: boolean;
+  };
+  pedagogical_methods: {
+    needs_evaluation: boolean;
+    theoretical_content: boolean;
+    practical_exercises: boolean;
+    case_studies: boolean;
+    experience_sharing: boolean;
+    digital_support: boolean;
+  };
+  material_elements: {
+    computer_provided: boolean;
+    pedagogical_material: boolean;
+    digital_support_provided: boolean;
+  };
+  status: string;
+  trainer_name: string;
+}
+
 export const TrainingForm: React.FC<TrainingFormProps> = ({
   training,
   companies,
@@ -122,47 +167,49 @@ export const TrainingForm: React.FC<TrainingFormProps> = ({
   const [generationStep, setGenerationStep] = useState(0);
   const [generationSubStep, setGenerationSubStep] = useState(0);
   const [loadingDots, setLoadingDots] = useState('');
-  const [formData, setFormData] = useState<Partial<Training>>({
-    title: '',
-    company_id: null,
-    target_audience: '',
-    prerequisites: '',
-    duration: '',
-    dates: '',
-    schedule: '',
-    min_participants: 1,
-    max_participants: 10,
-    registration_deadline: '',
-    location: '',
-    price: null,
-    objectives: [''],
-    content: '',
-    evaluation_methods: {
-      profile_evaluation: false,
-      skills_evaluation: false,
-      knowledge_evaluation: false,
-      satisfaction_survey: false
+  const [formData, setFormData] = useState<TrainingFormData>({
+    title: training?.title || '',
+    company_id: training?.company_id || '',
+    trainer_id: training?.trainer_id || '',
+    target_audience: training?.target_audience || '',
+    prerequisites: training?.prerequisites || 'Aucun',
+    duration: training?.duration || '2 jours soit 14h',
+    dates: training?.dates || '',
+    schedule: training?.schedule || 'De 9h à 12h30 et de 13h30 à 17h',
+    min_participants: training?.min_participants || 1,
+    max_participants: training?.max_participants || 8,
+    registration_deadline: training?.registration_deadline || 'Inscription à réaliser 1 mois avant le démarrage de la formation',
+    location: training?.location || '',
+    price: training?.price || 0,
+    objectives: training?.objectives || [''],
+    content: training?.content || '',
+    start_date: training?.start_date || null,
+    end_date: training?.end_date || null,
+    evaluation_methods: training?.evaluation_methods || {
+      profile_evaluation: true,
+      skills_evaluation: true,
+      knowledge_evaluation: true,
+      satisfaction_survey: true
     },
-    tracking_methods: {
-      attendance_sheet: false,
-      completion_certificate: false
+    tracking_methods: training?.tracking_methods || {
+      attendance_sheet: true,
+      completion_certificate: true
     },
-    pedagogical_methods: {
-      needs_evaluation: false,
-      theoretical_content: false,
-      practical_exercises: false,
-      case_studies: false,
-      experience_sharing: false,
-      digital_support: false
+    pedagogical_methods: training?.pedagogical_methods || {
+      needs_evaluation: true,
+      theoretical_content: true,
+      practical_exercises: true,
+      case_studies: true,
+      experience_sharing: true,
+      digital_support: true
     },
-    material_elements: {
-      computer_provided: false,
-      pedagogical_material: false,
-      digital_support_provided: false
+    material_elements: training?.material_elements || {
+      computer_provided: true,
+      pedagogical_material: true,
+      digital_support_provided: true
     },
-    status: 'draft',
-    trainer_name: '',
-    trainer_id: ''
+    status: training?.status || 'draft',
+    trainer_name: training?.trainer_name || ''
   });
   
   // Étapes détaillées du processus de génération du contenu
@@ -250,89 +297,78 @@ export const TrainingForm: React.FC<TrainingFormProps> = ({
   
   // Fonction pour extraire les métadonnées du training
   const extractMetadata = (training: any) => {
-    let extractedPeriods = [];
-    let extractedTimeSlots = [];
+    console.log('🔍 [DEBUG] Début de extractMetadata');
+    console.log('🔍 [DEBUG] Training reçu:', training);
     
-    // Extraire les métadonnées du champ metadata s'il existe
-    if (training?.metadata) {
-      try {
-        // Si metadata est déjà un objet, l'utiliser directement
-        const metadata = typeof training.metadata === 'string' 
-          ? JSON.parse(training.metadata) 
-          : training.metadata;
-        
-        if (metadata?.periods && Array.isArray(metadata.periods)) {
-          extractedPeriods = metadata.periods;
-        }
-        if (metadata?.timeSlots && Array.isArray(metadata.timeSlots)) {
-          extractedTimeSlots = metadata.timeSlots;
-        }
-      } catch (error) {
-        console.warn('Erreur lors du parsing des métadonnées:', error);
-      }
-    }
+    let extractedPeriods: Period[] = [];
+    let extractedTimeSlots: TimeSlot[] = [];
     
-    // Si aucune période n'a été trouvée dans metadata, essayer d'extraire des données du champ dates
-    if (extractedPeriods.length === 0 && training?.dates) {
-      try {
-        // Rechercher un format JSON dans le champ dates
-        const jsonMatch = training.dates.match(/\[JSON:(.*)\]/);
-        if (jsonMatch && jsonMatch[1]) {
-          const periodsData = JSON.parse(jsonMatch[1]);
-          if (Array.isArray(periodsData)) {
-            extractedPeriods = periodsData;
-            console.log('Périodes extraites du champ dates:', extractedPeriods);
-          }
-        }
-      } catch (error) {
-        console.warn('Erreur lors de l\'extraction des périodes du champ dates:', error);
-      }
-    }
-    
-    // Si aucune période n'a été trouvée et qu'il y a des dates de début et de fin, créer une période par défaut
-    if (extractedPeriods.length === 0 && training?.start_date && training?.end_date) {
-      extractedPeriods = [{
-        id: '1',
+    // Extraire les périodes seulement si training existe et a des dates
+    if (training && training.start_date && training.end_date) {
+      console.log('🔍 [DEBUG] Dates trouvées dans la formation:', {
         start_date: training.start_date,
         end_date: training.end_date
+      });
+      
+      extractedPeriods = [{
+        id: '1',
+        startDate: new Date(training.start_date),
+        endDate: new Date(training.end_date)
+      }];
+      
+      console.log('✅ [DEBUG] Périodes extraites:', extractedPeriods);
+    } else {
+      console.log('ℹ️ [DEBUG] Pas de dates trouvées, initialisation avec une période vide');
+      extractedPeriods = [{
+        id: '1',
+        startDate: null,
+        endDate: null
       }];
     }
     
-    // Si aucune tranche horaire n'a été trouvée dans metadata, essayer d'extraire des données du champ schedule
-    if (extractedTimeSlots.length === 0 && training?.schedule) {
-      try {
-        // Rechercher un format JSON dans le champ schedule
-        const jsonMatch = training.schedule.match(/\[JSON:(.*)\]/);
-        if (jsonMatch && jsonMatch[1]) {
-          const timeSlotsData = JSON.parse(jsonMatch[1]);
-          if (Array.isArray(timeSlotsData)) {
-            extractedTimeSlots = timeSlotsData;
-            console.log('Tranches horaires extraites du champ schedule:', extractedTimeSlots);
-          }
-        } else {
-          // Essayer d'extraire les tranches horaires du texte formaté
-          const timeSlotRegex = /De (\d+)h(\d*) à (\d+)h(\d*)/g;
-          let match;
-          while ((match = timeSlotRegex.exec(training.schedule)) !== null) {
-            const startHour = match[1].padStart(2, '0');
-            const startMinute = match[2] || '00';
-            const endHour = match[3].padStart(2, '0');
-            const endMinute = match[4] || '00';
-            
-            extractedTimeSlots.push({
-              id: extractedTimeSlots.length.toString(),
-              startTime: `${startHour}:${startMinute}`,
-              endTime: `${endHour}:${endMinute}`
-            });
-          }
+    // Extraire les créneaux horaires depuis le schedule
+    if (training && training.schedule) {
+      console.log('🔍 [DEBUG] Schedule trouvé:', training.schedule);
+      
+      // Diviser le schedule en tranches horaires
+      const scheduleSlots = training.schedule.split(' et ');
+      console.log('🔍 [DEBUG] Tranches horaires brutes:', scheduleSlots);
+      
+      // Extraire les heures avec un regex plus flexible
+      const timeSlots = scheduleSlots.map((slot: string, index: number) => {
+        console.log('🔍 [DEBUG] Analyse de la tranche:', slot);
+        
+        // Nouveau regex qui capture les heures au format "XXhXX" ou "XX:XX"
+        const times = slot.match(/De (\d{1,2}[:h]\d{0,2}) à (\d{1,2}[:h]\d{0,2})/i);
+        console.log('🔍 [DEBUG] Correspondances trouvées:', times);
+        
+        if (times && times.length >= 3) {
+          // Normaliser le format (convertir XXhXX en XX:XX)
+          const startTime = times[1].replace('h', ':').padEnd(5, '0');
+          const endTime = times[2].replace('h', ':').padEnd(5, '0');
+          
+          console.log('✅ [DEBUG] Créneau extrait:', { startTime, endTime });
+          
+          return {
+            id: String(index + 1),
+            startTime,
+            endTime
+          };
         }
-      } catch (error) {
-        console.warn('Erreur lors de l\'extraction des tranches horaires du champ schedule:', error);
-      }
-    }
-    
-    // Si aucune tranche horaire n'a été trouvée, créer une tranche par défaut
-    if (extractedTimeSlots.length === 0) {
+        
+        // Si le format ne correspond pas, utiliser des valeurs par défaut
+        console.log('⚠️ [DEBUG] Format non reconnu, utilisation des valeurs par défaut');
+        return {
+          id: String(index + 1),
+          startTime: '09:00',
+          endTime: '17:30'
+        };
+      });
+      
+      extractedTimeSlots = timeSlots;
+      console.log('✅ [DEBUG] Créneaux horaires finaux:', extractedTimeSlots);
+    } else {
+      console.log('⚠️ [DEBUG] Aucun schedule trouvé, utilisation des valeurs par défaut');
       extractedTimeSlots = [{
         id: '1',
         startTime: '09:00',
@@ -340,7 +376,10 @@ export const TrainingForm: React.FC<TrainingFormProps> = ({
       }];
     }
     
-    return { extractedPeriods, extractedTimeSlots };
+    return {
+      extractedPeriods,
+      extractedTimeSlots
+    };
   };
   
   const metadata = extractMetadata(training);
@@ -522,178 +561,57 @@ export const TrainingForm: React.FC<TrainingFormProps> = ({
   
   // Fonction pour calculer la durée en fonction des dates et horaires
   const calculateDuration = () => {
-    if (periods.length === 0 || timeSlots.length === 0) {
+    console.log('🔍 [DEBUG] Début du calcul de la durée');
+    console.log('🔍 [DEBUG] Périodes:', periods);
+    console.log('🔍 [DEBUG] Créneaux horaires:', timeSlots);
+
+    if (periods.length === 0) {
+      console.log('❌ [DEBUG] Pas de périodes');
       return "À définir";
     }
-    
-    // Filtrer les périodes valides (avec dates de début et de fin)
+
+    // Filtrer les périodes valides
     const validPeriods = periods.filter(p => p.startDate && p.endDate);
     if (validPeriods.length === 0) {
+      console.log('❌ [DEBUG] Pas de périodes valides');
       return "À définir";
     }
-    
-    // Calculer le nombre total de jours de formation
+
+    // Calculer le nombre total de jours
     let totalDays = 0;
     validPeriods.forEach(period => {
       if (period.startDate && period.endDate) {
-        // Ajouter 1 pour inclure le jour de fin
+        // Ajouter 1 car differenceInDays ne compte pas le dernier jour
         const days = differenceInDays(period.endDate, period.startDate) + 1;
         totalDays += days;
       }
     });
-    
-    // Calculer la durée quotidienne en heures
+    console.log('📅 [DEBUG] Nombre total de jours:', totalDays);
+
+    // Calculer les heures par jour
     let dailyHours = 0;
     timeSlots.forEach(slot => {
-      if (slot.startTime && slot.endTime) {
-        // Convertir les heures au format Date pour calculer la différence
-        const [startHour, startMinute] = slot.startTime.split(':').map(Number);
-        const [endHour, endMinute] = slot.endTime.split(':').map(Number);
-        
-        const startDate = new Date();
-        startDate.setHours(startHour, startMinute, 0);
-        
-        const endDate = new Date();
-        endDate.setHours(endHour, endMinute, 0);
-        
-        // Si l'heure de fin est avant l'heure de début, on suppose que c'est le jour suivant
-        if (endDate < startDate) {
-          endDate.setDate(endDate.getDate() + 1);
-        }
-        
-        const diffMinutes = differenceInMinutes(endDate, startDate);
-        dailyHours += diffMinutes / 60;
-      }
+      const [startHour, startMinute] = slot.startTime.split(':').map(Number);
+      const [endHour, endMinute] = slot.endTime.split(':').map(Number);
+      
+      const startDate = new Date();
+      startDate.setHours(startHour, startMinute, 0);
+      
+      const endDate = new Date();
+      endDate.setHours(endHour, endMinute, 0);
+      
+      const diffMinutes = differenceInMinutes(endDate, startDate);
+      dailyHours += diffMinutes / 60;
     });
-    
-    // Calculer le nombre total d'heures de formation
+    console.log('⏰ [DEBUG] Heures par jour:', dailyHours);
+
+    // Calculer le total d'heures
     const totalHours = totalDays * dailyHours;
-    
-    // Formater la durée
-    if (totalDays === 1) {
-      return `1 jour soit ${totalHours}h`;
-    } else {
-      return `${totalDays} jours soit ${totalHours}h`;
-    }
-  };
-  
-  // Mettre à jour la durée lorsque les dates ou horaires changent
-  useEffect(() => {
-    const calculatedDuration = calculateDuration();
-    setFormData(prev => ({
-      ...prev,
-      duration: calculatedDuration
-    }));
-  }, [periods, timeSlots]);
-  
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
-    const { name, value } = e.target;
-    
-    // Cas spécial pour le formateur : mettre à jour à la fois trainer_name et trainer_id
-    if (name === 'trainer_id') {
-      const selectedTrainer = trainers.find(t => t.id === value);
-      setFormData(prev => ({
-        ...prev,
-        trainer_id: value,
-        trainer_name: selectedTrainer ? selectedTrainer.full_name : ''
-      }));
-    } else {
-    setFormData(prev => ({
-      ...prev,
-      [name]: value
-    }));
-    }
-    
-    // Clear validation error for this field
-    if (validationErrors[name]) {
-      setValidationErrors({
-        ...validationErrors,
-        [name]: ''
-      });
-    }
-  };
-  
-  const handleObjectiveChange = (index: number, value: string) => {
-    // S'assurer que objectives est un tableau avant de le modifier
-    const currentObjectives = Array.isArray(formData.objectives) ? [...formData.objectives] : [];
-    currentObjectives[index] = value;
-    setFormData(prev => ({
-      ...prev,
-      objectives: currentObjectives
-    }));
-  };
-  
-  const addObjective = () => {
-    const currentObjectives = Array.isArray(formData.objectives) ? [...formData.objectives] : [];
-    setFormData(prev => ({
-      ...prev,
-      objectives: [...currentObjectives, '']
-    }));
-  };
-  
-  const removeObjective = (index: number) => {
-    setFormData(prev => ({
-      ...prev,
-      objectives: Array.isArray(prev.objectives) 
-        ? prev.objectives.filter((_, i) => i !== index)
-        : []
-    }));
-  };
-  
-  const handleCheckboxChange = (category: keyof Training, field: string) => {
-    const categoryValue = formData[category] as Record<string, boolean>;
-    if (categoryValue && typeof categoryValue === 'object') {
-      setFormData(prev => ({
-        ...prev,
-        [category]: {
-          ...categoryValue,
-          [field]: !categoryValue[field]
-        }
-      }));
-    }
-  };
-  
-  // Fonction pour ajouter une nouvelle période
-  const addPeriod = () => {
-    setPeriods([...periods, { id: Date.now().toString(), startDate: null, endDate: null }]);
-  };
-  
-  // Fonction pour supprimer une période
-  const removePeriod = (id: string) => {
-    if (periods.length > 1) {
-      setPeriods(periods.filter(p => p.id !== id));
-    }
-  };
-  
-  // Fonction pour mettre à jour une période
-  const updatePeriod = (id: string, startDate: Date | null, endDate: Date | null) => {
-    const updatedPeriods = periods.map(p => 
-      p.id === id ? { ...p, startDate, endDate } : p
-    );
-    setPeriods(updatedPeriods);
-    
-    // Mettre à jour le champ dates
-    const formattedDates = formatDatesFromPeriods(updatedPeriods);
-    setFormData(prev => ({
-      ...prev,
-      dates: formattedDates
-    }));
-  };
-  
-  // Fonction pour ajouter une nouvelle tranche horaire
-  const addTimeSlot = () => {
-    setTimeSlots([...timeSlots, { 
-      id: Date.now().toString(), 
-      startTime: '09:00',
-      endTime: '17:30'
-    }]);
-  };
-  
-  // Fonction pour supprimer une tranche horaire
-  const removeTimeSlot = (id: string) => {
-    if (timeSlots.length > 1) {
-      setTimeSlots(timeSlots.filter(slot => slot.id !== id));
-    }
+    console.log('✅ [DEBUG] Total heures:', totalHours);
+
+    // Arrondir à une décimale
+    const roundedHours = Math.round(totalHours * 10) / 10;
+    return `${totalDays} jours soit ${roundedHours}h`;
   };
   
   // Fonction pour mettre à jour une tranche horaire
@@ -992,365 +910,53 @@ Vous vérifiez systématiquement la cohérence mathématique des durées avant d
   
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    console.log("🔍 [DEBUG] Début de la soumission du formulaire");
-    
-    // Validation du formulaire
-    const errors: Record<string, string> = {};
-    
-    console.log("🔍 [DEBUG] Validation du formulaire en cours...");
-    
-    if (!formData.title) {
-      errors.title = 'Le titre est requis';
-    }
-    
-    if (!formData.company_id) {
-      errors.company_id = 'Le nom de l\'entreprise est requis';
-    }
-    
-    if (!formData.target_audience) {
-      errors.target_audience = 'Le public cible est requis';
-    }
-    
-    if (!formData.prerequisites) {
-      errors.prerequisites = 'Les prérequis sont requis';
-    }
-    
-    // S'assurer que objectives est un tableau avant de vérifier sa longueur
-    if (!formData.objectives || !Array.isArray(formData.objectives) || formData.objectives.length === 0 || !formData.objectives[0]) {
-      errors.objectives = 'Au moins un objectif est requis';
-    }
-    
-    if (formData.min_participants !== undefined && formData.min_participants < 1) {
-      errors.min_participants = 'Le nombre minimum de participants doit être au moins 1';
-    }
-    
-    if (formData.max_participants !== undefined && formData.min_participants !== undefined && 
-        formData.max_participants < formData.min_participants) {
-      errors.max_participants = 'Le nombre maximum de participants doit être au moins égal au nombre minimum de participants';
-    }
-    
-    if (formData.price && formData.price < 0) {
-      errors.price = 'Le prix doit être positif';
-    }
-    
-    // Vérifier si trainer_id est défini
-    if (!formData.trainer_id || formData.trainer_id === '') {
-      errors.trainer_id = 'Veuillez sélectionner un formateur';
-    }
-    
-    if (Object.keys(errors).length > 0) {
-      console.log("❌ [ERROR] Validation échouée:", errors);
-      setValidationErrors(errors);
-      return;
-    }
-    
-    console.log("✅ [DEBUG] Validation réussie");
-    
-    // Réinitialiser les erreurs de validation
-    setValidationErrors({});
-    
+    console.log('🔍 [DEBUG] Début de la soumission du formulaire');
+    console.log('🔍 [DEBUG] État actuel du formulaire:', formData);
+
     try {
-      console.log("🔍 [DEBUG] Préparation des données pour la soumission...");
+      console.log('🔍 [DEBUG] Validation du formulaire en cours...');
       
-      // Préparer les dates
-      const startDate = periods.length > 0 && periods[0].startDate ? periods[0].startDate.toISOString() : null;
-      const endDate = periods.length > 0 && periods[0].endDate ? periods[0].endDate.toISOString() : null;
+      // Vérification des champs obligatoires
+      const errors: Record<string, string> = {};
       
-      console.log("🔍 [DEBUG] Dates avant formatage:", {
-        startDate: startDate,
-        endDate: endDate,
-        periodsRaw: periods
-      });
+      if (!formData.company_id) {
+        console.log('❌ [DEBUG] Erreur: company_id manquant');
+        errors.company_id = "Le nom de l'entreprise est requis";
+      }
       
-      // S'assurer que objectives est un tableau
-      const safeObjectives = Array.isArray(formData.objectives) ? formData.objectives : [];
+      if (!formData.trainer_id) {
+        console.log('❌ [DEBUG] Erreur: trainer_id manquant');
+        errors.trainer_id = "Veuillez sélectionner un formateur";
+      }
       
-      // Créer un objet metadata complet avec toutes les informations nécessaires
-      const metadata = {
-        periods: periods.map(p => ({
-          id: p.id,
-          start_date: p.startDate ? p.startDate.toISOString() : null,
-          end_date: p.endDate ? p.endDate.toISOString() : null
-        })),
-        timeSlots: timeSlots.map(ts => ({
-          id: ts.id,
-          startTime: ts.startTime,
-          endTime: ts.endTime
-        })),
-        // Ajouter des informations supplémentaires qui pourraient être utiles
-        duration_details: {
-          total_days: periods.filter(p => p.startDate && p.endDate).reduce((total, p) => {
-            if (!p.startDate || !p.endDate) return total;
-            const diffTime = Math.abs(p.endDate.getTime() - p.startDate.getTime());
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1; // +1 pour inclure le jour de début
-            return total + diffDays;
-          }, 0),
-          total_hours: timeSlots.reduce((total, ts) => {
-            const startParts = ts.startTime.split(':').map(Number);
-            const endParts = ts.endTime.split(':').map(Number);
-            const startMinutes = startParts[0] * 60 + startParts[1];
-            const endMinutes = endParts[0] * 60 + endParts[1];
-            return total + (endMinutes - startMinutes) / 60;
-          }, 0)
-        },
-        last_updated: new Date().toISOString()
-      };
-      
-      // Préparer les données pour la soumission
-      const submissionData = {
-        // Propriétés de base de la formation
-        id: formData.id,
-        title: formData.title,
+      // Si des erreurs sont trouvées
+      if (Object.keys(errors).length > 0) {
+        console.log('❌ [DEBUG] Erreurs de validation:', errors);
+        setValidationErrors(errors);
+        throw new Error('Validation échouée: ' + JSON.stringify(errors));
+      }
+
+      console.log('✅ [DEBUG] Validation réussie');
+      setValidationErrors({});
+
+      // Préparation des données
+      console.log('🔍 [DEBUG] Préparation des données pour la soumission...');
+      const dataToSubmit = {
+        ...formData,
         company_id: formData.company_id,
-        target_audience: formData.target_audience,
-        prerequisites: formData.prerequisites,
-        duration: formData.duration || calculateDuration(), // Utiliser la durée calculée si non définie
-        location: formData.location,
-        content: formData.content,
-        registration_deadline: formData.registration_deadline,
-        status: formData.status || 'draft',
         trainer_id: formData.trainer_id,
-        
-        // S'assurer que trainer_name est défini si trainer_id l'est
-        trainer_name: formData.trainer_id ? 
-          (trainers.find(t => t.id === formData.trainer_id)?.full_name || formData.trainer_name) : 
-          formData.trainer_name,
-        
-        // Ajouter les dates formatées
-        dates: formatDatesFromPeriods(periods),
-        schedule: formatScheduleFromTimeSlots(timeSlots),
-        
-        // Convertir les nombres
-        min_participants: Number(formData.min_participants),
-        max_participants: Number(formData.max_participants),
-        price: formData.price ? Number(formData.price) : null,
-        
-        // Ajouter les dates de début et de fin
-        start_date: startDate,
-        end_date: endDate,
-        
-        // S'assurer que objectives est un tableau
-        objectives: safeObjectives,
-        
-        // Copier les méthodes d'évaluation, de suivi, pédagogiques et éléments matériels
-        evaluation_methods: formData.evaluation_methods || {
-          profile_evaluation: false,
-          skills_evaluation: false,
-          knowledge_evaluation: false,
-          satisfaction_survey: false
-        },
-        tracking_methods: formData.tracking_methods || {
-          attendance_sheet: false,
-          completion_certificate: false
-        },
-        pedagogical_methods: formData.pedagogical_methods || {
-          needs_evaluation: false,
-          theoretical_content: false,
-          practical_exercises: false,
-          case_studies: false,
-          experience_sharing: false,
-          digital_support: false
-        },
-        material_elements: formData.material_elements || {
-          computer_provided: false,
-          pedagogical_material: false,
-          digital_support_provided: false
-        },
-        
-        // Stocker les métadonnées pour les périodes et les tranches horaires
-        metadata: JSON.stringify(metadata),
-        
-        // Ajouter les champs periods et time_slots pour compatibilité
-        periods: JSON.stringify(metadata.periods),
-        time_slots: JSON.stringify(metadata.timeSlots)
+        // Autres champs...
       };
-      
-      console.log("🔍 [DEBUG] Données formatées pour la soumission:", submissionData);
-      
-      // SOLUTION SIMPLIFIÉE: Utiliser directement l'API REST
-      if (training && training.id) {
-        // Mise à jour d'une formation existante
-        console.log("🔍 [DEBUG] Mise à jour de la formation existante avec ID:", training.id);
-        
-        try {
-          // Obtenir le token d'accès
-          const { data: sessionData } = await supabase.auth.getSession();
-          const accessToken = sessionData?.session?.access_token;
-          
-          if (!accessToken) {
-            console.error("❌ [ERROR] Impossible d'obtenir le token d'accès - utilisation de l'API standard");
-            
-            // Fallback: Utiliser l'API standard
-        const { data, error } = await supabase
-          .from('trainings')
-          .update(submissionData)
-          .eq('id', training.id)
-          .select();
-        
-        if (error) {
-              console.error("❌ [ERROR] Erreur lors de la mise à jour via API standard:", error);
-              throw new Error(`Erreur lors de la mise à jour: ${error.message}`);
-            }
-            
-            console.log("✅ [DEBUG] Mise à jour réussie via API standard:", data);
-            onSubmit(submissionData);
-          return;
-        }
-        
-          // Utiliser l'API REST directe
-          console.log("🔍 [DEBUG] Tentative de mise à jour via API REST directe...");
-          const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/rest/v1/trainings?id=eq.${training.id}`, {
-            method: 'PATCH',
-            headers: {
-              'Content-Type': 'application/json',
-              'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
-              'Authorization': `Bearer ${accessToken}`,
-              'Prefer': 'return=representation'
-            },
-            body: JSON.stringify(submissionData)
-          });
-          
-          if (!response.ok) {
-            console.error("❌ [ERROR] Erreur lors de la mise à jour via API REST:", response.status);
-            
-            // Fallback: Utiliser l'API standard
-            const { data, error } = await supabase
-              .from('trainings')
-              .update(submissionData)
-              .eq('id', training.id)
-              .select();
-            
-            if (error) {
-              console.error("❌ [ERROR] Erreur lors de la mise à jour via API standard:", error);
-              throw new Error(`Erreur lors de la mise à jour: ${error.message}`);
-            }
-            
-            console.log("✅ [DEBUG] Mise à jour réussie via API standard:", data);
-            onSubmit(submissionData);
-          } else {
-            const responseData = await response.json();
-            console.log("✅ [DEBUG] Mise à jour réussie via API REST:", responseData);
-            onSubmit(submissionData);
-          }
-        } catch (error) {
-          console.error("❌ [ERROR] Exception lors de la mise à jour:", error);
-          
-          // Dernière tentative: Utiliser l'API standard
-          try {
-            console.log("🔍 [DEBUG] Dernière tentative: mise à jour via API standard...");
-            const { data, error } = await supabase
-              .from('trainings')
-              .update(submissionData)
-              .eq('id', training.id)
-              .select();
-            
-            if (error) {
-              console.error("❌ [ERROR] Erreur lors de la mise à jour via API standard:", error);
-              throw new Error(`Erreur lors de la mise à jour: ${error.message}`);
-            }
-            
-            console.log("✅ [DEBUG] Mise à jour réussie via API standard:", data);
-            onSubmit(submissionData);
-          } catch (finalError) {
-            console.error("❌ [ERROR] Toutes les tentatives ont échoué:", finalError);
-            alert(`Erreur lors de la mise à jour de la formation: ${error instanceof Error ? error.message : String(error)}`);
-            return;
-          }
-        }
-      } else {
-        // Création d'une nouvelle formation
-        console.log("🔍 [DEBUG] Création d'une nouvelle formation");
-        
-        try {
-          // Obtenir le token d'accès
-          const { data: sessionData } = await supabase.auth.getSession();
-          const accessToken = sessionData?.session?.access_token;
-          
-          if (!accessToken) {
-            console.error("❌ [ERROR] Impossible d'obtenir le token d'accès - utilisation de l'API standard");
-            
-            // Fallback: Utiliser l'API standard
-        const { data, error } = await supabase
-          .from('trainings')
-          .insert(submissionData)
-          .select();
-        
-        if (error) {
-              console.error("❌ [ERROR] Erreur lors de la création via API standard:", error);
-              throw new Error(`Erreur lors de la création: ${error.message}`);
-            }
-            
-            console.log("✅ [DEBUG] Création réussie via API standard:", data);
-            onSubmit(submissionData);
-          return;
-        }
-        
-          // Utiliser l'API REST directe
-          console.log("🔍 [DEBUG] Tentative de création via API REST directe...");
-          const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/rest/v1/trainings`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
-              'Authorization': `Bearer ${accessToken}`,
-              'Prefer': 'return=representation'
-            },
-            body: JSON.stringify(submissionData)
-          });
-          
-          if (!response.ok) {
-            console.error("❌ [ERROR] Erreur lors de la création via API REST:", response.status);
-            
-            // Fallback: Utiliser l'API standard
-            const { data, error } = await supabase
-              .from('trainings')
-              .insert(submissionData)
-              .select();
-            
-            if (error) {
-              console.error("❌ [ERROR] Erreur lors de la création via API standard:", error);
-              throw new Error(`Erreur lors de la création: ${error.message}`);
-            }
-            
-            console.log("✅ [DEBUG] Création réussie via API standard:", data);
-            onSubmit(submissionData);
-          } else {
-            const responseData = await response.json();
-            console.log("✅ [DEBUG] Création réussie via API REST:", responseData);
-            onSubmit(submissionData);
-          }
-        } catch (error) {
-          console.error("❌ [ERROR] Exception lors de la création:", error);
-          
-          // Dernière tentative: Utiliser l'API standard
-          try {
-            console.log("🔍 [DEBUG] Dernière tentative: création via API standard...");
-            const { data, error } = await supabase
-              .from('trainings')
-              .insert(submissionData)
-              .select();
-            
-            if (error) {
-              console.error("❌ [ERROR] Erreur lors de la création via API standard:", error);
-              throw new Error(`Erreur lors de la création: ${error.message}`);
-            }
-            
-            console.log("✅ [DEBUG] Création réussie via API standard:", data);
-      onSubmit(submissionData);
-          } catch (finalError) {
-            console.error("❌ [ERROR] Toutes les tentatives ont échoué:", finalError);
-            alert(`Erreur lors de la création de la formation: ${error instanceof Error ? error.message : String(error)}`);
-            return;
-          }
-        }
+
+      console.log('🔍 [DEBUG] Données formatées pour la soumission:', dataToSubmit);
+
+      if (onSubmit) {
+        await onSubmit(dataToSubmit);
       }
     } catch (error) {
-      console.error("❌ [ERROR] Exception lors de la soumission du formulaire:", error);
+      console.error('❌ [ERROR] Erreur lors de la soumission:', error);
       if (error instanceof Error) {
-        alert(`Erreur lors de la soumission du formulaire: ${error.message}`);
-      } else {
-        alert(`Erreur lors de la soumission du formulaire: ${String(error)}`);
+        alert(error.message);
       }
     }
   };
@@ -1454,8 +1060,9 @@ Vous vérifiez systématiquement la cohérence mathématique des durées avant d
   
   useEffect(() => {
     if (training) {
-      // Extraire les métadonnées de la formation
+      console.log('🔍 [DEBUG] Initialisation du formulaire avec la formation:', training);
       const metadata = extractMetadata(training);
+      console.log('🔍 [DEBUG] Métadonnées extraites:', metadata);
       
       setFormData({
         ...training,
@@ -1464,13 +1071,15 @@ Vous vérifiez systématiquement la cohérence mathématique des durées avant d
         trainer_id: training?.trainer_id || ''
       });
       
-      // Initialiser les périodes et les tranches horaires de manière sécurisée
-      if (metadata && metadata.extractedPeriods) {
+      // Initialiser les périodes et les créneaux horaires
+      if (metadata.extractedPeriods.length > 0) {
         setPeriods(metadata.extractedPeriods);
+        console.log('✅ [DEBUG] Périodes initialisées:', metadata.extractedPeriods);
       }
       
-      if (metadata && metadata.extractedTimeSlots) {
+      if (metadata.extractedTimeSlots.length > 0) {
         setTimeSlots(metadata.extractedTimeSlots);
+        console.log('✅ [DEBUG] Créneaux horaires initialisés:', metadata.extractedTimeSlots);
       }
     }
     
@@ -1492,6 +1101,129 @@ Vous vérifiez systématiquement la cohérence mathématique des durées avant d
       return false;
     }
   };
+  
+  // Fonction pour gérer les changements dans les champs du formulaire
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+    const { name, value } = e.target;
+    
+    // Cas spécial pour le formateur : mettre à jour à la fois trainer_name et trainer_id
+    if (name === 'trainer_id') {
+      const selectedTrainer = trainers.find(t => t.id === value);
+      setFormData(prev => ({
+        ...prev,
+        trainer_id: value,
+        trainer_name: selectedTrainer ? selectedTrainer.full_name : ''
+      }));
+    } else {
+      setFormData(prev => ({
+        ...prev,
+        [name]: value
+      }));
+    }
+    
+    // Clear validation error for this field
+    if (validationErrors[name]) {
+      setValidationErrors({
+        ...validationErrors,
+        [name]: ''
+      });
+    }
+  };
+
+  // Fonction pour gérer les changements dans les objectifs
+  const handleObjectiveChange = (index: number, value: string) => {
+    const currentObjectives = Array.isArray(formData.objectives) ? [...formData.objectives] : [];
+    currentObjectives[index] = value;
+    setFormData(prev => ({
+      ...prev,
+      objectives: currentObjectives
+    }));
+  };
+
+  // Fonction pour ajouter un objectif
+  const addObjective = () => {
+    const currentObjectives = Array.isArray(formData.objectives) ? [...formData.objectives] : [];
+    setFormData(prev => ({
+      ...prev,
+      objectives: [...currentObjectives, '']
+    }));
+  };
+
+  // Fonction pour supprimer un objectif
+  const removeObjective = (index: number) => {
+    setFormData(prev => ({
+      ...prev,
+      objectives: Array.isArray(prev.objectives) 
+        ? prev.objectives.filter((_, i) => i !== index)
+        : []
+    }));
+  };
+
+  // Fonction pour gérer les changements de checkbox
+  const handleCheckboxChange = (category: string, field: string) => {
+    setFormData((prev: TrainingFormData) => ({
+      ...prev,
+      [category]: {
+        ...prev[category as keyof TrainingFormData],
+        [field]: !(prev[category as keyof TrainingFormData] as any)[field]
+      }
+    }));
+  };
+
+  // Fonction pour ajouter une période
+  const addPeriod = () => {
+    setPeriods([...periods, { id: Date.now().toString(), startDate: null, endDate: null }]);
+  };
+
+  // Fonction pour supprimer une période
+  const removePeriod = (id: string) => {
+    if (periods.length > 1) {
+      setPeriods(periods.filter(p => p.id !== id));
+    }
+  };
+
+  // Fonction pour mettre à jour une période
+  const updatePeriod = (id: string, startDate: Date | null, endDate: Date | null) => {
+    const updatedPeriods = periods.map(p => 
+      p.id === id ? { ...p, startDate, endDate } : p
+    );
+    setPeriods(updatedPeriods);
+    
+    // Mettre à jour le champ dates
+    const formattedDates = formatDatesFromPeriods(updatedPeriods);
+    setFormData(prev => ({
+      ...prev,
+      dates: formattedDates
+    }));
+  };
+
+  // Fonction pour ajouter un créneau horaire
+  const addTimeSlot = () => {
+    setTimeSlots([...timeSlots, { 
+      id: Date.now().toString(), 
+      startTime: '09:00',
+      endTime: '17:30'
+    }]);
+  };
+
+  // Fonction pour supprimer un créneau horaire
+  const removeTimeSlot = (id: string) => {
+    if (timeSlots.length > 1) {
+      setTimeSlots(timeSlots.filter(slot => slot.id !== id));
+    }
+  };
+
+  // Mettre à jour la durée lorsque les dates ou horaires changent
+  useEffect(() => {
+    console.log('🔄 [DEBUG] Mise à jour de la durée');
+    const calculatedDuration = calculateDuration();
+    console.log('✅ [DEBUG] Nouvelle durée calculée:', calculatedDuration);
+    
+    setFormData(prev => ({
+      ...prev,
+      duration: calculatedDuration
+    }));
+  }, [periods, timeSlots]);
   
   return (
     <div className="fixed inset-0 bg-black bg-opacity-100 flex items-center justify-center z-[100] overflow-hidden p-0 sm:p-4">

@@ -3,8 +3,8 @@ import { FileText } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { DocumentWithSignatures } from '../shared/DocumentWithSignatures';
 import { DocumentType, SignatureType } from '../shared/DocumentSignatureManager';
-import { UnifiedTrainingAgreementTemplate } from '../shared/templates/unified/TrainingAgreementTemplate';
-import { Training, Participant, OrganizationSettings } from '../shared/DocumentUtils';
+import { UnifiedTrainingAgreementTemplate, OrganizationSettings as TemplateOrganizationSettings } from '../shared/templates/unified/TrainingAgreementTemplate';
+import { Training, Participant } from '../shared/DocumentUtils';
 
 interface TrainingAgreementButtonProps {
   training: any;
@@ -13,6 +13,9 @@ interface TrainingAgreementButtonProps {
   className?: string;
   variant?: 'primary' | 'secondary' | 'outline';
 }
+
+// Renommer l'alias d'importation pour éviter les conflits
+type OrganizationSettings = TemplateOrganizationSettings;
 
 /**
  * Bouton pour générer une convention de formation dans l'interface CRM
@@ -78,19 +81,47 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
     setHasError(false);
 
     try {
-      // Formater tous les participants
-      const allFormattedParticipants = participants.map(p => ({
-        id: p.id,
-        first_name: p.first_name,
-        last_name: p.last_name,
-        email: p.email || '',
-        job_position: p.job_position || '',
-        status: p.status || '',
-        company: p.company || p.company_name || ''
-      }));
+      // V2: Charger tous les participants associés à ce training_id depuis la DB
+      if (!training || !training.id) {
+        console.error('❌ [ERROR] Training ID manquant pour charger les participants.');
+        setFormattedParticipants([]); // Vider la liste si pas d'ID
+        throw new Error('Training ID manquant.');
+      }
+      
+      console.log(`🔄 [DEBUG] Récupération de TOUS les participants pour training_id: ${training.id}`);
+      const { data: allDbParticipants, error: dbParticipantsError } = await supabase
+        .from('user_profiles')
+        .select('id, first_name, last_name, email, job_position, status, company_name')
+        .eq('training_id', training.id);
 
-      setFormattedParticipants(allFormattedParticipants);
-      console.log('🔍 [DEBUG] TrainingAgreementButton - Participants formatés:', allFormattedParticipants);
+      if (dbParticipantsError) {
+        console.error('❌ [ERROR] Erreur lors de la récupération des participants depuis la DB:', dbParticipantsError);
+        // Fallback: utiliser les participants passés en props si la DB échoue
+        const allFormattedParticipantsFallback = participants.map(p => ({
+          id: p.id,
+          first_name: p.first_name,
+          last_name: p.last_name,
+          email: p.email || '',
+          job_position: p.job_position || '',
+          status: p.status || '',
+          company: p.company || p.company_name || ''
+        }));
+        setFormattedParticipants(allFormattedParticipantsFallback);
+      } else if (allDbParticipants) {
+        const allFormattedParticipantsDb = allDbParticipants.map(p => ({
+          id: p.id,
+          first_name: p.first_name,
+          last_name: p.last_name,
+          email: p.email || '',
+          job_position: p.job_position || '',
+          status: p.status || 'registered', // Statut par défaut si manquant
+          company: p.company_name || '' // Utiliser company_name de user_profiles
+        }));
+        setFormattedParticipants(allFormattedParticipantsDb);
+        console.log('✅ [DEBUG] TrainingAgreementButton - Participants chargés depuis la DB:', allFormattedParticipantsDb);
+      } else {
+         setFormattedParticipants([]); // Vider si rien trouvé en DB
+      }
 
       // Exécuter ces opérations en parallèle pour un chargement plus rapide
       await Promise.all([
@@ -280,7 +311,7 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
         }
 
         setOrganizationSettings({
-          organization_name: settingsData.company_name || '',
+          organization_name: settingsData.company_name || 'PETITMAKER', 
           address: settingsData.address || '',
           postal_code: settingsData.postal_code || '',
           city: settingsData.city || '',
@@ -288,8 +319,8 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
           siret: settingsData.siret || '',
           activity_declaration_number: settingsData.training_number || '',
           representative_name: settingsData.representative_name || '',
-          representative_title: settingsData.representative_title || 'Directeur',
-          organization_seal_url: organizationSealUrl as string | undefined
+          representative_title: settingsData.representative_title || '',
+          // Assurer que organization_seal_url n'est pas passé ici car non défini dans le type cible
         });
       }
     } catch (error) {
@@ -330,36 +361,37 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
     }
   };
 
-  // Fonction pour ouvrir la modal de sélection de participant
-  const handleOpenAgreement = () => {
-    console.log('🔍 [DEBUG] TrainingAgreementButton - Ouverture de la convention');
-    
-    // Vérifier que des participants sont disponibles
-    if (participants.length === 0) {
-      alert("Aucun participant n'est inscrit à cette formation.");
-      return;
-    }
-    
-    // Réinitialiser les états pour éviter les problèmes de stale data
+  const handleOpenConvention = async () => {
+    console.log("🔍 [DEBUG] TrainingAgreementButton - Ouverture de la convention");
     setIsLoading(true);
     setHasError(false);
-    setFormattedTraining(null);
-    setFormattedParticipants([]);
-    setOrganizationSettings(null);
-    
-    // Charger les données de tous les participants
-    loadAllParticipantsData().then(() => {
-      // Afficher la convention une fois les données chargées
-      setShowAgreement(true);
-    }).catch(error => {
-      console.error('🔍 [ERROR] Erreur lors de l\'ouverture de la convention:', error);
-      setHasError(true);
+    try {
+      // Recharger TOUTES les données nécessaires (participants, formation, entreprise, org settings)
+      // JUSTE AVANT d'ouvrir
+      await loadAllParticipantsData();
+
+      // Vérifier si toutes les données essentielles sont présentes après le rechargement
+      // Note: company peut avoir des valeurs par défaut, mais devrait exister
+      if (!formattedTraining || !company || !formattedParticipants) {
+         console.error("❌ [ERROR] Données essentielles manquantes après rechargement avant ouverture modale.");
+         // Gérer l'erreur, peut-être afficher un message
+         setHasError(true);
+         setIsLoading(false);
+         return;
+      }
+
+      setShowAgreement(true); // Ouvrir la modale
+    } catch (error) {
+       console.error("❌ [ERROR] Erreur lors de la préparation de l'ouverture de la convention:", error);
+       setHasError(true);
+       // Afficher un message d'erreur à l'utilisateur, par exemple via un état ou une alerte
+       // alert("Une erreur est survenue lors du chargement des données pour la convention.");
+    } finally {
       setIsLoading(false);
-      alert("Une erreur est survenue lors du chargement de la convention.");
-    });
+    }
   };
 
-  const handleCloseAgreement = () => {
+  const handleCloseConvention = () => {
     console.log('🔍 [DEBUG] TrainingAgreementButton - Fermeture de la convention');
     
     // Masquer d'abord la convention
@@ -444,21 +476,28 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
     console.log('📊 [DEBUG] TrainingAgreementButton - adaptedTraining transmis au template:', adaptedTraining);
     
     // Adaptation des paramètres d'organisation
-    const adaptedOrgSettings = organizationSettings ? {
-      organization_name: organizationSettings.organization_name,
-      siret: organizationSettings.siret,
-      address: organizationSettings.address,
-      postal_code: organizationSettings.postal_code,
-      city: organizationSettings.city,
-      country: organizationSettings.country,
-      representative_name: organizationSettings.representative_name,
-      representative_title: organizationSettings.representative_title,
-      activity_declaration_number: organizationSettings.activity_declaration_number
+    const adaptedOrgSettings: OrganizationSettings = organizationSettings ? {
+      // Assigner les champs en s'assurant de leur existence ou en fournissant des valeurs par défaut
+      organization_name: organizationSettings.organization_name || 'PETITMAKER',
+      siret: organizationSettings.siret || '',
+      address: organizationSettings.address || '',
+      postal_code: organizationSettings.postal_code || '',
+      city: organizationSettings.city || '',
+      country: organizationSettings.country || 'France',
+      representative_name: organizationSettings.representative_name || '',
+      representative_title: organizationSettings.representative_title || '',
+      activity_declaration_number: organizationSettings.activity_declaration_number || ''
     } : {
+      // Fournir tous les champs requis par OrganizationSettings même dans le cas par défaut
       organization_name: 'PETITMAKER',
-      siret: 'À compléter',
-      address: 'À compléter',
-      activity_declaration_number: 'À compléter'
+      siret: '',
+      address: '',
+      postal_code: '',
+      city: '',
+      country: 'France',
+      representative_name: '',
+      representative_title: '',
+      activity_declaration_number: ''
     };
     
     // Log des participants qui seront affichés dans la convention
@@ -506,7 +545,7 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
   return (
     <>
       <button
-        onClick={handleOpenAgreement}
+        onClick={handleOpenConvention}
         className={getButtonClass()}
         disabled={isLoading}
       >
@@ -532,7 +571,7 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
           participantId={formattedParticipants.length > 0 ? formattedParticipants[0].id : ''}
           participantName={getParticipantsTitle()}
           viewContext="crm"
-          onCancel={handleCloseAgreement}
+          onCancel={handleCloseConvention}
           renderTemplate={renderTemplate}
           documentTitle={getParticipantsTitle()}
           allowCompanySeal={true}

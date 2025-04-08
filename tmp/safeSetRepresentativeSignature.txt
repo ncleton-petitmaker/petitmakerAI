@@ -1,0 +1,8 @@
+// Fonction pour définir de manière sécurisée la signature du représentant
+const safeSetRepresentativeSignature = useCallback((value: string | null) => {
+  if (value || !signaturesLocked) {
+    setRepresentativeSignature(value);
+  } else {
+    console.log('🔒 [PROTECT] Tentative de définir representativeSignature à null bloquée');
+  }
+}, [signaturesLocked]); 

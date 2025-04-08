@@ -1,0 +1,9 @@
+// Remplacez l'interface SignatureCacheItem existante par celle-ci
+interface SignatureCacheItem {
+  participantSig?: string | null;
+  companySeal?: string | null;
+  organizationSeal?: string | null;
+  trainerSig?: string | null;
+  representativeSig?: string | null;  // Ajout de cette propriété
+  timestamp?: number;
+} 

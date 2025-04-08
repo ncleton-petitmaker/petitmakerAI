@@ -1,0 +1,23 @@
+import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
+import { useParams } from 'react-router-dom';
+import { supabase } from '../lib/supabase';
+import { format } from 'date-fns';
+import { fr } from 'date-fns/locale';
+import UnifiedTrainingAgreementTemplate from './shared/templates/unified/TrainingAgreementTemplate';
+import SignatureCanvas from './SignatureCanvas';
+import { createPortal } from 'react-dom';
+import { X, Download, CheckCircle } from 'lucide-react';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
+// @ts-ignore
+import html2pdf from 'html2pdf.js';
+import { createRoot } from 'react-dom/client';
+import { DocumentManager } from './shared/DocumentManager';
+import { toast } from 'react-hot-toast';
+// @ts-ignore
+import { Helmet } from 'react-helmet';
+// @ts-ignore
+import Confetti from 'react-confetti';
+// @ts-ignore
+import { BeatLoader } from 'react-spinners';
+import { optimizeSealUrl } from '../utils/SignatureUtils';

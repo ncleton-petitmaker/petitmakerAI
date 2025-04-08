@@ -1,0 +1,2 @@
+// Ajoutez cet état avec les autres déclarations d'états useState
+const [hasRepresentativeSignature, setHasRepresentativeSignature] = useState(false); 

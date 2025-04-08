@@ -78,18 +78,18 @@ export const DOCUMENT_SIGNATURE_CONFIG: Record<string, SignatureRequirements> = 
  * sur n'importe quel type de document, avec une logique cohérente pour tous.
  */
 export class DocumentSignatureManager {
-  private documentType: string;
+  private documentType: DocumentType;
   private trainingId: string;
   private participantId: string;
-  private participantName?: string;
+  private participantName: string;
+  private viewContext: 'crm' | 'student';
   private documentId: string = '';
-  private viewContext: 'crm' | 'student' = 'crm'; // Valeur par défaut
   private signatures: {
     participant: string | null;
     representative: string | null;
     trainer: string | null;
     companySeal: string | null;
-    organizationSeal: string | null | undefined;
+    organizationSeal: string | null;
   } = {
     participant: null,
     representative: null,
@@ -99,7 +99,8 @@ export class DocumentSignatureManager {
   };
   private signaturesLoaded: boolean = false;
   private needStamp: boolean = false;
-  private onSignatureChange?: (type: SignatureType, signature: string | null) => void;
+  private onSignatureChange: (type: SignatureType, signature: string | null) => void;
+  public disableAutoLoad: boolean = false;
 
   /**
    * Constructeur du gestionnaire de signatures
@@ -112,12 +113,12 @@ export class DocumentSignatureManager {
    * @param onSignatureChange Callback appelé quand une signature change
    */
   constructor(
-    documentType: string,
+    documentType: DocumentType,
     trainingId: string,
     participantId: string,
-    participantName?: string,
+    participantName: string = '',
     viewContext: 'crm' | 'student' = 'crm',
-    onSignatureChange?: (type: SignatureType, signature: string | null) => void
+    onSignatureChange: (type: SignatureType, signature: string | null) => void = () => {}
   ) {
     this.documentType = documentType;
     this.trainingId = trainingId;
@@ -125,6 +126,7 @@ export class DocumentSignatureManager {
     this.participantName = participantName;
     this.viewContext = viewContext;
     this.onSignatureChange = onSignatureChange;
+    this.disableAutoLoad = false;
     
     // Initialiser needStamp à true si c'est une convention
     this.needStamp = documentType === DocumentType.CONVENTION;
@@ -150,7 +152,7 @@ export class DocumentSignatureManager {
     }
 
     // Récupérer la configuration pour ce type de document
-    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType];
+    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType.toString()];
     if (!config) {
       return { canSign: false, message: "Type de document non reconnu" };
     }
@@ -302,7 +304,12 @@ export class DocumentSignatureManager {
       
       console.log('🔍 [DEBUG_SUPABASE] Insertion directe dans la base de données:', title);
       
-      // REMARQUE: On ignore volontairement l'erreur de lint pour user_id car Supabase accepte les valeurs null/undefined
+      // Convertir le type de document pour la base de données si nécessaire
+      let dbDocumentType = this.documentType as 'convention' | 'attestation' | 'emargement';
+      if (dbDocumentType === 'emargement') {
+        dbDocumentType = 'attestation'; // Conversion pour respecter la contrainte documents_type_check
+      }
+      
       // @ts-ignore
       const { data: insertData, error: insertError } = await supabase
         .from('documents')
@@ -311,7 +318,7 @@ export class DocumentSignatureManager {
             training_id: this.trainingId,
             user_id: userId,
             file_url: publicUrl,
-            type: this.documentType,
+            type: dbDocumentType,
             title: title,
             created_by: session.user.id
           }
@@ -346,6 +353,12 @@ export class DocumentSignatureManager {
         throw new Error("Vous devez être connecté pour enregistrer le document");
       }
 
+      // Convertir le type de document pour la base de données si nécessaire
+      let dbDocumentType = this.documentType as 'convention' | 'attestation' | 'emargement';
+      if (dbDocumentType === 'emargement') {
+        dbDocumentType = 'attestation'; // Conversion pour respecter la contrainte documents_type_check
+      }
+
       // Sauvegarder le document via DocumentManager
       const documentUrl = await DocumentManager.saveDocument(
         pdfBlob,
@@ -353,7 +366,7 @@ export class DocumentSignatureManager {
           training_id: this.trainingId,
           user_id: this.participantId,
           created_by: session.user.id,
-          type: this.documentType as 'convention' | 'attestation' | 'emargement',
+          type: dbDocumentType,
           participant_name: this.participantName
         }
       );
@@ -366,274 +379,112 @@ export class DocumentSignatureManager {
   }
 
   /**
-   * Charge les signatures existantes depuis la base de données
+   * Charge TOUTES les signatures existantes pertinentes depuis la base de données
+   * en fonction du contexte (CRM/Student) et du type de document.
    */
   async loadExistingSignatures(): Promise<void> {
+    console.log('🚀 [LOAD_ALL] Début du chargement complet des signatures', {
+      viewContext: this.viewContext,
+      trainingId: this.trainingId,
+      participantId: this.participantId,
+      documentType: this.documentType
+    });
+
+    // Si le chargement automatique est désactivé, ne rien faire
+    if (this.disableAutoLoad) {
+      console.log('🚫 [LOAD_ALL] Chargement automatique désactivé');
+      this.signaturesLoaded = true; // Marquer comme chargé pour éviter les boucles
+      return;
+    }
+
+    this.signaturesLoaded = false;
+    // Réinitialiser systématiquement avant de charger
+    this.signatures = {
+      participant: null,
+      representative: null,
+      trainer: null,
+      companySeal: null,
+      organizationSeal: null
+    };
+
     try {
-      console.log('🔎 [CROSS_SIGNATURES] Début loadExistingSignatures', {
-        viewContext: this.viewContext,
-        trainingId: this.trainingId,
-        participantId: this.participantId,
-        documentType: this.documentType
-      });
-      
-      // Réinitialiser toutes les signatures pour éviter les confusions
-      this.signatures = {
-        participant: null,
-        representative: null,
-        trainer: null,
-        companySeal: null,
-        organizationSeal: null
+      // Préparer les paramètres communs pour getLastSignature
+      const commonParams = {
+        training_id: this.trainingId,
+        type: this.documentType as 'convention' | 'attestation' | 'emargement',
       };
-      
-      console.log('🔎 [CROSS_SIGNATURES] Signatures réinitialisées');
-      
-      // 1. Charger la signature du participant (toujours charger, quel que soit le contexte)
-      console.log('🔎 [CROSS_SIGNATURES] Chargement de la signature participant...');
-      
-      // Toujours essayer de charger avec user_id spécifique en priorité
-      this.signatures.participant = await DocumentManager.getLastSignature({
-        training_id: this.trainingId,
-        user_id: this.participantId,
-        type: this.documentType as 'convention' | 'attestation' | 'emargement',
-        signature_type: 'participant'
-      });
-      
-      console.log('🔎 [CROSS_SIGNATURES] Signature participant chargée:', {
-        exists: !!this.signatures.participant,
-        url: this.signatures.participant ? this.signatures.participant.substring(0, 50) : null
-      });
-      
-      // Si la signature du participant n'est pas trouvée, élargir la recherche
-      if (!this.signatures.participant) {
-        console.log('🔎 [CROSS_SIGNATURES] Recherche globale de signature participant');
-        
-        try {
-          // Rechercher par user_id dans toutes les formations
-          const { data: participantSigs, error } = await supabase
-            .from('documents')
-            .select('file_url')
-            .eq('user_id', this.participantId)
-            .eq('title', 'Signature du participant')
-            .eq('type', this.documentType)
-            .order('created_at', { ascending: false })
-            .limit(1);
-            
-          if (!error && participantSigs && participantSigs.length > 0 && participantSigs[0].file_url) {
-            this.signatures.participant = participantSigs[0].file_url;
-            console.log('🔎 [CROSS_SIGNATURES] Signature participant trouvée globalement:', 
-              this.signatures.participant ? this.signatures.participant.substring(0, 50) : null);
-          }
-        } catch (error) {
-          console.error('🔎 [CROSS_SIGNATURES] Erreur lors de la recherche globale participant:', error);
-        }
-      }
-      
-      // 2. Charger le tampon de l'entreprise (si nécessaire)
-      if (this.needStamp && this.documentType === DocumentType.CONVENTION) {
-        console.log('🔎 [CROSS_SIGNATURES] Chargement du tampon entreprise...');
-        this.signatures.companySeal = await DocumentManager.getLastSignature({
-          training_id: this.trainingId,
+
+      // --- Chargement Conditionnel --- 
+      // Les promesses seront résolues en parallèle
+      const promises = [];
+
+      // 1. Signature Participant (toujours liée à participantId)
+      promises.push(
+        DocumentManager.getLastSignature({
+          ...commonParams,
           user_id: this.participantId,
-          type: this.documentType as 'convention',
-          signature_type: 'companySeal'
-        });
-        console.log('🔎 [CROSS_SIGNATURES] Tampon entreprise chargé:', {
-          exists: !!this.signatures.companySeal,
-          url: this.signatures.companySeal ? this.signatures.companySeal.substring(0, 50) : null
-        });
-      }
-      
-      // 3. Charger la signature du représentant (globale)
-      console.log('🔎 [CROSS_SIGNATURES] Chargement de la signature représentant...');
-      this.signatures.representative = await DocumentManager.getLastSignature({
-        training_id: this.trainingId,
-        type: this.documentType as 'convention' | 'attestation' | 'emargement',
-        signature_type: 'representative'
-      });
-      
-      console.log('🔎 [CROSS_SIGNATURES] Signature représentant chargée:', {
-        exists: !!this.signatures.representative,
-        url: this.signatures.representative ? this.signatures.representative.substring(0, 50) : null
-      });
-      
-      // Si pas trouvée, élargir la recherche
-      if (!this.signatures.representative) {
-        console.log('🔎 [CROSS_SIGNATURES] Recherche globale signature représentant');
-        
-        try {
-          const { data, error } = await supabase
-            .from('documents')
-            .select('file_url')
-            .eq('title', 'Signature du représentant')
-            .eq('type', this.documentType)
-            .order('created_at', { ascending: false })
-            .limit(1);
-            
-          if (!error && data && data.length > 0 && data[0].file_url) {
-            this.signatures.representative = data[0].file_url;
-            console.log('🔎 [CROSS_SIGNATURES] Signature représentant trouvée globalement:',
-              this.signatures.representative ? this.signatures.representative.substring(0, 50) : null);
-          }
-        } catch (error) {
-          console.error('🔎 [CROSS_SIGNATURES] Erreur recherche globale représentant:', error);
-        }
-      }
-      
-      // 4. Charger la signature du formateur (toujours charger, quel que soit le contexte)
-      console.log('🔎 [CROSS_SIGNATURES] Chargement de la signature formateur...');
-      
-      // D'abord essayer sans user_id (cas le plus courant)
-      this.signatures.trainer = await DocumentManager.getLastSignature({
-        training_id: this.trainingId,
-        type: this.documentType as 'convention' | 'attestation' | 'emargement',
-        signature_type: 'trainer'
-      });
-      
-      console.log('🔎 [CROSS_SIGNATURES] Signature formateur après 1ère tentative:', {
-        exists: !!this.signatures.trainer,
-        url: this.signatures.trainer ? this.signatures.trainer.substring(0, 50) : null
-      });
-      
-      // Si non trouvée, essayer avec user_id
-      if (!this.signatures.trainer) {
-        console.log('🔎 [CROSS_SIGNATURES] Tentative avec user_id:', this.participantId);
-        this.signatures.trainer = await DocumentManager.getLastSignature({
-          training_id: this.trainingId,
-          user_id: this.participantId,
-          type: this.documentType as 'convention' | 'attestation' | 'emargement',
+          signature_type: 'participant'
+        }).then(url => { if (url) this.signatures.participant = url; })
+      );
+
+      // 2. Signature Représentant (liée à participantId OU partagée via companyId - getLastSignature devrait gérer ça)
+      // Note: getLastSignature devra être intelligent pour chercher aussi les partages
+      promises.push(
+        DocumentManager.getLastSignature({
+          ...commonParams,
+          user_id: this.participantId, // Fournir l'ID pour chercher la spécifique/partagée
+          signature_type: 'representative'
+        }).then(url => { if (url) this.signatures.representative = url; })
+      );
+
+      // 3. Signature Formateur (globale à la formation, user_id = null)
+      promises.push(
+        DocumentManager.getLastSignature({
+          ...commonParams,
+          // user_id: undefined, // Ne pas spécifier pour chercher la globale
           signature_type: 'trainer'
-        });
-        
-        console.log('🔎 [CROSS_SIGNATURES] Signature formateur après 2ème tentative:', {
-          exists: !!this.signatures.trainer,
-          url: this.signatures.trainer ? this.signatures.trainer.substring(0, 50) : null
-        });
+        }).then(url => { if (url) this.signatures.trainer = url; })
+      );
+
+      // 4. Tampon Entreprise (lié à participantId OU companyId - getLastSignature à adapter?)
+      // Convention actuelle: getLastSignature cherche avec user_id pour companySeal
+      if (this.documentType === DocumentType.CONVENTION) { // Seulement pour les conventions
+        promises.push(
+          DocumentManager.getLastSignature({
+            ...commonParams,
+            user_id: this.participantId, // Garder user_id pour l'instant
+            signature_type: 'companySeal'
+          }).then(url => { if (url) this.signatures.companySeal = url; })
+        );
       }
-      
-      // Si toujours pas trouvée, rechercher globalement
-      if (!this.signatures.trainer) {
-        console.log('🔎 [CROSS_SIGNATURES] Recherche globale signature formateur');
-        
-        try {
-          const { data, error } = await supabase
-            .from('documents')
-            .select('file_url')
-            .eq('title', 'Signature du formateur')
-            .eq('type', this.documentType)
-            .order('created_at', { ascending: false })
-            .limit(1);
-            
-          if (!error && data && data.length > 0 && data[0].file_url) {
-            this.signatures.trainer = data[0].file_url;
-            console.log('🔎 [CROSS_SIGNATURES] Signature formateur trouvée globalement:',
-              this.signatures.trainer ? this.signatures.trainer.substring(0, 50) : null);
-          }
-        } catch (error) {
-          console.error('🔎 [CROSS_SIGNATURES] Erreur recherche globale formateur:', error);
-        }
-      }
-      
-      // 5. Charger le tampon de l'organisme de formation
-      if (this.needStamp && (this.documentType === DocumentType.CONVENTION)) {
-        console.log('🔎 [CROSS_SIGNATURES] Chargement du tampon organisme...');
-        
-        try {
-          // Récupérer depuis organization_settings
-          const { data: settings, error } = await supabase
-            .from('organization_settings')
-            .select('organization_seal_url, organization_seal_path')
-            .single();
-          
-          if (!error && settings) {
-            if (settings.organization_seal_url) {
-              this.signatures.organizationSeal = settings.organization_seal_url;
-              console.log('🔎 [CROSS_SIGNATURES] Tampon organisme depuis URL:', 
-                this.signatures.organizationSeal ? this.signatures.organizationSeal.substring(0, 50) : null);
-            } 
-            else if (settings.organization_seal_path) {
-              const { data: urlData } = await supabase.storage
-                .from('signatures')
-                .getPublicUrl(settings.organization_seal_path);
-              
-              if (urlData && urlData.publicUrl) {
-                this.signatures.organizationSeal = urlData.publicUrl;
-                console.log('🔎 [CROSS_SIGNATURES] Tampon organisme depuis chemin:',
-                  urlData.publicUrl ? urlData.publicUrl.substring(0, 50) : null);
-              }
-            }
-          }
-          
-          // Si toujours pas trouvé, chercher dans le bucket signatures
-          if (!this.signatures.organizationSeal) {
-            this.signatures.organizationSeal = await DocumentManager.getLastSignature({
-              training_id: this.trainingId,
-              type: this.documentType as 'convention',
-              signature_type: 'organizationSeal'
-            });
-            
-            if (this.signatures.organizationSeal) {
-              console.log('🔎 [CROSS_SIGNATURES] Tampon organisme via getLastSignature:',
-                this.signatures.organizationSeal ? this.signatures.organizationSeal.substring(0, 50) : null);
-            } else {
-              // Chercher dans le bucket signatures
-              try {
-                const { data: files, error: listError } = await supabase.storage
-                  .from('signatures')
-                  .list('', { sortBy: { column: 'created_at', order: 'desc' } });
-                
-                if (!listError && files && files.length > 0) {
-                  // Filtrer pour trouver les fichiers de tampon d'organisation
-                  const sealFiles = files.filter(file => 
-                    file.name.includes('organization_seal') && !file.name.endsWith('/')
-                  );
-                  
-                  if (sealFiles.length > 0) {
-                    const { data: urlData } = await supabase.storage
-                      .from('signatures')
-                      .getPublicUrl(sealFiles[0].name);
-                    
-                    if (urlData && urlData.publicUrl) {
-                      this.signatures.organizationSeal = urlData.publicUrl;
-                      console.log('🔎 [CROSS_SIGNATURES] Tampon organisme depuis bucket signatures:',
-                        urlData.publicUrl ? urlData.publicUrl.substring(0, 50) : null);
-                    }
-                  }
-                }
-              } catch (storageError) {
-                console.error('🔎 [CROSS_SIGNATURES] Erreur bucket signatures:', storageError);
-              }
-            }
-          }
-        } catch (sealError) {
-          console.error('🔎 [CROSS_SIGNATURES] Exception tampon organisme:', sealError);
-        }
-      }
-      
-      // Forcer l'affichage des signatures quel que soit le contexte
-      await this.ensureAllSignaturesAreLoaded();
-      
-      // AJOUT: Forcer la visibilité croisée des signatures entre formateur et apprenant
-      console.log('🔎 [CROSS_SIGNATURES] Appel de enforceCrossSignatureVisibility');
-      await this.enforceCrossSignatureVisibility();
-      
-      // Vérification finale
-      this.verifySignatures();
-      
-      this.signaturesLoaded = true;
-      console.log('🔎 [CROSS_SIGNATURES] État final des signatures:', {
-        participant: this.signatures.participant ? 'chargée' : 'manquante',
-        representative: this.signatures.representative ? 'chargée' : 'manquante',
-        trainer: this.signatures.trainer ? 'chargée' : 'manquante',
-        companySeal: this.signatures.companySeal ? 'chargée' : 'manquante',
-        organizationSeal: this.signatures.organizationSeal ? 'chargée' : 'manquante',
+
+      // 5. Tampon Organisme (global)
+      promises.push(this.ensureOrganizationSealIsLoaded()); // Utilise la méthode dédiée qui cherche dans settings/storage
+
+      // --- Exécution Parallèle --- 
+      console.log(`🚀 [LOAD_ALL] Lancement de ${promises.length} chargements en parallèle...`);
+      await Promise.allSettled(promises);
+      console.log('✅ [LOAD_ALL] Tous les chargements parallèles terminés.');
+
+      // Log final de l'état chargé
+      console.log('📊 [LOAD_ALL] État final des signatures après chargement complet:', {
+        participant: !!this.signatures.participant,
+        representative: !!this.signatures.representative,
+        trainer: !!this.signatures.trainer,
+        companySeal: !!this.signatures.companySeal,
+        organizationSeal: !!this.signatures.organizationSeal,
         viewContext: this.viewContext
       });
+
     } catch (error) {
-      console.error('🔎 [CROSS_SIGNATURES] Exception lors du chargement des signatures:', error);
+      console.error('❌ [LOAD_ALL] Erreur majeure lors du chargement complet des signatures:', error);
+      // Laisser les signatures partiellement chargées si une erreur survient
+    } finally {
+      this.signaturesLoaded = true;
+      console.log('🏁 [LOAD_ALL] Chargement complet terminé (signaturesLoaded=true).');
     }
   }
-  
+
   /**
    * Méthode pour s'assurer que toutes les signatures sont chargées,
    * quelle que soit la vue (apprenant ou formateur)
@@ -752,95 +603,11 @@ export class DocumentSignatureManager {
     representative: string | null;
     trainer: string | null;
     companySeal: string | null;
-    organizationSeal: string | null | undefined;
+    organizationSeal: string | null;
   }> {
-    console.log('🚨 [URGENT] Forçage du rafraîchissement des signatures');
-    
-    try {
-      // Première tentative - Réinitialiser et recharger
-      this.signaturesLoaded = false;
-      
-      // Sauvegarder les signatures actuelles au cas où
-      const currentSignatures = { ...this.signatures };
-      console.log('🚨 [URGENT] Backup des signatures actuelles:', {
-        participant: !!currentSignatures.participant,
-        representative: !!currentSignatures.representative,
-        trainer: !!currentSignatures.trainer,
-        companySeal: !!currentSignatures.companySeal,
-        organizationSeal: !!currentSignatures.organizationSeal
-      });
-      
-      // Réinitialiser toutes les signatures
-      this.signatures = {
-        participant: null,
-        representative: null,
-        trainer: null,
-        companySeal: null,
-        organizationSeal: null
-      };
-      
-      try {
-        // Tentative 1: Méthode standard
-      await this.loadExistingSignatures();
-        console.log('🚨 [URGENT] Signatures rafraîchies avec succès (méthode 1)');
-      } catch (error1) {
-        console.error('🚨 [URGENT] Échec du rafraîchissement (méthode 1):', error1);
-        
-        // Tentative 2: Chargement par type spécifique
-        try {
-          console.log('🚨 [URGENT] Tentative alternative de chargement (méthode 2)');
-          await this.loadSpecificSignatures();
-          console.log('🚨 [URGENT] Signatures rafraîchies avec succès (méthode 2)');
-        } catch (error2) {
-          console.error('🚨 [URGENT] Échec du rafraîchissement (méthode 2):', error2);
-          
-          // Tentative 3: Chargement individuel
-          try {
-            console.log('🚨 [URGENT] Tentative de chargement individuel (méthode 3)');
-            // Pour chaque type de signature, essayer de la charger individuellement
-            await Promise.allSettled([
-              this.loadParticipantSignature(),
-              this.loadTrainerSignature(),
-              this.loadRepresentativeSignature(),
-              this.loadCompanySeal(),
-              this.loadOrganizationSeal()
-            ]);
-            console.log('🚨 [URGENT] Chargement individuel terminé (méthode 3)');
-          } catch (error3) {
-            console.error('🚨 [URGENT] Échec du chargement individuel (méthode 3):', error3);
-            
-            // Restaurer les signatures précédentes en cas d'échec total
-            console.log('🚨 [URGENT] Restauration des signatures précédentes');
-            this.signatures = currentSignatures;
-          }
-        }
-      }
-      
-      // Forcer le chargement du tampon d'organisation
-      await this.ensureOrganizationSealIsLoaded();
-      
-      this.signaturesLoaded = true;
-      
-      // Log détaillé des signatures après rafraîchissement
-      console.log('🚨 [URGENT] État final des signatures après rafraîchissement:', {
-        participant: !!this.signatures.participant,
-        representative: !!this.signatures.representative,
-        trainer: !!this.signatures.trainer,
-        companySeal: !!this.signatures.companySeal,
-        organizationSeal: !!this.signatures.organizationSeal,
-        participantURL: this.signatures.participant,
-        trainerURL: this.signatures.trainer,
-        companySealURL: this.signatures.companySeal,
-        organizationSealURL: this.signatures.organizationSeal,
-        viewContext: this.viewContext
-      });
-      
-      // Retourner les signatures mises à jour
-      return this.signatures;
-    } catch (error) {
-      console.error('🚨 [URGENT] Exception critique lors du rafraîchissement des signatures:', error);
-      return this.signatures;
-    }
+    console.log('🔄 [REFRESH] Forçage du rafraîchissement via loadExistingSignatures...');
+    await this.loadExistingSignatures(); // Appelle la nouvelle logique complète
+    return this.signatures;
   }
 
   /**
@@ -957,135 +724,30 @@ export class DocumentSignatureManager {
   }
   
   /**
-   * Charge spécifiquement la signature du participant
+   * Retourne l'état actuel des signatures
    */
-  private async loadParticipantSignature(): Promise<void> {
-    try {
-      console.log('🚨 [URGENT] Chargement spécifique de la signature participant');
-      this.signatures.participant = await DocumentManager.getLastSignature({
-        training_id: this.trainingId,
-        user_id: this.participantId,
-        type: this.documentType as 'convention' | 'attestation' | 'emargement',
-        signature_type: 'participant'
-      });
-      console.log('🚨 [URGENT] Signature participant chargée:', !!this.signatures.participant);
-    } catch (error) {
-      console.error('🚨 [URGENT] Erreur lors du chargement de la signature participant:', error);
-    }
-  }
-  
-  /**
-   * Charge spécifiquement la signature du formateur
-   */
-  private async loadTrainerSignature(): Promise<void> {
-    try {
-      console.log('🚨 [URGENT] Chargement spécifique de la signature formateur');
-      // Tentative 1: globale
-      this.signatures.trainer = await DocumentManager.getLastSignature({
-        training_id: this.trainingId,
-        type: this.documentType as 'convention' | 'attestation' | 'emargement',
-        signature_type: 'trainer'
-      });
-      
-      // Tentative 2: spécifique à l'utilisateur si nécessaire
-      if (!this.signatures.trainer) {
-        this.signatures.trainer = await DocumentManager.getLastSignature({
-          training_id: this.trainingId,
-          user_id: this.participantId,
-          type: this.documentType as 'convention' | 'attestation' | 'emargement',
-          signature_type: 'trainer'
-        });
-      }
-      
-      console.log('🚨 [URGENT] Signature formateur chargée:', !!this.signatures.trainer);
-    } catch (error) {
-      console.error('🚨 [URGENT] Erreur lors du chargement de la signature formateur:', error);
-    }
-  }
-  
-  /**
-   * Charge spécifiquement la signature du représentant
-   */
-  private async loadRepresentativeSignature(): Promise<void> {
-    console.log('🧩 [DIAGNOSTIC] Chargement de la signature representative...');
+  getSignatures(): {
+    participant: string | null;
+    representative: string | null;
+    trainer: string | null;
+    companySeal: string | null;
+    organizationSeal: string | null;
+  } {
+    console.log('🔍 [SIGNATURES] Récupération des signatures');
     
-    try {
-      // Chercher d'abord la signature du représentant pour la formation
-      let signatureUrl = await DocumentManager.getLastSignature({
-        training_id: this.trainingId,
-        type: this.documentType as 'convention' | 'attestation' | 'emargement',
-        signature_type: 'representative'
-      });
-      
-      // SOLUTION IMMÉDIATE: Si pas de signature du représentant mais signature du formateur disponible
-      if (!signatureUrl && this.signatures.trainer) {
-        console.log('🧩 [DIAGNOSTIC] Pas de signature représentant trouvée, utilisation de la signature du formateur');
-        signatureUrl = this.signatures.trainer;
-      }
-      
-      // Mettre à jour la signature
-      this.signatures.representative = signatureUrl;
-      console.log('🧩 [DIAGNOSTIC] Signature representative chargée:', signatureUrl);
-    } catch (error) {
-      console.error('🧩 [DIAGNOSTIC] Erreur lors du chargement de la signature representative:', error);
-      
-      // Fallback: si la signature du formateur est disponible, l'utiliser comme représentant
-      if (this.signatures.trainer) {
-        console.log('🧩 [DIAGNOSTIC] FALLBACK: Utilisation de la signature du formateur comme représentant après erreur');
-        this.signatures.representative = this.signatures.trainer;
-      }
+    // Si le chargement automatique est désactivé, retourner toutes les signatures à null
+    if (this.disableAutoLoad) {
+      console.log('🚫 [SIGNATURES] Retour signatures nulles (auto-load désactivé)');
+      return {
+        participant: null,
+        representative: null,
+        trainer: null,
+        companySeal: null,
+        organizationSeal: null
+      };
     }
-  }
-  
-  /**
-   * Charge spécifiquement le tampon d'entreprise
-   */
-  private async loadCompanySeal(): Promise<void> {
-    try {
-      console.log('🚨 [URGENT] Chargement spécifique du tampon entreprise');
-      
-      if (this.needStamp && this.documentType === DocumentType.CONVENTION) {
-        this.signatures.companySeal = await DocumentManager.getLastSignature({
-          training_id: this.trainingId,
-          user_id: this.participantId,
-          type: this.documentType as 'convention',
-          signature_type: 'companySeal'
-        });
-        console.log('🚨 [URGENT] Tampon entreprise chargé:', !!this.signatures.companySeal);
-      } else {
-        console.log('🚨 [URGENT] Skip chargement tampon entreprise - needStamp:', this.needStamp);
-      }
-    } catch (error) {
-      console.error('🚨 [URGENT] Erreur lors du chargement du tampon entreprise:', error);
-    }
-  }
-  
-  /**
-   * Charge spécifiquement le tampon d'organisation
-   */
-  private async loadOrganizationSeal(): Promise<void> {
-    try {
-      console.log('🚨 [URGENT] Chargement spécifique du tampon organisation');
-      
-      // Déléguer à la méthode dédiée
-      await this.ensureOrganizationSealIsLoaded();
-    } catch (error) {
-      console.error('🚨 [URGENT] Erreur lors du chargement du tampon organisation:', error);
-    }
-  }
 
-  /**
-   * Retourne toutes les signatures chargées
-   */
-  getSignatures(): Record<SignatureType, string | null> {
-    // Conversion sûre pour satisfaire le type Record<SignatureType, string | null>
-    return { 
-      participant: this.signatures.participant,
-      representative: this.signatures.representative,
-      trainer: this.signatures.trainer,
-      companySeal: this.signatures.companySeal,
-      organizationSeal: this.signatures.organizationSeal || null
-    };
+    return this.signatures;
   }
 
   /**
@@ -1101,7 +763,7 @@ export class DocumentSignatureManager {
    * Vérifie si toutes les signatures requises sont présentes
    */
   isFullySigned(): boolean {
-    const requiredSignatures = DOCUMENT_SIGNATURE_CONFIG[this.documentType]?.requiredSignatures || [];
+    const requiredSignatures = DOCUMENT_SIGNATURE_CONFIG[this.documentType.toString()]?.requiredSignatures || [];
     return requiredSignatures.every(type => !!this.signatures[type]);
   }
 
@@ -1118,7 +780,7 @@ export class DocumentSignatureManager {
     }
 
     // Déterminer quelle signature manque en fonction du contexte
-    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType];
+    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType.toString()];
     
     if (this.viewContext === 'student') {
       if (!this.signatures.participant && this.canSign('participant').canSign) {
@@ -1287,71 +949,6 @@ export class DocumentSignatureManager {
   }
 
   /**
-   * Charge les signatures spécifiques pour le document courant
-   * 
-   * Cette méthode charge uniquement les signatures pertinentes pour le document actuel
-   * en fonction de son type et du contexte de visualisation.
-   */
-  public async loadSpecificSignatures(): Promise<void> {
-    console.log('🔍 [DEBUG] DocumentSignatureManager - Chargement des signatures spécifiques');
-    
-    // Charger les signatures selon le contexte
-    switch (this.viewContext) {
-      case 'crm':
-        // Dans le CRM, on charge toutes les signatures disponibles
-        try {
-          // Charger toutes les signatures en parallèle
-          await Promise.all([
-            this.loadSignature('participant'),
-            this.loadSignature('representative'),
-            this.loadSignature('trainer'),
-            this.loadSignature('companySeal')
-          ]);
-          
-          console.log('🔍 [DEBUG] DocumentSignatureManager - Signatures chargées pour le CRM:', this.signatures);
-        } catch (error) {
-          console.error('Erreur lors du chargement des signatures pour le CRM:', error);
-        }
-        break;
-        
-      case 'student':
-        // Pour l'apprenant, on charge uniquement certaines signatures
-        try {
-          // Charger les signatures pertinentes pour l'apprenant
-          switch (this.documentType) {
-            case DocumentType.CONVENTION:
-              await Promise.all([
-                this.loadSignature('participant'),
-                this.loadSignature('representative'),
-                this.loadSignature('companySeal')
-              ]);
-              break;
-            case DocumentType.ATTESTATION:
-              await this.loadSignature('representative');
-              break;
-            case DocumentType.EMARGEMENT:
-              await Promise.all([
-                this.loadSignature('participant'),
-                this.loadSignature('trainer')
-              ]);
-              break;
-            default:
-              await Promise.all([
-                this.loadSignature('participant'),
-                this.loadSignature('representative')
-              ]);
-              break;
-          }
-          
-          console.log('🔍 [DEBUG] DocumentSignatureManager - Signatures chargées pour l\'apprenant:', this.signatures);
-        } catch (error) {
-          console.error('Erreur lors du chargement des signatures pour l\'apprenant:', error);
-        }
-        break;
-    }
-  }
-
-  /**
    * Charge le document depuis la base de données
    */
   async loadDocument(): Promise<void> {
@@ -1368,7 +965,7 @@ export class DocumentSignatureManager {
         .select('id, need_stamp, status')
         .eq('type', this.documentType)
         .eq('training_id', this.trainingId)
-        .eq('participant_id', this.participantId)
+        .eq('user_id', this.participantId)
         .limit(1);
       
       if (error) {
@@ -1419,7 +1016,7 @@ export class DocumentSignatureManager {
           .insert({
             type: this.documentType,
             training_id: this.trainingId,
-            participant_id: this.participantId,
+            user_id: this.participantId,
             status: 'draft',
             need_stamp: this.needStamp
           })
@@ -1486,45 +1083,32 @@ export class DocumentSignatureManager {
    * Détermine les signatures requises en tenant compte de need_stamp
    */
   getRequiredSignatures(): SignatureType[] {
-    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType] || { requiredSignatures: [] };
-    let required = [...config.requiredSignatures];
-    
-    // Ajouter les tampons si nécessaire
-    if (this.needStamp) {
-      if (this.documentType === DocumentType.CONVENTION) {
-        // Pour les conventions, ajouter le tampon de l'entreprise et de l'organisme si need_stamp est true
-        if (!required.includes('companySeal')) required.push('companySeal');
-        if (!required.includes('organizationSeal')) required.push('organizationSeal');
-      }
-    } else {
-      // Retirer les tampons des signatures requises si need_stamp est false
-      required = required.filter(type => !type.includes('Seal'));
-    }
-    
-    return required;
+    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType.toString()];
+    return config?.requiredSignatures || [];
+  }
+
+  /**
+   * Détermine les signatures optionnelles en tenant compte de need_stamp
+   */
+  getOptionalSignatures(): SignatureType[] {
+    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType.toString()];
+    return config?.optionalSignatures || [];
   }
 
   /**
    * Détermine l'ordre des signatures en tenant compte de need_stamp
    */
   getSignatureOrder(): SignatureType[] {
-    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType] || { signatureOrder: [] };
-    let order = config.signatureOrder || this.getRequiredSignatures();
-    
-    // Organiser l'ordre des signatures et tampons
-    if (this.needStamp) {
-      if (!order.includes('companySeal') && this.documentType === DocumentType.CONVENTION) {
-        order.push('companySeal');
-      }
-      if (!order.includes('organizationSeal') && this.documentType === DocumentType.CONVENTION) {
-        order.push('organizationSeal');
-      }
-    } else {
-      // Retirer les tampons de l'ordre si need_stamp est false
-      order = order.filter(type => !type.includes('Seal'));
-    }
-    
-    return order;
+    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType.toString()];
+    return config?.signatureOrder || [];
+  }
+
+  /**
+   * Obtient le message à afficher pour l'étape de signature actuelle
+   */
+  getPendingSignatureMessage(): string {
+    const config = DOCUMENT_SIGNATURE_CONFIG[this.documentType.toString()];
+    return config?.pendingSignatureMessage || "En attente d'autres signatures";
   }
 
   /**
@@ -1534,45 +1118,35 @@ export class DocumentSignatureManager {
    * @returns URL de la signature ou null si non trouvée
    */
   public async loadSignature(type: SignatureType): Promise<string | null> {
-    console.log('🔍 [DEBUG] DocumentSignatureManager - Chargement de la signature:', type, 'pour le document:', this.documentType);
-    
-    // Si une signature existe déjà dans le cache, la retourner
-    if (this.signatures[type]) {
-      console.log('🔍 [DEBUG] DocumentSignatureManager - Signature trouvée en cache:', type);
-      return this.signatures[type];
-    }
-    
-    // Si les signatures sont déjà chargées, on sait que cette signature n'existe pas
-    if (this.signaturesLoaded) {
-      console.log('🔍 [DEBUG] DocumentSignatureManager - Signatures déjà chargées, pas de signature pour:', type);
-      return null;
-    }
-    
+    console.log(`🔄 [LOAD_SPECIFIC] Chargement explicite de: ${type}`);
     try {
-      // Récupérer la signature depuis la base de données en utilisant getLastSignature
-      const signatureUrl = await DocumentManager.getLastSignature({
+      const commonParams = {
         training_id: this.trainingId,
-        user_id: type === 'participant' ? this.participantId : undefined,
         type: this.documentType as 'convention' | 'attestation' | 'emargement',
+      };
+      
+      let userIdParam: string | undefined = undefined;
+      if (type === 'participant' || type === 'representative' || type === 'companySeal') {
+        userIdParam = this.participantId;
+      }
+
+      const url = await DocumentManager.getLastSignature({
+        ...commonParams,
+        user_id: userIdParam,
         signature_type: type
       });
       
-      if (signatureUrl) {
-        console.log('🔍 [DEBUG] DocumentSignatureManager - Signature trouvée pour', type, ':', signatureUrl);
-        this.signatures[type] = signatureUrl;
-        
-        // Notifier du changement
-        if (this.onSignatureChange) {
-          this.onSignatureChange(type, signatureUrl);
-        }
-        
-        return signatureUrl;
+      if (url) {
+        // @ts-ignore // Permettre l'accès dynamique à la propriété
+        this.signatures[type] = url;
+        console.log(`✅ [LOAD_SPECIFIC] Signature ${type} chargée avec succès.`);
+        return url;
+      } else {
+        console.log(`ℹ️ [LOAD_SPECIFIC] Signature ${type} non trouvée.`);
+        return null;
       }
-      
-      console.log('🔍 [DEBUG] DocumentSignatureManager - Aucune signature trouvée pour:', type);
-      return null;
     } catch (error) {
-      console.error('Erreur lors du chargement de la signature:', error);
+      console.error(`❌ [LOAD_SPECIFIC] Erreur lors du chargement de la signature ${type}:`, error);
       return null;
     }
   }
@@ -1585,37 +1159,23 @@ export class DocumentSignatureManager {
    * @param url URL de la signature
    */
   updateSignature(type: SignatureType, url: string): void {
-    console.log(`🚨 [URGENT] Mise à jour directe de la signature ${type}:`, url);
-    
-    if (!url) {
-      console.error(`🚨 [URGENT] Tentative de mise à jour de ${type} avec une URL vide`);
-      return;
-    }
-    
-    // Vérifier que c'est une URL valide
-    try {
-      new URL(url);
-    } catch (e) {
-      console.error(`🚨 [URGENT] URL invalide pour ${type}:`, url, e);
-      return;
-    }
-    
-    // Mettre à jour la signature dans l'état interne
-    this.signatures[type] = url;
-    
-    // Appeler le callback si défini
-    if (this.onSignatureChange) {
+    console.log(`📝 [UPDATE_SIG] Mise à jour de la signature ${type}`);
+    // @ts-ignore
+    if (this.signatures.hasOwnProperty(type)) {
+      // @ts-ignore
+      this.signatures[type] = url;
       this.onSignatureChange(type, url);
+    } else {
+      console.warn(`⚠️ [UPDATE_SIG] Tentative de mise à jour d'un type de signature inconnu: ${type}`);
     }
-    
-    console.log(`🚨 [URGENT] Signature ${type} mise à jour avec succès:`, url);
   }
 
   /**
    * Rafraîchit les signatures en rechargeant depuis le serveur
    */
   async refreshSignatures(): Promise<void> {
-    console.log('🔍 [DEBUG] Rafraîchissement des signatures...');
+    console.log('🔄 [REFRESH_MGR] Rafraîchissement demandé via DocumentSignatureManager');
+    await this.loadExistingSignatures();
   }
 
   /**
@@ -1623,106 +1183,10 @@ export class DocumentSignatureManager {
    * (solution temporaire pour résoudre le problème des signatures manquantes)
    */
   async createRepresentativeSignature(): Promise<string | null> {
-    try {
-      console.log('🔧 [FIX] Création manuelle d\'une signature du représentant');
-      
-      // 1. Vérifier si une signature du formateur existe
-      if (!this.signatures.trainer) {
-        console.log('🔧 [FIX] Pas de signature formateur disponible pour créer la signature représentant');
-        return null;
-      }
-      
-      console.log('🔧 [FIX] Utilisation de la signature formateur comme base:', this.signatures.trainer);
-      
-      // 2. Obtenir l'authentification
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        console.error('🔧 [FIX] Erreur d\'authentification lors de la création de signature représentant');
-        return null;
-      }
-      
-      // 3. Essayer de créer directement avec insertion SQL
-      const trainerSignatureUrl = this.signatures.trainer;
-      
-      try {
-        console.log('🔧 [FIX] Insertion directe dans la table documents pour la signature représentant');
-        console.log('🔧 [FIX] Paramètres:', {
-          training_id: this.trainingId,
-          file_url: trainerSignatureUrl,
-          type: this.documentType,
-          title: "Signature du représentant"
-        });
-        
-        // Utiliser RPC pour contourner le problème de RLS et de validation
-        const { data, error } = await supabase.rpc('create_representative_signature', {
-          p_training_id: this.trainingId,
-          p_file_url: trainerSignatureUrl,
-          p_type: this.documentType,
-          p_title: "Signature du représentant"
-        });
-        
-        if (error) {
-          console.error('🔧 [FIX] Erreur lors de l\'appel RPC:', error);
-          
-          // Méthode de secours: insertion directe
-          console.log('🔧 [FIX] Tentative de secours avec insertion directe');
-          const { data: insertData, error: insertError } = await supabase
-            .from('documents')
-            .insert([
-              {
-                training_id: this.trainingId,
-                file_url: trainerSignatureUrl,
-                type: this.documentType,
-                title: "Signature du représentant",
-                // Ne pas spécifier created_by pour éviter l'erreur de type UUID
-                // user_id est également omis car optionnel
-              }
-            ])
-            .select('id, file_url');
-            
-          if (insertError) {
-            console.error('🔧 [FIX] Erreur lors de l\'insertion directe:', insertError);
-            
-            // Dernière tentative: utiliser directement la signature du formateur sans créer d'entrée
-            console.log('🔧 [FIX] Utilisation directe de la signature du formateur comme représentant');
-            this.signatures.representative = trainerSignatureUrl;
-            return trainerSignatureUrl;
-          }
-          
-          if (insertData && insertData.length > 0) {
-            console.log('🔧 [FIX] Insertion directe réussie:', insertData[0]);
-            this.signatures.representative = insertData[0].file_url;
-            return insertData[0].file_url;
-          }
-        } else if (data) {
-          console.log('🔧 [FIX] RPC réussie, résultat:', data);
-          
-          // Vérifier que la signature est bien enregistrée
-          await this.loadRepresentativeSignature();
-          
-          if (this.signatures.representative) {
-            console.log('🔧 [FIX] Signature représentant chargée après création:', this.signatures.representative);
-            return this.signatures.representative;
-          } else {
-            // En dernier recours, utiliser directement la signature du formateur
-            console.log('🔧 [FIX] Utilisation de la signature du formateur après RPC réussie');
-            this.signatures.representative = trainerSignatureUrl;
-            return trainerSignatureUrl;
-          }
-        }
-      } catch (sqlError) {
-        console.error('🔧 [FIX] Exception lors de l\'insertion SQL:', sqlError);
-      }
-      
-      // Si tout échoue, simplement réutiliser l'URL du formateur sans persistance
-      console.log('🔧 [FIX] Utilisation de la signature formateur sans persistance');
-      this.signatures.representative = trainerSignatureUrl;
-      return trainerSignatureUrl;
-      
-    } catch (error) {
-      console.error('🔧 [FIX] Exception lors de la création de signature représentant:', error);
-      return null;
-    }
+    // Logique pour créer/assigner une signature de représentant si nécessaire
+    // Pourrait impliquer de chercher une signature existante ou d'en générer une
+    console.warn('Méthode createRepresentativeSignature non implémentée');
+    return null;
   }
 
   /**

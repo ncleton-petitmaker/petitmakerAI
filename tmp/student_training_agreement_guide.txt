@@ -1,0 +1,55 @@
+# Guide d'application des modifications pour StudentTrainingAgreement.tsx
+
+## Étapes à suivre
+
+1. **Ajouter les imports nécessaires**
+   - Ajouter `import { SignatureType, DocumentType, getSignatureTypeFromString, isSealType, generateStandardSignatureFilename } from '../types/SignatureTypes';` après les imports existants (autour de la ligne 20).
+
+2. **Mettre à jour l'interface SignatureCacheItem**
+   - Localiser l'interface `SignatureCacheItem` (vers la ligne 102)
+   - Ajouter `representativeSig?: string | null;` juste avant la propriété `timestamp`
+
+3. **Ajouter l'état hasRepresentativeSignature**
+   - Localiser la section des états dans le composant StudentTrainingAgreement (vers la ligne 260)
+   - Ajouter `const [hasRepresentativeSignature, setHasRepresentativeSignature] = useState(false);` près de l'état `hasParticipantSignature`
+
+4. **Ajouter la fonction safeSetRepresentativeSignature**
+   - Chercher les autres fonctions safeSet comme safeSetParticipantSignature
+   - Ajouter la fonction:
+   ```typescript
+   const safeSetRepresentativeSignature = useCallback((value: string | null) => {
+     if (value || !signaturesLocked) {
+       setRepresentativeSignature(value);
+     } else {
+       console.log('🔒 [PROTECT] Tentative de définir representativeSignature à null bloquée');
+     }
+   }, [signaturesLocked]);
+   ```
+
+5. **Mettre à jour la fonction updateSignatureCache**
+   - Localiser la fonction `updateSignatureCache` (vers la ligne 281)
+   - Remplacer le type de fonction pour accepter `representativeSig` comme cinquième paramètre
+   - Mettre à jour le corps de la fonction pour inclure ce paramètre dans le cache global et localStorage
+
+6. **Remplacer la fonction handleSignatureSave**
+   - Localiser la fonction `handleSignatureSave` (vers la ligne 1842)
+   - Remplacer la fonction complète par la version mise à jour qui prend en charge le type 'representative'
+
+7. **Remplacer la fonction loadSignaturesFromSupabase**
+   - Localiser la fonction `loadSignaturesFromSupabase` (vers la ligne 770)
+   - Remplacer la fonction complète par la version mise à jour qui charge les signatures de représentant
+
+## Vérification après mise à jour
+
+Après avoir appliqué toutes les modifications:
+
+1. Vérifier que le code compile sans erreurs
+2. Tester le téléchargement et l'affichage des signatures de représentant légal
+3. Vérifier que toutes les références à `updateSignatureCache` sont mises à jour avec le nouveau format (5 paramètres)
+4. S'assurer que le cache et le stockage local gèrent correctement le nouveau type de signature
+
+## Problèmes potentiels
+
+- Si les références à `updateSignatureCache` ne sont pas mises à jour pour inclure le 5ème paramètre, ajouter `null` comme valeur par défaut
+- Vérifier que l'interface utilisateur inclut une option pour ajouter une signature de représentant légal
+- S'assurer que la table `document_signatures` de la base de données accepte le type 'representative' 

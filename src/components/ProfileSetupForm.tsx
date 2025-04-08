@@ -1,28 +1,48 @@
 import React, { useState, useEffect } from 'react';
-import { supabase } from '../lib/supabase';
+import { supabase, checkAuth, handleSupabaseError } from '../lib/supabase';
 import { LoadingSpinner } from './LoadingSpinner';
+
+interface FormData {
+  firstName: string;
+  lastName: string;
+  company: string;
+  jobPosition: string;
+}
+
+interface Company {
+  id: string;
+  name: string;
+  status: string;
+}
 
 interface ProfileSetupFormProps {
   userId: string;
-  onComplete: () => void;
+  onSuccess?: () => void;
 }
 
-export const ProfileSetupForm: React.FC<ProfileSetupFormProps> = ({ userId, onComplete }) => {
-  const [formData, setFormData] = useState({
-    first_name: '',
-    last_name: '',
+type CompanyStatus = 'unknown' | 'pending' | 'valid';
+
+export default function ProfileSetupForm({ userId, onSuccess }: ProfileSetupFormProps) {
+  const [formData, setFormData] = useState<FormData>({
+    firstName: '',
+    lastName: '',
     company: '',
-    job_position: ''
+    jobPosition: ''
   });
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [existingCompany, setExistingCompany] = useState<{ id: string, name: string } | null>(null);
-  const [companyStatus, setCompanyStatus] = useState<'valid' | 'pending' | 'unknown'>('unknown');
+  const [companyStatus, setCompanyStatus] = useState<CompanyStatus>('unknown');
+  const [existingCompany, setExistingCompany] = useState<Company | null>(null);
 
   useEffect(() => {
     const fetchUserProfile = async () => {
       try {
+        // Vérifier d'abord l'authentification
+        const user = await checkAuth();
+        if (!user) {
+          throw new Error('Session expirée. Veuillez vous reconnecter.');
+        }
+
         const { data, error } = await supabase
           .from('user_profiles')
           .select('first_name, last_name, company, job_position')
@@ -33,128 +53,169 @@ export const ProfileSetupForm: React.FC<ProfileSetupFormProps> = ({ userId, onCo
         
         if (data) {
           setFormData({
-            first_name: data.first_name || '',
-            last_name: data.last_name || '',
+            firstName: data.first_name || '',
+            lastName: data.last_name || '',
             company: data.company || '',
-            job_position: data.job_position || ''
+            jobPosition: data.job_position || ''
           });
         }
       } catch (error) {
         console.error('Error fetching user profile:', error);
+        setError(handleSupabaseError(error));
       } finally {
-        setLoading(false);
+        setIsLoading(false);
       }
     };
 
     fetchUserProfile();
   }, [userId]);
 
-  // Vérifier si l'entreprise existe déjà lorsque le champ est modifié
-  const checkCompanyExists = async (companyName: string) => {
-    if (!companyName.trim()) {
-      setCompanyStatus('unknown');
-      setExistingCompany(null);
-      return;
-    }
-
+  // Fonction pour vérifier l'entreprise
+  const checkCompany = async (companyName: string) => {
     try {
-      // Rechercher l'entreprise dans la base de données
+      console.log('🔍 [COMPANY] Vérification de l\'entreprise:', companyName);
+      
+      if (!companyName.trim()) {
+        setCompanyStatus('unknown');
+        setExistingCompany(null);
+        return;
+      }
+
+      // Vérifier l'authentification avant de faire la requête
+      const user = await checkAuth();
+      if (!user) {
+        throw new Error('Session expirée. Veuillez vous reconnecter.');
+      }
+
+      // Rechercher l'entreprise
       const { data: companies, error } = await supabase
         .from('companies')
-        .select('id, name')
+        .select('id, name, status')
         .ilike('name', `%${companyName}%`)
         .limit(1);
 
-      if (error) throw error;
+      if (error) {
+        console.error('❌ [COMPANY] Erreur lors de la recherche:', error);
+        throw error;
+      }
 
       if (companies && companies.length > 0) {
-        const company = companies[0];
-        
-        // Vérifier si l'entreprise a des formations associées
-        const { data: trainings, error: trainingsError } = await supabase
-          .from('trainings')
-          .select('id')
-          .eq('company_id', company.id)
-          .limit(1);
-          
-        if (trainingsError) throw trainingsError;
-        
-        setExistingCompany(company);
-        setCompanyStatus(trainings && trainings.length > 0 ? 'valid' : 'pending');
+        console.log('✅ [COMPANY] Entreprise trouvée:', companies[0]);
+        setExistingCompany(companies[0]);
+        setCompanyStatus('valid');
       } else {
+        console.log('ℹ️ [COMPANY] Nouvelle entreprise à créer');
         setExistingCompany(null);
         setCompanyStatus('pending');
       }
     } catch (error) {
-      console.error('Error checking company existence:', error);
+      console.error('❌ [COMPANY] Erreur lors de la vérification:', error);
+      setError(handleSupabaseError(error));
       setCompanyStatus('unknown');
+      setExistingCompany(null);
     }
   };
 
-  // Effectuez une vérification lorsque le nom de l'entreprise change
-  useEffect(() => {
-    const delayDebounceFn = setTimeout(() => {
-      if (formData.company) {
-        checkCompanyExists(formData.company);
-      }
-    }, 500);
-
-    return () => clearTimeout(delayDebounceFn);
-  }, [formData.company]);
-
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Gestionnaire de changement des champs
+  const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
+    setFormData(prev => ({ ...prev, [name]: value }));
+
+    // Vérifier l'entreprise si le champ modifié est 'company'
+    if (name === 'company') {
+      await checkCompany(value);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitting(true);
+    setIsLoading(true);
     setError(null);
 
     try {
-      // Si l'entreprise existe, utiliser son ID
+      console.log('📝 [PROFILE] Début de la soumission du profil');
+      console.log('📊 [PROFILE] Données du formulaire:', formData);
+
+      // Vérifier l'authentification avant de soumettre
+      const user = await checkAuth();
+      if (!user) {
+        throw new Error('Session expirée. Veuillez vous reconnecter.');
+      }
+
+      let companyId = existingCompany?.id;
+
+      // Si l'entreprise n'existe pas et qu'un nom est fourni, la créer
+      if (!companyId && formData.company.trim()) {
+        console.log('🏢 [COMPANY] Création d\'une nouvelle entreprise:', formData.company);
+        const { data: newCompany, error: companyError } = await supabase
+          .from('companies')
+          .insert([{
+            name: formData.company.trim(),
+            status: 'pending',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }])
+          .select('id')
+          .single();
+
+        if (companyError) {
+          console.error('❌ [COMPANY] Erreur lors de la création:', companyError);
+          throw companyError;
+        }
+
+        console.log('✅ [COMPANY] Nouvelle entreprise créée:', newCompany);
+        companyId = newCompany.id;
+
+        // Créer une notification pour la nouvelle entreprise
+        const { error: notifError } = await supabase
+          .from('notifications')
+          .insert([{
+            type: 'company_validation',
+            title: 'Nouvelle entreprise à valider',
+            message: `L'entreprise "${formData.company}" a été ajoutée et nécessite une validation.`,
+            status: 'unread',
+            created_at: new Date().toISOString(),
+            metadata: { company_id: companyId }
+          }]);
+
+        if (notifError) {
+          console.error('⚠️ [NOTIFICATION] Erreur lors de la création:', notifError);
+        }
+      }
+
+      // Mettre à jour ou créer le profil utilisateur
+      console.log('👤 [PROFILE] Mise à jour du profil utilisateur');
       const updates = {
-        first_name: formData.first_name,
-        last_name: formData.last_name,
-        company: formData.company,
-        job_position: formData.job_position,
-        status: companyStatus === 'pending' ? 'pending_company_validation' : 'active'
+        id: userId,
+        first_name: formData.firstName.trim(),
+        last_name: formData.lastName.trim(),
+        company_id: companyId,
+        job_position: formData.jobPosition.trim(),
+        updated_at: new Date().toISOString()
       };
 
-      // Si on a trouvé une entreprise existante, associer l'utilisateur à cette entreprise
-      if (existingCompany) {
-        Object.assign(updates, { company_id: existingCompany.id });
-      }
-
-      const { error } = await supabase
+      const { error: profileError } = await supabase
         .from('user_profiles')
-        .update(updates)
-        .eq('id', userId);
-
-      if (error) throw error;
-
-      // Si l'entreprise n'existe pas encore ou n'a pas de formations, créer une notification pour les administrateurs
-      if (companyStatus === 'pending') {
-        await supabase.from('notifications').insert({
-          type: 'new_company_request',
-          title: 'Nouvelle entreprise à valider',
-          message: `Un apprenant a demandé l'ajout de l'entreprise "${formData.company}"`,
-          is_read: false,
-          created_at: new Date().toISOString()
+        .upsert(updates, {
+          onConflict: 'id'
         });
+
+      if (profileError) {
+        console.error('❌ [PROFILE] Erreur lors de la mise à jour:', profileError);
+        throw profileError;
       }
 
-      onComplete();
+      console.log('✅ [PROFILE] Profil mis à jour avec succès');
+      setIsLoading(false);
+      onSuccess?.();
     } catch (error) {
-      console.error('Error updating profile:', error);
-      setError('Une erreur est survenue lors de la mise à jour de votre profil. Veuillez réessayer.');
-    } finally {
-      setIsSubmitting(false);
+      console.error('❌ [PROFILE] Erreur globale:', error);
+      setError(handleSupabaseError(error));
+      setIsLoading(false);
     }
   };
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="flex justify-center items-center h-full">
         <LoadingSpinner message="Chargement..." />
@@ -167,21 +228,21 @@ export const ProfileSetupForm: React.FC<ProfileSetupFormProps> = ({ userId, onCo
       <h2 className="text-2xl font-bold text-white mb-6">Complétez votre profil</h2>
       
       {error && (
-        <div className="bg-red-500 text-white p-3 rounded-md mb-4">
+        <div className="bg-red-500/20 border border-red-500/50 text-red-200 p-3 rounded-md mb-4">
           {error}
         </div>
       )}
       
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label htmlFor="first_name" className="block text-sm font-medium text-gray-300 mb-1">
+          <label htmlFor="firstName" className="block text-sm font-medium text-gray-300 mb-1">
             Prénom
           </label>
           <input
             type="text"
-            id="first_name"
-            name="first_name"
-            value={formData.first_name}
+            id="firstName"
+            name="firstName"
+            value={formData.firstName}
             onChange={handleChange}
             className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             required
@@ -189,14 +250,14 @@ export const ProfileSetupForm: React.FC<ProfileSetupFormProps> = ({ userId, onCo
         </div>
         
         <div>
-          <label htmlFor="last_name" className="block text-sm font-medium text-gray-300 mb-1">
+          <label htmlFor="lastName" className="block text-sm font-medium text-gray-300 mb-1">
             Nom
           </label>
           <input
             type="text"
-            id="last_name"
-            name="last_name"
-            value={formData.last_name}
+            id="lastName"
+            name="lastName"
+            value={formData.lastName}
             onChange={handleChange}
             className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             required
@@ -220,6 +281,7 @@ export const ProfileSetupForm: React.FC<ProfileSetupFormProps> = ({ userId, onCo
                 ? 'border-yellow-500' 
                 : 'border-gray-600'
             }`}
+            required
           />
           {companyStatus === 'pending' && (
             <p className="text-yellow-400 text-sm mt-1">
@@ -236,28 +298,29 @@ export const ProfileSetupForm: React.FC<ProfileSetupFormProps> = ({ userId, onCo
         </div>
         
         <div>
-          <label htmlFor="job_position" className="block text-sm font-medium text-gray-300 mb-1">
+          <label htmlFor="jobPosition" className="block text-sm font-medium text-gray-300 mb-1">
             Fonction
           </label>
           <input
             type="text"
-            id="job_position"
-            name="job_position"
-            value={formData.job_position}
+            id="jobPosition"
+            name="jobPosition"
+            value={formData.jobPosition}
             onChange={handleChange}
             className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             placeholder="Votre fonction dans l'entreprise"
+            required
           />
         </div>
         
         <button
           type="submit"
-          disabled={isSubmitting}
+          disabled={isLoading}
           className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {isSubmitting ? 'Enregistrement...' : 'Continuer'}
+          {isLoading ? 'Enregistrement...' : 'Continuer'}
         </button>
       </form>
     </div>
   );
-}; 
+} 

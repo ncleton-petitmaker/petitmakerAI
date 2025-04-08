@@ -410,7 +410,7 @@ const SignatureCanvas: React.FC<SignatureCanvasProps> = ({
           <div className="relative">
             <div className="flex flex-col items-center gap-2">
               <div 
-                className="relative border border-gray-300 rounded-md w-full" 
+                className="relative border border-gray-300 rounded-md w-full bg-white" 
                 style={{ height: '200px', position: 'relative' }}
               >
                 {showDrawingInstructions && (
@@ -425,7 +425,7 @@ const SignatureCanvas: React.FC<SignatureCanvasProps> = ({
                 )}
                 <canvas
                   ref={canvasRef}
-                  className="w-full h-full"
+                  className="w-full h-full bg-white"
                   onMouseDown={startDrawing}
                   onMouseMove={draw}
                   onMouseUp={stopDrawing}

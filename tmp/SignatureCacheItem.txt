@@ -1,0 +1,9 @@
+// Interface pour le cache global de signatures
+interface SignatureCacheItem {
+  participantSig?: string | null;
+  companySeal?: string | null;
+  organizationSeal?: string | null;
+  trainerSig?: string | null;
+  representativeSig?: string | null;
+  timestamp?: number;
+} 

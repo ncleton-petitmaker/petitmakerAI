@@ -1,0 +1,2370 @@
+import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
+import { useParams } from 'react-router-dom';
+import { supabase } from '../lib/supabase';
+import { format } from 'date-fns';
+import { fr } from 'date-fns/locale';
+import UnifiedTrainingAgreementTemplate from './shared/templates/unified/TrainingAgreementTemplate';
+import SignatureCanvas from './SignatureCanvas';
+import { createPortal } from 'react-dom';
+import { X, Download, CheckCircle } from 'lucide-react';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
+// @ts-ignore
+import html2pdf from 'html2pdf.js';
+import { createRoot } from 'react-dom/client';
+import { DocumentManager } from './shared/DocumentManager';
+import { toast } from 'react-hot-toast';
+// @ts-ignore
+import { Helmet } from 'react-helmet';
+// @ts-ignore
+import Confetti from 'react-confetti';
+// @ts-ignore
+import { BeatLoader } from 'react-spinners';
+import { optimizeSealUrl } from '../utils/SignatureUtils';
+import { OrganizationSettings } from './shared/DocumentUtils';
+
+// Types
+interface Company {
+  id?: string;
+  name: string;
+  address?: string;
+  postal_code?: string;
+  city?: string;
+  siret?: string;
+  contact_name?: string;
+  contact_email?: string;
+  contact_phone?: string;
+  isIndependent?: boolean;
+}
+
+// Dans la section des types, d'abord ajouter une définition de type pour les participants
+interface ParticipantData {
+  id: string;
+  first_name: string;
+  last_name: string;
+  job_position?: string;
+  company?: string;
+  email?: string;
+  status?: string;
+}
+
+// Fonction utilitaire pour parser un champ JSON qui pourrait être doublement échappé
+const parseJsonField = (field: any) => {
+  if (!field) return null;
+  
+  // Si c'est déjà un objet, le retourner tel quel
+  if (typeof field === 'object') return field;
+  
+  // Si c'est une chaîne, essayer de la parser comme JSON
+  if (typeof field === 'string') {
+    try {
+      // Gérer le cas où le JSON est doublement échappé (comme dans tracking_methods)
+      if (field.startsWith('"') && field.endsWith('"')) {
+        // Supprimer les guillemets externes et parser le contenu
+        const unescapedField = field.substring(1, field.length - 1).replace(/\\"/g, '"');
+        return JSON.parse(unescapedField);
+      }
+      
+      // Parser directement si c'est un format JSON standard
+      return JSON.parse(field);
+    } catch (e) {
+      console.error('Erreur lors du parsing JSON:', e, 'field:', field);
+      return null;
+    }
+  }
+  
+  return null;
+};
+
+// Définition des paramètres par défaut pour l'organisation
+const DEFAULT_ORGANIZATION_SETTINGS: OrganizationSettings = {
+  organization_name: 'PETITMAKER',
+  address: '2 rue Héraclès',
+  siret: '928 386 044 00012',
+  activity_declaration_number: '32 59 10753 59',
+  representative_name: 'Nicolas Cleton',
+  representative_title: 'Président',
+  city: 'Villeneuve-d\'Ascq',
+  postal_code: '59650',
+  country: 'France'
+};
+
+// Fonction utilitaire de log
+const log = (emoji: string, type: string, message: string, data?: any) => {
+  if (data) {
+    console.log(`${emoji} ${type}`, message, data);
+  } else {
+    console.log(`${emoji} ${type}`, message);
+  }
+};
+
+// Interface pour le cache global de signatures
+interface SignatureCacheItem {
+  participantSig?: string | null;
+  companySeal?: string | null;
+  organizationSeal?: string | null;
+  trainerSig?: string | null;
+  timestamp?: number;
+}
+
+// Cache global des signatures
+const GLOBAL_SIGNATURE_CACHE = {
+  cache: {} as Record<string, Record<string, SignatureCacheItem>>,
+  
+  getCache(trainingId: string, participantId: string): SignatureCacheItem {
+    if (!this.cache[trainingId]) {
+      this.cache[trainingId] = {};
+    }
+    return this.cache[trainingId][participantId] || {};
+  },
+  
+  setCache(trainingId: string, participantId: string, data: SignatureCacheItem): void {
+    if (!this.cache[trainingId]) {
+      this.cache[trainingId] = {};
+    }
+    const currentData = this.cache[trainingId][participantId] || {};
+    this.cache[trainingId][participantId] = {
+      ...currentData,
+      ...data,
+      timestamp: Date.now()
+    };
+  },
+  
+  preloadImages(urls: (string | null | undefined)[]): void {
+    urls.filter(Boolean).forEach(url => {
+      if (url) {
+        const img = new Image();
+        img.src = url;
+      }
+    });
+  }
+};
+
+// Fonction utilitaire pour charger les signatures de façon synchrone
+function loadSignaturesSync(trainingId: string, participantId: string): SignatureCacheItem {
+  try {
+    console.log('⚡ [INIT] Chargement synchrone des signatures:', { trainingId, participantId });
+    
+    // Récupérer depuis le cache local
+    const cached = GLOBAL_SIGNATURE_CACHE.getCache(trainingId, participantId);
+    console.log('📋 [INIT] Données du cache:', cached);
+    
+    // Vérifier également dans le localStorage pour plus de robustesse
+    try {
+      const localStorageKey = `signatures_cache_${trainingId}_${participantId}`;
+      const storedData = localStorage.getItem(localStorageKey);
+      
+      if (storedData) {
+        const parsedData = JSON.parse(storedData);
+        console.log('📋 [INIT] Données du localStorage:', parsedData);
+        
+        // Si le cache en mémoire est vide mais qu'on a des données dans le localStorage
+        if (!cached.participantSig && !cached.companySeal && 
+            (parsedData.participantSig || parsedData.companySeal)) {
+          // Mettre à jour le cache en mémoire avec les données du localStorage
+          GLOBAL_SIGNATURE_CACHE.setCache(trainingId, participantId, parsedData);
+          console.log('🔄 [INIT] Cache en mémoire mis à jour depuis localStorage');
+          
+          // Retourner les données du localStorage
+          return parsedData;
+        }
+      }
+    } catch (e) {
+      console.error('❌ [INIT] Erreur lors de la récupération depuis localStorage:', e);
+    }
+    
+    // Précharger les images si disponibles
+    if (cached.participantSig || cached.companySeal || cached.organizationSeal) {
+      console.log('🔄 [INIT] Préchargement des images du cache');
+      GLOBAL_SIGNATURE_CACHE.preloadImages([
+        cached.participantSig, 
+        cached.companySeal,
+        cached.organizationSeal
+      ]);
+    }
+    
+    return cached;
+  } catch (e) {
+    console.error('❌ [INIT] Erreur du chargement synchrone des signatures:', e);
+    return { participantSig: null, companySeal: null, organizationSeal: null };
+  }
+}
+
+interface StudentTrainingAgreementProps {
+  training: {
+    id: string;
+    title: string;
+    duration: string;
+    trainer_name: string;
+    trainer_id?: string;
+    location: string;
+    start_date: string | null;
+    end_date: string | null;
+    objectives?: string[];
+    content?: string;
+    price?: number | null;
+    company_id?: string;
+    evaluation_methods?: {
+      profile_evaluation?: boolean;
+      skills_evaluation?: boolean;
+      knowledge_evaluation?: boolean;
+      satisfaction_survey?: boolean;
+    };
+    tracking_methods?: {
+      attendance_sheet?: boolean;
+      completion_certificate?: boolean;
+    };
+    pedagogical_methods?: {
+      needs_evaluation?: boolean;
+      theoretical_content?: boolean;
+      practical_exercises?: boolean;
+      case_studies?: boolean;
+      experience_sharing?: boolean;
+      digital_support?: boolean;
+    };
+    material_elements?: {
+      computer_provided?: boolean;
+      pedagogical_material?: boolean;
+      digital_support_provided?: boolean;
+    };
+  };
+  participant: {
+    id: string;
+    first_name: string;
+    last_name: string;
+    job_position?: string;
+    company?: string;
+    has_signed_agreement?: boolean;
+  };
+  onCancel: () => void;
+  onDocumentOpen?: () => void;
+  onDocumentClose?: () => void;
+}
+
+export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> = ({
+  training,
+  participant,
+  onCancel,
+  onDocumentOpen,
+  onDocumentClose
+}) => {
+  const [company, setCompany] = useState<Company | null>(null);
+  const [organizationSettings, setOrganizationSettings] = useState<OrganizationSettings | null>(null);
+  const [showSignatureCanvas, setShowSignatureCanvas] = useState(false);
+  const [showSealCanvas, setShowSealCanvas] = useState(false);
+  const [participantSignature, setParticipantSignature] = useState<string | null>(null);
+  const [representativeSignature, setRepresentativeSignature] = useState<string | null>(null);
+  const [trainerSignature, setTrainerSignature] = useState<string | null>(null);
+  const [companySeal, setCompanySeal] = useState<string | null>(null);
+  const [organizationSeal, setOrganizationSeal] = useState<string | null>(null);
+  const [generatingPDF, setGeneratingPDF] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
+  const [showError, setShowError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [signatureInProgress, setSignatureInProgress] = useState(false);
+  const [sealsVerified, setSealsVerified] = useState(false);
+  const [isSigned, setIsSigned] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Ajouter un cache global d'images pour réduire les clignotements
+  const PRELOADED_IMAGES: Record<string, boolean> = {};
+
+  // État pour stocker tous les apprenants liés à la formation
+  const [allTrainingParticipants, setAllTrainingParticipants] = useState<ParticipantData[]>([]);
+
+  // Dans la partie des déclarations d'état initiales (autour de la ligne 300)
+  // Ajouter cette référence pour suivre la dernière fois que les signatures ont été chargées
+  const lastSignatureLoadTimeRef = useRef<number>(0);
+
+  // Ajout d'une fonction updateSignatureCache pour mettre à jour le cache global
+  const updateSignatureCache = (participantSig: string | null, companySeal: string | null, organizationSeal: string | null, trainerSig: string | null) => {
+    try {
+      // Mettre à jour le cache global
+      GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+        participantSig,
+        companySeal,
+        organizationSeal,
+        trainerSig
+      });
+      
+      // Mettre à jour le localStorage
+      const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+      const cacheData = {
+        participantSig,
+        companySeal,
+        organizationSeal,
+        trainerSig,
+        timestamp: Date.now()
+      };
+      localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+      console.log('💾 [CACHE] Signatures mises à jour dans le cache local');
+    } catch (e) {
+      console.error('❌ [CACHE] Erreur lors de la mise à jour du cache:', e);
+    }
+  };
+
+  // Charger immédiatement les signatures avant même le premier rendu
+  const initialSignatures = loadSignaturesSync(training.id, participant.id);
+  
+  // Log critique pour diagnostiquer le problème initial
+  console.log('🚨 [DIAGNOSTIC_CRITIQUE] Initialisation des états avec:', {
+    initialSignatures,
+    organizationSealInitialValue: initialSignatures.organizationSeal || 'NON PRÉSENT DANS LE CACHE', 
+    cacheKeys: Object.keys(initialSignatures)
+  });
+
+  const pdfContentRef = useRef<HTMLDivElement>(null);
+  const [portalElement, setPortalElement] = useState<HTMLElement | null>(null);
+  const [existingDocumentUrl, setExistingDocumentUrl] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(true);
+  const [pdfError, setPdfError] = useState(false);
+  const [documentUrl, setDocumentUrl] = useState<string>('');
+  const [isOnlyTrainerSignature, setIsOnlyTrainerSignature] = useState(false);
+  const documentCloseCalled = useRef(false);
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [generationError, setGenerationError] = useState<string | null>(null);
+  const [generationSuccess, setGenerationSuccess] = useState(false);
+  const [generatedPdfUrl, setGeneratedPdfUrl] = useState<string | null>(null);
+  const [localSignatureDataURL, setLocalSignatureDataURL] = useState<string | null>(null);
+  const [hasParticipantSignature, setHasParticipantSignature] = useState(false);
+  const [signatureAction, setSignatureAction] = useState<string | null>(null);
+  const [shouldRefresh, setShouldRefresh] = useState(false);
+  
+  // Référence pour savoir si les signatures ont été chargées depuis Supabase
+  const signaturesLoadedRef = useRef(false);
+  // Référence à l'élément conteneur du document
+  const documentRef = useRef<HTMLDivElement>(null);
+  // Référence pour les tentatives de correction du tampon
+  const sealAttemptsRef = useRef(0);
+  // Référence pour le tampon de l'organisme
+  const organizationSealRef = useRef<string | null>(null);
+  
+  // État pour protéger contre les états null qui écraseraient les signatures chargées
+  const [signaturesLocked, setSignaturesLocked] = useState(!!initialSignatures.participantSig || !!initialSignatures.companySeal);
+
+  // Ajouter les états pour la signature du formateur (vers ligne 270-280 avec les autres états)
+  const [hasTrainerSignature, setHasTrainerSignature] = useState<boolean>(false);
+
+  // Effet séparé pour récupérer tous les participants de la formation
+  useEffect(() => {
+    const fetchAllParticipants = async () => {
+      try {
+        console.log('🔍 [PARTICIPANTS] Récupération des participants pour la formation:', training.id);
+        
+        // Utiliser la fonction SQL créée spécifiquement pour récupérer les participants d'une formation
+        const { data: participantsData, error: participantsError } = await supabase
+          .rpc('get_training_participants', { training_uuid: training.id });
+          
+        // Tableau pour stocker les participants formatés
+        let formattedParticipants: ParticipantData[] = [];
+        
+        // En cas d'erreur ou si aucun participant n'est trouvé, utiliser l'utilisateur actuel
+        if (participantsError || !participantsData || participantsData.length === 0) {
+          console.log('⚠️ [PARTICIPANTS] Aucun participant trouvé via la fonction RPC:', participantsError || 'Aucune donnée');
+          
+          // Fallback: requête directe sur user_profiles
+          const { data: backupData, error: backupError } = await supabase
+            .from('user_profiles')
+            .select('*')
+          .eq('training_id', training.id);
+          
+          if (backupError || !backupData || backupData.length === 0) {
+            console.log('⚠️ [PARTICIPANTS] Fallback également échoué, utilisation du participant actuel uniquement');
+            
+            // Utilisateur actuel comme fallback
+            const currentParticipant: ParticipantData = {
+              id: participant.id,
+              first_name: participant.first_name,
+              last_name: participant.last_name,
+              job_position: participant.job_position || '',
+              company: participant.company || '',
+              email: '',
+            status: 'Inscrit'
+            };
+          
+            formattedParticipants = [currentParticipant];
+        } else {
+            console.log('✅ [PARTICIPANTS] Participants trouvés via fallback:', backupData.length);
+            formattedParticipants = backupData.map((p: any) => ({
+              id: p.id,
+              first_name: p.first_name || '',
+              last_name: p.last_name || '',
+              job_position: p.job_position || '',
+              company: p.company || '',
+              email: p.email || '',
+              status: p.status || 'Inscrit'
+            }));
+          }
+        } else {
+          // Des participants ont été trouvés via RPC
+          console.log('✅ [PARTICIPANTS] Participants trouvés via RPC:', participantsData.length);
+          
+          // Formater les données
+          formattedParticipants = participantsData.map((p: any) => ({
+            id: p.id,
+            first_name: p.first_name || '',
+            last_name: p.last_name || '',
+            job_position: p.job_position || '',
+            company: p.company || '',
+            email: p.email || '',
+            status: p.status || 'Inscrit'
+          }));
+        }
+        
+        // S'assurer que l'utilisateur actuel est inclus si nécessaire
+        const currentParticipantIncluded = formattedParticipants.some(p => p.id === participant.id);
+        
+        if (!currentParticipantIncluded) {
+          console.log('➕ [PARTICIPANTS] Ajout du participant actuel qui n\'était pas dans la liste');
+          
+          formattedParticipants.push({
+            id: participant.id,
+            first_name: participant.first_name,
+            last_name: participant.last_name,
+            job_position: participant.job_position || '',
+            company: participant.company || '',
+            email: '',
+            status: 'Inscrit'
+          });
+        }
+        
+        // Trier les participants par nom puis prénom
+        formattedParticipants.sort((a, b) => {
+          if (a.last_name && b.last_name) {
+            const lastNameComparison = a.last_name.localeCompare(b.last_name);
+            if (lastNameComparison !== 0) return lastNameComparison;
+          }
+          return a.first_name.localeCompare(b.first_name);
+        });
+        
+        // Afficher les participants dans la console pour vérification
+        console.log('🔄 [PARTICIPANTS] Liste finale des participants:', 
+          formattedParticipants.map(p => `${p.first_name} ${p.last_name} (${p.company})`));
+        
+        // Mettre à jour l'état
+        setAllTrainingParticipants(formattedParticipants);
+        
+      } catch (error) {
+        console.error('❌ [PARTICIPANTS] Erreur générale:', error);
+        
+        // En cas d'erreur, utiliser au moins l'utilisateur actuel
+        setAllTrainingParticipants([{
+          id: participant.id,
+          first_name: participant.first_name,
+          last_name: participant.last_name,
+          job_position: participant.job_position || '',
+          company: participant.company || '',
+          email: '',
+          status: 'Inscrit'
+        }]);
+      }
+    };
+    
+    fetchAllParticipants();
+  }, [training.id, participant.id, participant.first_name, participant.last_name, participant.job_position, participant.company]);
+
+  // Wrapper pour setParticipantSignature qui protège contre les nulls indésirables
+  const safeSetParticipantSignature = useCallback((value: string | null) => {
+    if (value || !signaturesLocked) {
+      setParticipantSignature(value);
+    } else {
+      console.log('🔒 [PROTECT] Tentative de définir participantSignature à null bloquée');
+    }
+  }, [signaturesLocked]);
+
+  // Wrapper pour setCompanySeal qui protège contre les nulls indésirables
+  const safeSetCompanySeal = useCallback((value: string | null) => {
+    if (value || !signaturesLocked) {
+      setCompanySeal(value);
+    } else {
+      console.log('🔒 [PROTECT] Tentative de définir companySeal à null bloquée');
+    }
+  }, [signaturesLocked]);
+
+  // Ajouter la fonction pour mettre à jour la signature du formateur de manière sécurisée (vers ligne 370-380 avec les autres fonctions safe)
+  const safeSetTrainerSignature = useCallback((url: string | null) => {
+    console.log('🔒 [TRAINER] Mise à jour sécurisée de la signature du formateur:', 
+      url ? `${url.substring(0, 50)}...` : 'null');
+    setTrainerSignature(url);
+    setHasTrainerSignature(!!url);
+  }, []);
+
+  // Ajouter ces fonctions auxiliaires avant l'useEffect qui les utilise
+  // Fonction pour récupérer la signature du formateur
+  const loadTrainerSignature = async () => {
+    try {
+      console.log('🔍 [TRAINER] Récupération de la signature du formateur pour la formation:', training.id);
+      
+      if (!training.trainer_id && !training.trainer_name) {
+        console.log('⚠️ [TRAINER] Pas d\'information de formateur disponible pour cette formation');
+        return;
+      }
+      
+      // Variable pour stocker les résultats de la recherche
+      let trainerFound = false;
+      
+      // 1. Essayer d'abord par trainer_id si disponible
+      if (training.trainer_id) {
+        console.log('🔍 [TRAINER] Recherche par trainer_id:', training.trainer_id);
+        
+        // Récupérer la signature du formateur spécifique à cette formation
+        const { data: trainerSigData, error: trainerSigError } = await supabase
+          .from('document_signatures')
+          .select('*')
+          .eq('training_id', training.id)
+          .eq('trainer_id', training.trainer_id)
+          .eq('signature_type', 'trainer')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        
+        if (trainerSigError) {
+          console.error('❌ [TRAINER] Erreur lors de la récupération de la signature du formateur par trainer_id:', trainerSigError);
+        } else if (trainerSigData && trainerSigData.length > 0 && trainerSigData[0].signature_url) {
+          const antiCacheUrl = `${trainerSigData[0].signature_url.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+          console.log('✅ [TRAINER] Signature formateur trouvée pour la formation:', antiCacheUrl.substring(0, 50) + '...');
+          setTrainerSignature(antiCacheUrl);
+          setHasTrainerSignature(true);
+          trainerFound = true;
+        } else {
+          console.log('⚠️ [TRAINER] Aucune signature de formateur trouvée pour cette formation spécifique avec trainer_id');
+        }
+      }
+      
+      // 2. Si pas trouvé avec trainer_id, essayer par trainer_name
+      if (!trainerFound && training.trainer_name) {
+        console.log('🔍 [TRAINER] Recherche par trainer_name:', training.trainer_name);
+        
+        // Chercher dans user_profiles en utilisant first_name et last_name (pas full_name)
+        const { data: trainerUsers, error: trainerUserError } = await supabase
+          .from('user_profiles')
+          .select('id, first_name, last_name')
+          .or(`first_name.ilike.%${training.trainer_name}%,last_name.ilike.%${training.trainer_name}%`)
+          .limit(1);
+        
+        if (trainerUserError) {
+          console.error('❌ [TRAINER] Erreur lors de la recherche du formateur par nom:', trainerUserError);
+        } else if (trainerUsers && trainerUsers.length > 0) {
+          const trainerId = trainerUsers[0].id;
+          console.log('✅ [TRAINER] Formateur trouvé par son nom:', trainerId);
+          
+          // Chercher la signature avec cet ID
+          const { data: trainerNameSig, error: trainerNameError } = await supabase
+            .from('document_signatures')
+            .select('*')
+            .eq('user_id', trainerId)
+            .eq('signature_type', 'trainer')
+            .order('created_at', { ascending: false })
+            .limit(1);
+          
+          if (trainerNameError) {
+            console.error('❌ [TRAINER] Erreur lors de la recherche de signature par ID trouvé:', trainerNameError);
+          } else if (trainerNameSig && trainerNameSig.length > 0 && trainerNameSig[0].signature_url) {
+            const antiCacheUrl = `${trainerNameSig[0].signature_url.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+            console.log('✅ [TRAINER] Signature formateur trouvée par nom:', antiCacheUrl.substring(0, 50) + '...');
+            setTrainerSignature(antiCacheUrl);
+            setHasTrainerSignature(true);
+            trainerFound = true;
+          }
+        } else {
+          console.log('⚠️ [TRAINER] Aucun utilisateur trouvé correspondant au nom du formateur');
+        }
+      }
+      
+      // 3. Si toujours pas trouvé, chercher une signature générique de formateur
+      if (!trainerFound) {
+        console.log('🔍 [TRAINER] Recherche d\'une signature générique de formateur');
+        
+        // Chercher les signatures de type trainer sans condition spécifique
+        const { data: genericTrainerSig, error: genericSigError } = await supabase
+          .from('document_signatures')
+          .select('*')
+          .eq('signature_type', 'trainer')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        
+        if (genericSigError) {
+          console.error('❌ [TRAINER] Erreur lors de la recherche générique de signature formateur:', genericSigError);
+        } else if (genericTrainerSig && genericTrainerSig.length > 0 && genericTrainerSig[0].signature_url) {
+          const antiCacheUrl = `${genericTrainerSig[0].signature_url.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+          console.log('✅ [TRAINER] Signature générique de formateur trouvée:', antiCacheUrl.substring(0, 50) + '...');
+          setTrainerSignature(antiCacheUrl);
+          setHasTrainerSignature(true);
+        } else {
+          console.log('⚠️ [TRAINER] Aucune signature de formateur trouvée (ni spécifique, ni générique)');
+          
+          // Dernière tentative: chercher dans le bucket de stockage
+          try {
+            const { data: storageFiles, error: storageError } = await supabase.storage
+              .from('signatures')
+              .list('', { 
+                search: 'trainer',
+                sortBy: { column: 'created_at', order: 'desc' }
+              });
+            
+            if (storageError) {
+              console.error('❌ [TRAINER] Erreur lors de la recherche dans le bucket signatures:', storageError);
+            } else if (storageFiles && storageFiles.length > 0) {
+              const sigFile = storageFiles[0];
+              console.log('✅ [TRAINER] Fichier de signature trouvé dans le bucket:', sigFile.name);
+              
+              // Générer l'URL du fichier trouvé
+              const { data: urlData } = await supabase.storage
+                .from('signatures')
+                .getPublicUrl(sigFile.name);
+              
+              if (urlData && urlData.publicUrl) {
+                const antiCacheUrl = `${urlData.publicUrl.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+                console.log('✅ [TRAINER] URL de signature générée depuis le bucket:', antiCacheUrl.substring(0, 50) + '...');
+                setTrainerSignature(antiCacheUrl);
+                setHasTrainerSignature(true);
+              }
+            }
+          } catch (storageError) {
+            console.error('❌ [TRAINER] Erreur lors de l\'accès au bucket de stockage:', storageError);
+          }
+        }
+        }
+      } catch (error) {
+      console.error('❌ [TRAINER] Erreur lors du chargement de la signature du formateur:', error);
+    }
+  };
+
+  // Fonction pour récupérer le tampon de l'organisme
+  const fetchOrganizationSeal = async (): Promise<string | null> => {
+    try {
+      console.log('🔍 [ORG_SEAL] Début de la recherche du tampon d\'organisation');
+      
+      // Vérifier d'abord si nous avons déjà ce tampon en cache
+      if (organizationSealRef.current) {
+        console.log('✅ [ORG_SEAL] Tampon d\'organisation déjà en cache');
+        return organizationSealRef.current;
+      }
+      
+      // Chercher d'abord dans document_signatures
+      const { data: sealData, error: sealError } = await supabase
+        .from('document_signatures')
+        .select('*')
+        .eq('signature_type', 'organizationSeal')
+        .order('created_at', { ascending: false })
+        .limit(1);
+      
+      if (sealError) {
+        console.error('❌ [ORG_SEAL] Erreur lors de la recherche dans document_signatures:', sealError);
+      } else if (sealData && sealData.length > 0 && sealData[0].signature_url) {
+        console.log('✅ [ORG_SEAL] Tampon trouvé dans document_signatures:', sealData[0].signature_url.substring(0, 50) + '...');
+        
+        // Ajouter un cache buster pour éviter les problèmes de cache
+        const url = `${sealData[0].signature_url.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+        organizationSealRef.current = url;
+        return url;
+      }
+      
+      // Ensuite, chercher dans le bucket de stockage avec le nom standard
+      try {
+        const { data: storageFiles, error: storageError } = await supabase.storage
+          .from('signatures')
+          .list('', { 
+            search: 'organization_seal',
+            sortBy: { column: 'created_at', order: 'desc' }
+          });
+        
+        if (storageError) {
+          console.error('❌ [ORG_SEAL] Erreur lors de la recherche dans le bucket:', storageError);
+        } else if (storageFiles && storageFiles.length > 0) {
+          // Identifier le fichier le plus récent qui semble être un tampon d'organisation
+          const orgSealFile = storageFiles.find(file => 
+            file.name.includes('organization_seal') || 
+            file.name.includes('organizationSeal')
+          );
+          
+          if (orgSealFile) {
+            console.log('✅ [ORG_SEAL] Tampon trouvé dans le bucket:', orgSealFile.name);
+            
+            // Générer l'URL publique
+            const { data: urlData } = await supabase.storage
+              .from('signatures')
+              .getPublicUrl(orgSealFile.name);
+            
+            if (urlData && urlData.publicUrl) {
+              // Ajouter un cache buster
+              const url = `${urlData.publicUrl.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+              console.log('✅ [ORG_SEAL] URL du tampon générée:', url.substring(0, 50) + '...');
+              
+              // Stocker aussi dans document_signatures pour les futures recherches
+              try {
+                const { error: insertError } = await supabase
+                  .from('document_signatures')
+                  .insert([{
+                    signature_url: urlData.publicUrl,
+                    signature_type: 'organizationSeal',
+                    type: 'convention',
+                    path: orgSealFile.name
+                  }]);
+                
+                if (insertError) {
+                  console.error('❌ [ORG_SEAL] Erreur lors de l\'enregistrement dans document_signatures:', insertError);
+                } else {
+                  console.log('✅ [ORG_SEAL] Tampon enregistré dans document_signatures');
+                }
+              } catch (insertErr) {
+                console.error('❌ [ORG_SEAL] Exception lors de l\'enregistrement:', insertErr);
+              }
+              
+              organizationSealRef.current = url;
+              return url;
+            }
+          }
+        }
+      } catch (bucketErr) {
+        console.error('❌ [ORG_SEAL] Exception lors de la recherche dans le bucket:', bucketErr);
+      }
+      
+      // Enfin, chercher dans les settings
+      try {
+        const { data: settingsData, error: settingsError } = await supabase
+          .from('settings')
+          .select('organization_seal_url, organization_seal_path')
+          .single();
+        
+        if (settingsError) {
+          console.error('❌ [ORG_SEAL] Erreur lors de la recherche dans settings:', settingsError);
+        } else if (settingsData && settingsData.organization_seal_url) {
+          console.log('✅ [ORG_SEAL] Tampon trouvé dans settings:', settingsData.organization_seal_url.substring(0, 50) + '...');
+          
+          // Ajouter un cache buster
+          const url = `${settingsData.organization_seal_url.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+          organizationSealRef.current = url;
+          return url;
+        } else if (settingsData && settingsData.organization_seal_path) {
+          // Si nous avons un chemin mais pas d'URL, générer l'URL
+          console.log('🔍 [ORG_SEAL] Tentative de génération d\'URL à partir du chemin:', settingsData.organization_seal_path);
+          
+          const { data: urlData } = await supabase.storage
+            .from('signatures')
+            .getPublicUrl(settingsData.organization_seal_path);
+          
+          if (urlData && urlData.publicUrl) {
+            // Ajouter un cache buster
+            const url = `${urlData.publicUrl.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+            console.log('✅ [ORG_SEAL] URL générée à partir du chemin:', url.substring(0, 50) + '...');
+            organizationSealRef.current = url;
+            return url;
+          }
+        }
+      } catch (settingsErr) {
+        console.error('❌ [ORG_SEAL] Exception lors de la recherche dans settings:', settingsErr);
+      }
+      
+      console.log('⚠️ [ORG_SEAL] Aucun tampon d\'organisation trouvé après recherche complète');
+      return null;
+    } catch (error) {
+      console.error('❌ [ORG_SEAL] Exception générale lors de la recherche du tampon:', error);
+      return null;
+    }
+  };
+
+  // Effet pour charger les signatures depuis Supabase (asynchrone, après le premier rendu)
+  useEffect(() => {
+    const loadSignaturesFromSupabase = async () => {
+      try {
+        // Vérifier si nous avons chargé les signatures récemment
+        const now = Date.now();
+        const timeSinceLastLoad = now - lastSignatureLoadTimeRef.current;
+        
+        // Ne charger que toutes les 30 secondes maximum
+        if (timeSinceLastLoad < 30000 && lastSignatureLoadTimeRef.current > 0) {
+          console.log(`⏱️ [THROTTLE] Chargement des signatures ignoré (dernier chargement il y a ${Math.round(timeSinceLastLoad/1000)}s, minimum 30s)`);
+          return;
+        }
+    
+        // Mettre à jour le timestamp du dernier chargement
+        lastSignatureLoadTimeRef.current = now;
+        
+        console.log('🔄 [SUPABASE] Chargement des signatures depuis Supabase:', {
+          training_id: training.id,
+          user_id: participant.id,
+          trainer_id: training.trainer_id || 'NON SPÉCIFIÉ',
+          type: 'convention'
+        });
+        
+        // Toujours charger les signatures de Supabase, même si on a déjà vérifié
+        signaturesLoadedRef.current = false;
+        
+        // 1. Récupérer la signature du participant
+        console.log('🔍 [PARTICIPANT] Diagnostic de recherche - paramètres:', { 
+          training_id: training.id, 
+          participant_id: participant.id 
+        });
+
+        // Vérifier d'abord avec tous les critères
+        const { data: participantSigData, error: participantSigError } = await supabase
+          .from('document_signatures')
+          .select('*')
+          .eq('training_id', training.id)
+          .eq('user_id', participant.id)
+          .eq('signature_type', 'participant')
+          .order('created_at', { ascending: false })
+          .limit(10);
+
+        // Log le résultat pour diagnostiquer le problème
+        console.log('🔍 [PARTICIPANT] Résultat de la requête principale:', { 
+          found: participantSigData?.length || 0,
+          error: participantSigError ? 'Erreur présente' : 'Pas d\'erreur'
+        });
+
+        if (participantSigError) {
+          console.error('❌ [PARTICIPANT] Erreur lors de la récupération de la signature:', participantSigError);
+        } else if (participantSigData && participantSigData.length > 0) {
+          // Log toutes les signatures trouvées pour analyse
+          participantSigData.forEach((sig, index) => {
+            console.log(`🔍 [PARTICIPANT] Signature #${index + 1}:`, {
+              id: sig.id,
+              url: sig.signature_url ? sig.signature_url.substring(0, 30) + '...' : 'NULL',
+              date: sig.created_at,
+              type: sig.signature_type
+            });
+          });
+          
+          // Si nous avons trouvé des signatures valides, utiliser la première
+          const validSignature = participantSigData.find(sig => sig.signature_url);
+          
+          if (validSignature) {
+            const antiCacheUrl = `${validSignature.signature_url.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+            console.log('✅ [PARTICIPANT] Signature valide trouvée:', antiCacheUrl.substring(0, 50) + '...');
+            safeSetParticipantSignature(antiCacheUrl);
+            setIsSigned(true);
+            setHasParticipantSignature(true);
+          } else {
+            console.log('⚠️ [PARTICIPANT] Signatures trouvées mais aucune URL valide');
+          }
+        } else {
+          console.log('⚠️ [PARTICIPANT] Aucune signature trouvée avec critères stricts, recherche élargie');
+          
+          // Recherche élargie sans le training_id
+          const { data: widerSearchData, error: widerSearchError } = await supabase
+            .from('document_signatures')
+            .select('*')
+            .eq('user_id', participant.id)
+            .eq('signature_type', 'participant')
+            .order('created_at', { ascending: false })
+            .limit(5);
+          
+          console.log('🔍 [PARTICIPANT] Résultat recherche élargie:', { 
+            found: widerSearchData?.length || 0,
+            error: widerSearchError ? 'Erreur présente' : 'Pas d\'erreur'
+          });
+          
+          if (widerSearchData && widerSearchData.length > 0 && widerSearchData[0].signature_url) {
+            const antiCacheUrl = `${widerSearchData[0].signature_url.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+            console.log('✅ [PARTICIPANT] Signature trouvée via recherche élargie:', antiCacheUrl.substring(0, 50) + '...');
+            safeSetParticipantSignature(antiCacheUrl);
+            setIsSigned(true);
+            setHasParticipantSignature(true);
+          } else {
+            console.log('⚠️ [PARTICIPANT] Aucune signature trouvée, tentative avec le bucket de stockage');
+            
+            // Recherche directe dans le bucket de stockage
+            try {
+              // Rechercher avec des motifs potentiels
+              const searchPatterns = [
+                `participant_${participant.id}_${training.id}`,
+                `participant_${participant.id}`,
+                `${participant.first_name.toLowerCase()}_${participant.last_name.toLowerCase()}`
+              ];
+              
+              let foundSignature = false;
+              
+              for (const pattern of searchPatterns) {
+                if (foundSignature) break;
+                
+                console.log(`🔍 [PARTICIPANT] Recherche dans bucket avec pattern: ${pattern}`);
+                
+                const { data: storageFiles, error: storageError } = await supabase.storage
+                  .from('signatures')
+                  .list('', { 
+                    search: pattern,
+                    sortBy: { column: 'created_at', order: 'desc' }
+                  });
+                
+                if (storageError) {
+                  console.error(`❌ [PARTICIPANT] Erreur recherche storage pattern ${pattern}:`, storageError);
+                  continue;
+                }
+                
+                console.log(`🔍 [PARTICIPANT] Résultats pour pattern ${pattern}:`, storageFiles?.length || 0);
+                
+                if (storageFiles && storageFiles.length > 0) {
+                  // Filtrer pour ne garder que les fichiers signature/participant
+                  const relevantFiles = storageFiles.filter(file => 
+                    file.name.includes('participant') || 
+                    file.name.includes('signature')
+                  );
+                  
+                  if (relevantFiles.length > 0) {
+                    const mostRecentFile = relevantFiles[0];
+                    console.log('✅ [PARTICIPANT] Fichier signature trouvé dans bucket:', mostRecentFile.name);
+                    
+                    // Générer l'URL
+                    const { data: urlData } = await supabase.storage
+                      .from('signatures')
+                      .getPublicUrl(mostRecentFile.name);
+                    
+                    if (urlData && urlData.publicUrl) {
+                      const antiCacheUrl = `${urlData.publicUrl.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+                      console.log('✅ [PARTICIPANT] URL générée depuis bucket:', antiCacheUrl.substring(0, 50) + '...');
+                      
+                      // Enregistrer aussi dans document_signatures pour les futures recherches
+                      try {
+                        const { data: insertData, error: insertError } = await supabase
+                          .from('document_signatures')
+                          .insert([{
+                            user_id: participant.id,
+                            training_id: training.id,
+                            signature_url: urlData.publicUrl,
+                            signature_type: 'participant',
+                            type: 'convention',
+                            path: mostRecentFile.name
+                          }]);
+                        
+                        if (insertError) {
+                          console.error('❌ [PARTICIPANT] Erreur lors de l\'enregistrement de la référence:', insertError);
+                        } else {
+                          console.log('✅ [PARTICIPANT] Référence enregistrée dans document_signatures');
+                        }
+                      } catch (insertErr) {
+                        console.error('❌ [PARTICIPANT] Exception lors de l\'enregistrement de la référence:', insertErr);
+                      }
+                      
+                      safeSetParticipantSignature(antiCacheUrl);
+                      setIsSigned(true);
+                      setHasParticipantSignature(true);
+                      foundSignature = true;
+                      break;
+                    }
+                  }
+                }
+              }
+            } catch (storageErr) {
+              console.error('❌ [PARTICIPANT] Exception lors de la recherche dans le bucket:', storageErr);
+            }
+          }
+        }
+        
+        // 2. Récupérer le tampon de l'entreprise
+        console.log('🔍 [COMPANY] Diagnostic de recherche du tampon d\'entreprise - paramètres:', {
+          training_id: training.id,
+          user_id: participant.id,
+          company_id: training.company_id || 'NON SPÉCIFIÉ'
+        });
+        
+        // Stratégie 1: Chercher par training_id et user_id
+        let { data: companySealData, error: companySealError } = await supabase
+          .from('document_signatures')
+          .select('*')
+          .eq('training_id', training.id)
+          .eq('user_id', participant.id)
+          .eq('signature_type', 'companySeal')
+          .order('created_at', { ascending: false })
+          .limit(5);
+        
+        console.log('🔍 [COMPANY] Résultat recherche par training_id et user_id:', {
+          found: companySealData?.length || 0,
+          error: companySealError ? 'Erreur présente' : 'Pas d\'erreur'
+        });
+
+        // Stratégie 2: Si aucun résultat ou erreur, rechercher par company_id si disponible
+        if ((!companySealData || companySealData.length === 0) && training.company_id) {
+          console.log('🔍 [COMPANY] Recherche par company_id:', training.company_id);
+          
+          const { data: companyData, error: companyError } = await supabase
+            .from('document_signatures')
+            .select('*')
+            .eq('company_id', training.company_id)
+            .eq('signature_type', 'companySeal')
+            .order('created_at', { ascending: false })
+            .limit(5);
+          
+          console.log('🔍 [COMPANY] Résultat recherche par company_id:', { 
+            found: companyData?.length || 0,
+            error: companyError ? 'Erreur présente' : 'Pas d\'erreur' 
+          });
+          
+          if (companyError) {
+            console.error('❌ [COMPANY] Erreur lors de la recherche par company_id:', companyError);
+          } else if (companyData && companyData.length > 0) {
+            companySealData = companyData;
+            companySealError = null;
+          }
+        }
+        
+        // Traitement des résultats du tampon d'entreprise
+        if (companySealError) {
+          console.error('❌ [COMPANY] Erreur lors de la récupération du tampon:', companySealError);
+        } else if (companySealData && companySealData.length > 0) {
+          // Log tous les tampons trouvés pour diagnostic
+          companySealData.forEach((seal, index) => {
+            console.log(`🔍 [COMPANY] Tampon #${index + 1}:`, {
+              id: seal.id,
+              url: seal.signature_url ? seal.signature_url.substring(0, 30) + '...' : 'NULL',
+              date: seal.created_at
+            });
+          });
+          
+          // Si nous avons trouvé des tampons valides, utiliser le premier
+          const validSeal = companySealData.find(seal => seal.signature_url);
+          
+          if (validSeal) {
+            const antiCacheUrl = `${validSeal.signature_url.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+            console.log('✅ [COMPANY] Tampon valide trouvé:', antiCacheUrl.substring(0, 50) + '...');
+            safeSetCompanySeal(antiCacheUrl);
+          } else {
+            console.log('⚠️ [COMPANY] Tampons trouvés mais aucune URL valide');
+          }
+        } else {
+          console.log('⚠️ [COMPANY] Aucun tampon trouvé dans document_signatures, tentative via le bucket');
+          
+          // Recherche directe dans le bucket de stockage
+          try {
+            // Rechercher avec des motifs potentiels
+            const searchPatterns = [
+              `companyseal_${participant.id}_${training.id}`,
+              `companyseal_${participant.id}`,
+              training.company_id ? `companyseal_${training.company_id}` : ''
+            ].filter(pattern => pattern); // Filtrer les chaînes vides
+            
+            let foundSeal = false;
+            
+            for (const pattern of searchPatterns) {
+              if (foundSeal) break;
+              
+              console.log(`🔍 [COMPANY] Recherche dans bucket avec pattern: ${pattern}`);
+              
+              const { data: storageFiles, error: storageError } = await supabase.storage
+                .from('signatures')
+                .list('', { 
+                  search: pattern,
+                  sortBy: { column: 'created_at', order: 'desc' }
+                });
+              
+              if (storageError) {
+                console.error(`❌ [COMPANY] Erreur recherche storage pattern ${pattern}:`, storageError);
+                continue;
+              }
+              
+              console.log(`🔍 [COMPANY] Résultats pour pattern ${pattern}:`, storageFiles?.length || 0);
+              
+              if (storageFiles && storageFiles.length > 0) {
+                // Filtrer pour ne garder que les fichiers de tampon d'entreprise
+                const relevantFiles = storageFiles.filter(file => 
+                  file.name.includes('companySeal') || 
+                  file.name.includes('companyseal') ||
+                  file.name.includes('company_seal')
+                );
+                
+                if (relevantFiles.length > 0) {
+                  const mostRecentFile = relevantFiles[0];
+                  console.log('✅ [COMPANY] Fichier tampon trouvé dans bucket:', mostRecentFile.name);
+                  
+                  // Générer l'URL
+                  const { data: urlData } = await supabase.storage
+                    .from('signatures')
+                    .getPublicUrl(mostRecentFile.name);
+                  
+                  if (urlData && urlData.publicUrl) {
+                    const antiCacheUrl = `${urlData.publicUrl.split('?')[0]}?t=${Date.now()}&forcereload=true`;
+                    console.log('✅ [COMPANY] URL du tampon générée depuis bucket:', antiCacheUrl.substring(0, 50) + '...');
+                    
+                    // Enregistrer aussi dans document_signatures pour les futures recherches
+                    try {
+                      const { data: insertData, error: insertError } = await supabase
+                        .from('document_signatures')
+                        .insert([{
+                          user_id: participant.id,
+                          training_id: training.id,
+                          company_id: training.company_id,
+                          signature_url: urlData.publicUrl,
+                          signature_type: 'companySeal',
+                          type: 'convention',
+                          path: mostRecentFile.name
+                        }]);
+                      
+                      if (insertError) {
+                        console.error('❌ [COMPANY] Erreur lors de l\'enregistrement de la référence:', insertError);
+                      } else {
+                        console.log('✅ [COMPANY] Référence enregistrée dans document_signatures');
+                      }
+                    } catch (insertErr) {
+                      console.error('❌ [COMPANY] Exception lors de l\'enregistrement de la référence:', insertErr);
+                    }
+                    
+                    safeSetCompanySeal(antiCacheUrl);
+                    foundSeal = true;
+                    break;
+                  }
+                }
+              }
+            }
+            
+            if (!foundSeal) {
+              console.log('⚠️ [COMPANY] Aucun tampon d\'entreprise trouvé dans le bucket après recherche approfondie');
+            }
+          } catch (storageErr) {
+            console.error('❌ [COMPANY] Exception lors de la recherche dans le bucket:', storageErr);
+          }
+        }
+        
+        // 3. Récupérer la signature du formateur pour cette formation spécifique
+        await loadTrainerSignature();
+        
+        // 4. Récupérer le tampon d'organisme (qui est global)
+        await fetchOrganizationSeal();
+        
+        // Mettre à jour le cache avec les signatures trouvées
+        updateSignatureCache(
+          participantSignature,
+          companySeal,
+          organizationSeal,
+          trainerSignature
+        );
+        
+        signaturesLoadedRef.current = true;
+    } catch (error) {
+        console.error('❌ [SUPABASE] Erreur lors du chargement des signatures:', error);
+      }
+    };
+    
+    // Lancer le chargement asynchrone
+    loadSignaturesFromSupabase();
+  }, [training.id, participant.id, safeSetParticipantSignature, safeSetCompanySeal, participantSignature, companySeal, organizationSeal, trainerSignature, updateSignatureCache, loadTrainerSignature, fetchOrganizationSeal, training.company_id]);
+
+  // Moniteur d'état des signatures
+  useEffect(() => {
+    console.log('👁️ [MONITOR] État des signatures:', {
+      participantSignature: participantSignature ? '✅ Présente' : '❌ Absente',
+      companySeal: companySeal ? '✅ Présent' : '❌ Absent',
+      trainerSignature: trainerSignature ? '✅ Présente' : '❌ Absente',
+      signaturesLocked: signaturesLocked ? '🔒 Verrouillées' : '🔓 Déverrouillées'
+    });
+  }, [participantSignature, companySeal, trainerSignature, signaturesLocked]);
+
+  // Effet pour vérifier l'accessibilité des tampons dès le chargement
+  useEffect(() => {
+    const verifySeals = async () => {
+      if (companySeal || organizationSeal) {
+        console.log('🔍 [INITIALIZATION] Vérification de l\'accessibilité des tampons');
+        
+        try {
+          // Importer de manière dynamique pour éviter les problèmes de référence circulaire
+          const { checkSealAccess } = await import('../utils/SignatureUtils');
+          
+          // Vérifier et potentiellement optimiser les URLs des tampons
+          const { companySeal: optimizedCompanySeal, organizationSeal: optimizedOrgSeal, diagnosticMessage } = 
+            await checkSealAccess({
+              companySeal,
+              organizationSeal
+            });
+          
+          console.log(`🔍 [INITIALIZATION] Diagnostic des tampons: ${diagnosticMessage}`);
+          
+          // Mettre à jour les URLs si elles ont été optimisées
+          if (optimizedCompanySeal && optimizedCompanySeal !== companySeal) {
+            console.log('🔍 [INITIALIZATION] Mise à jour de l\'URL du tampon d\'entreprise');
+            setCompanySeal(optimizedCompanySeal);
+          }
+          
+          if (optimizedOrgSeal && optimizedOrgSeal !== organizationSeal) {
+            console.log('🔍 [INITIALIZATION] Mise à jour de l\'URL du tampon d\'organisme');
+            setOrganizationSeal(optimizedOrgSeal);
+          }
+          
+          // Retourner le résultat pour un usage ultérieur
+          return { companySeal: optimizedCompanySeal, organizationSeal: optimizedOrgSeal };
+        } catch (error) {
+          console.error('❌ [ERROR] Erreur lors de la vérification des tampons:', error);
+          return { companySeal, organizationSeal };
+        }
+      }
+      
+      return { companySeal, organizationSeal };
+    };
+    
+    // Lancer la vérification
+    verifySeals();
+  }, [companySeal, organizationSeal]);
+
+  useEffect(() => {
+    // Créer un élément div pour le portail s'il n'existe pas déjà
+    const existingPortal = document.getElementById('training-agreement-portal');
+    if (existingPortal) {
+      setPortalElement(existingPortal);
+    } else {
+      const newPortalElement = document.createElement('div');
+      newPortalElement.id = 'training-agreement-portal';
+      document.body.appendChild(newPortalElement);
+      setPortalElement(newPortalElement);
+    }
+
+    // Appeler onDocumentOpen si fourni
+    if (onDocumentOpen) {
+      onDocumentOpen();
+    }
+    
+    // Désactiver le cache des images pour les signatures
+    const meta = document.createElement('meta');
+    meta.httpEquiv = 'Cache-Control';
+    meta.content = 'no-cache, no-store, must-revalidate';
+    document.head.appendChild(meta);
+    
+    const pragmaMeta = document.createElement('meta');
+    pragmaMeta.httpEquiv = 'Pragma';
+    pragmaMeta.content = 'no-cache';
+    document.head.appendChild(pragmaMeta);
+    
+    const expiresMeta = document.createElement('meta');
+    expiresMeta.httpEquiv = 'Expires';
+    expiresMeta.content = '0';
+    document.head.appendChild(expiresMeta);
+
+    // Configurer les options de visualisation pour les images externes
+    document.querySelectorAll('img').forEach(img => {
+      img.setAttribute('crossorigin', 'anonymous');
+      
+      // Si c'est une signature, appliquer des attributs supplémentaires
+      if (img.src.includes('signatures/') || img.alt?.toLowerCase().includes('signature')) {
+        img.setAttribute('loading', 'eager');
+        img.setAttribute('decoding', 'async');
+        img.style.visibility = 'visible';
+        img.style.display = 'block';
+      }
+    });
+
+    // Cleanup function
+    return () => {
+      // Appeler onDocumentClose si fourni et s'il n'a pas déjà été appelé
+      if (onDocumentClose && !documentCloseCalled.current) {
+        documentCloseCalled.current = true;
+        onDocumentClose();
+      }
+      
+      // Nettoyer les meta tags
+      document.querySelectorAll('meta[http-equiv="Cache-Control"]').forEach(el => el.remove());
+      document.querySelectorAll('meta[http-equiv="Pragma"]').forEach(el => el.remove());
+      document.querySelectorAll('meta[http-equiv="Expires"]').forEach(el => el.remove());
+      
+      const portal = document.getElementById('training-agreement-portal');
+      if (portal && portal.childNodes.length === 0) {
+        portal.remove();
+      }
+    };
+  }, []);
+
+  // Effet pour récupérer les données de l'entreprise et de l'organisme
+  useEffect(() => {
+    const fetchCompanyAndSettings = async () => {
+      try {
+        // Récupérer les paramètres de l'organisme de formation
+        const { data: settingsData, error: settingsError } = await supabase
+          .from('settings')
+          .select('*')
+          .single();
+
+        if (settingsError) {
+          console.error('Erreur lors de la récupération des paramètres:', settingsError);
+        } else if (settingsData) {
+          // Transformer les données dans le format attendu par le template
+          const formattedSettings: OrganizationSettings = {
+            organization_name: settingsData.company_name || 'PETITMAKER',
+            siret: settingsData.siret || '928 386 044 00012',
+            address: settingsData.address || '2 rue Héraclès',
+            postal_code: settingsData.postal_code || '59650',
+            city: settingsData.city || 'Villeneuve-d\'Ascq',
+            country: settingsData.country || 'France',
+            representative_name: 'Nicolas Cleton',
+            representative_title: 'Président',
+            activity_declaration_number: settingsData.training_number || '32 59 10753 59',
+            organization_seal_url: settingsData.organization_seal_url
+          };
+          setOrganizationSettings(formattedSettings);
+        }
+
+        // Récupérer les données complètes de la formation pour corriger les problèmes de format des données
+        const { data: fullTrainingData, error: fullTrainingError } = await supabase
+          .from('trainings')
+          .select('*')
+          .eq('id', training.id)
+          .single();
+        
+        if (fullTrainingError) {
+          console.error('Erreur lors de la récupération des données complètes de la formation:', fullTrainingError);
+        } else if (fullTrainingData) {
+          console.log('✅ [DATA] Données complètes de la formation récupérées:', fullTrainingData);
+          console.log('✅ [PRICE] Prix récupéré:', fullTrainingData.price);
+          
+          // S'assurer que le prix est bien un nombre ou null
+          const price = fullTrainingData.price !== undefined ? 
+            (typeof fullTrainingData.price === 'string' ? parseFloat(fullTrainingData.price) : fullTrainingData.price) : 
+            null;
+          
+          // Parser correctement les données qui sont parfois stockées sous forme de chaînes JSON
+          const parsedTraining = {
+            ...training,
+            price: price,
+            objectives: parseJsonField(fullTrainingData.objectives) || training.objectives,
+            evaluation_methods: parseJsonField(fullTrainingData.evaluation_methods) || training.evaluation_methods,
+            tracking_methods: parseJsonField(fullTrainingData.tracking_methods) || training.tracking_methods,
+            pedagogical_methods: parseJsonField(fullTrainingData.pedagogical_methods) || training.pedagogical_methods,
+            material_elements: parseJsonField(fullTrainingData.material_elements) || training.material_elements,
+          };
+          
+          console.log('🔄 [DATA] Données de formation parsées:', parsedTraining);
+          console.log('🔄 [PRICE] Prix après parsing:', parsedTraining.price);
+          
+          // Mise à jour directe des propriétés de l'objet training
+          Object.assign(training, parsedTraining);
+        }
+
+        // Récupérer les informations sur la société associée à la formation
+        if (training.company_id) {
+          const { data: companyData, error: companyError } = await supabase
+            .from('companies')
+            .select('*')
+            .eq('id', training.company_id)
+            .single();
+
+          if (companyError) {
+            console.error('Erreur lors de la récupération de la société:', companyError);
+            
+            // Si pas de company_id mais que le participant a une entreprise renseignée, essayer de la trouver
+            if (participant.company) {
+              console.log('🔍 [DEBUG] Pas de company_id trouvée, recherche par nom:', participant.company);
+              
+              const { data: companyByNameData, error: companyByNameError } = await supabase
+                .from('companies')
+                .select('*')
+                .ilike('name', `%${participant.company}%`)
+                .limit(1)
+                .single();
+              
+              if (companyByNameError) {
+                console.log('⚠️ [WARN] Entreprise non trouvée par nom:', companyByNameError);
+                
+                // Créer une entreprise de base à partir du nom
+                setCompany({
+                  name: participant.company,
+                  address: participant.company ? 'Adresse non renseignée' : 'À compléter',
+                  postal_code: '',
+                  city: '',
+                  siret: participant.company ? 'SIRET non renseigné' : 'À compléter'
+                });
+              } else if (companyByNameData) {
+                console.log('✅ [SUCCESS] Entreprise trouvée par nom:', companyByNameData);
+                setCompany(companyByNameData);
+              }
+            } else {
+              // Si pas d'entreprise renseignée, utiliser une valeur par défaut
+              setCompany({
+                name: 'À compléter',
+                address: 'À compléter',
+                postal_code: '',
+                city: '',
+                siret: 'À compléter'
+              });
+            }
+          } else if (companyData) {
+            setCompany(companyData);
+          }
+        } else if (participant.company) {
+          // Si pas de company_id mais que le participant a une entreprise renseignée, essayer de la trouver
+          console.log('🔍 [DEBUG] Pas de company_id, recherche par nom:', participant.company);
+          
+          const { data: companyByNameData, error: companyByNameError } = await supabase
+            .from('companies')
+            .select('*')
+            .ilike('name', `%${participant.company}%`)
+            .limit(1)
+            .single();
+          
+          if (companyByNameError) {
+            console.log('⚠️ [WARN] Entreprise non trouvée par nom:', companyByNameError);
+            
+            // Créer une entreprise de base à partir du nom
+            setCompany({
+              name: participant.company,
+              address: participant.company ? 'Adresse non renseignée' : 'À compléter',
+              postal_code: '',
+              city: '',
+              siret: participant.company ? 'SIRET non renseigné' : 'À compléter'
+            });
+          } else if (companyByNameData) {
+            console.log('✅ [SUCCESS] Entreprise trouvée par nom:', companyByNameData);
+            setCompany(companyByNameData);
+          }
+        } else {
+          // Si pas d'entreprise renseignée, utiliser une valeur par défaut
+          setCompany({
+            name: 'À compléter',
+            address: 'À compléter',
+            postal_code: '',
+            city: '',
+            siret: 'À compléter'
+          });
+                      }
+                    } catch (error) {
+        console.error('Erreur lors de la récupération des données:', error);
+                    }
+                  };
+                  
+                  fetchCompanyAndSettings();
+  }, [training.company_id, participant.company]);
+
+  // Après avoir reçu la signature du participant
+  useEffect(() => {
+    if (participantSignature) {
+      setHasParticipantSignature(true);
+    }
+  }, [participantSignature]);
+
+  // Effet pour récupérer le tampon de l'organisme et le mémoriser
+  useEffect(() => {
+    const checkAndLoadOrganizationSeal = async () => {
+      try {
+        // D'abord vérifier dans le cache
+        const cachedSeal = initialSignatures.organizationSeal;
+        if (cachedSeal) {
+          console.log('✅ [ORG_SEAL] Tampon trouvé dans le cache:', cachedSeal);
+          setOrganizationSeal(cachedSeal);
+          // Actualiser aussi le cache pour ne pas perdre l'information
+          updateSignatureCache(participantSignature, companySeal, cachedSeal, trainerSignature);
+          return;
+        }
+        
+        // Vérifier si nous avons déjà une URL de tampon dans les paramètres de l'organisme
+        if (organizationSettings?.organization_seal_url) {
+          console.log('✅ [ORG_SEAL] URL du tampon trouvée dans les paramètres:', organizationSettings.organization_seal_url);
+          
+          // Ajouter un paramètre anticache
+          const baseUrl = organizationSettings.organization_seal_url.split('?')[0];
+          const timestamp = Date.now();
+          const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+          
+          // Attribuer directement l'URL au tampon d'organisme
+          setOrganizationSeal(antiCacheUrl);
+          // Mettre à jour le cache également
+          updateSignatureCache(participantSignature, companySeal, antiCacheUrl, trainerSignature);
+          return;
+        }
+        
+        // Si aucune URL n'est présente dans les paramètres, rechercher dans les signatures
+        const { data: sealData, error: sealError } = await supabase
+          .from('document_signatures')
+          .select('signature_url')
+          .eq('signature_type', 'organizationSeal')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
+          
+        if (sealError) {
+          console.log('⚠️ [ORG_SEAL] Aucun tampon trouvé dans document_signatures:', sealError);
+          return;
+        }
+        
+        if (sealData && sealData.signature_url) {
+          console.log('✅ [ORG_SEAL] Tampon trouvé dans document_signatures:', sealData.signature_url);
+          
+          // Ajouter un paramètre anticache
+          const baseUrl = sealData.signature_url.split('?')[0];
+          const timestamp = Date.now();
+          const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+          
+          // Attribuer l'URL au tampon d'organisme
+          setOrganizationSeal(antiCacheUrl);
+          // Mettre à jour le cache également
+          updateSignatureCache(participantSignature, companySeal, antiCacheUrl, trainerSignature);
+        }
+      } catch (error) {
+        console.error('❌ [ORG_SEAL] Erreur lors de la récupération du tampon d\'organisme:', error);
+      }
+    };
+    
+    // Exécuter seulement si nous avons les paramètres de l'organisme et que le tampon n'est pas déjà défini
+    if ((organizationSettings || initialSignatures.organizationSeal) && !organizationSeal) {
+      checkAndLoadOrganizationSeal();
+    }
+  }, [organizationSettings, organizationSeal, initialSignatures, updateSignatureCache, participantSignature, companySeal, trainerSignature]);
+
+  // Lors de la signature locale
+  const handleSignatureComplete = (dataURL: string) => {
+    setLocalSignatureDataURL(dataURL);
+    setHasParticipantSignature(true);
+  };
+
+  const generatePDF = async () => {
+    if (!pdfContentRef.current) return;
+    
+    try {
+      // Générer un nom de fichier basé sur le nom du participant et le titre de la formation
+      const fileName = `Convention_${participant.first_name}_${participant.last_name}_${training.title.replace(/\s+/g, '_')}.pdf`;
+      
+      // Utiliser html2pdf pour générer et afficher le PDF
+      const pdfBlob = await html2pdf().from(pdfContentRef.current).outputPdf('blob');
+      
+      // Créer une URL du blob et l'ouvrir dans une nouvelle fenêtre
+      const blobUrl = URL.createObjectURL(pdfBlob);
+      window.open(blobUrl, '_blank');
+    } catch (error) {
+      console.error('Erreur lors de la génération du PDF:', error);
+      alert('Une erreur est survenue lors de la génération du PDF. Veuillez réessayer.');
+    }
+  };
+
+  const formatDate = (dateString: string | null) => {
+    if (!dateString) return '';
+    try {
+      const date = new Date(dateString);
+      return format(date, 'dd/MM/yyyy', { locale: fr });
+    } catch (e) {
+      console.error('Erreur de formatage de date:', e);
+      return dateString;
+    }
+  };
+
+  const getCurrentDate = () => {
+    return format(new Date(), 'dd MMMM yyyy', { locale: fr });
+  };
+
+  const getTrainingDates = () => {
+    const startDate = formatDate(training.start_date);
+    const endDate = formatDate(training.end_date);
+    
+    if (startDate && endDate) {
+      if (startDate === endDate) {
+        return `Le ${startDate}`;
+      }
+      return `Du ${startDate} au ${endDate}`;
+    }
+    return 'Dates à définir';
+  };
+
+  const getObjectives = () => {
+    // Gérer les différents formats d'objectifs possibles
+    if (Array.isArray(training.objectives) && training.objectives.length > 0) {
+      return training.objectives;
+    }
+    
+    if (typeof training.objectives === 'string') {
+      try {
+        // Tenter de parser si c'est un JSON stringifié
+        const parsed = JSON.parse(training.objectives);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        } else if (typeof parsed === 'object') {
+          // Si c'est un objet, extraire ses valeurs
+          return Object.values(parsed).filter(v => !!v);
+        }
+        // Sinon, traiter comme une chaîne
+        return [training.objectives];
+      } catch {
+        // Si ce n'est pas du JSON valide, traiter comme une chaîne simple
+        return [training.objectives];
+      }
+    }
+    
+    return ['Objectifs à définir'];
+  };
+
+  const getEvaluationMethods = () => {
+    const methods = [];
+    const evals = training.evaluation_methods || {};
+    
+    if (evals.profile_evaluation) methods.push('Évaluation de profil');
+    if (evals.skills_evaluation) methods.push('Évaluation des compétences');
+    if (evals.knowledge_evaluation) methods.push('Évaluation des connaissances');
+    if (evals.satisfaction_survey) methods.push('Questionnaire de satisfaction');
+    
+    return methods.length > 0 ? methods : ['Méthode d\'évaluation à définir'];
+  };
+
+  const getPedagogicalMethods = () => {
+    const methods = [];
+    const pedagogy = training.pedagogical_methods || {};
+    
+    if (pedagogy.needs_evaluation) methods.push('Évaluation des besoins');
+    if (pedagogy.theoretical_content) methods.push('Contenu théorique');
+    if (pedagogy.practical_exercises) methods.push('Exercices pratiques');
+    if (pedagogy.case_studies) methods.push('Études de cas');
+    if (pedagogy.experience_sharing) methods.push('Partage d\'expérience');
+    if (pedagogy.digital_support) methods.push('Support numérique');
+    
+    return methods.length > 0 ? methods : ['Méthodes pédagogiques à définir'];
+  };
+
+  const getMaterialElements = () => {
+    const elements = [];
+    const material = training.material_elements || {};
+    
+    if (material.computer_provided) elements.push('Ordinateur fourni');
+    if (material.pedagogical_material) elements.push('Support pédagogique');
+    if (material.digital_support_provided) elements.push('Support numérique fourni');
+    
+    return elements.length > 0 ? elements : ['Éléments matériels à définir'];
+  };
+
+  // Fonction pour trouver les signatures dans le document
+  const findSignatureImagesInDocument = (): { participantImage?: HTMLImageElement; representativeImage?: HTMLImageElement } => {
+    const result: { participantImage?: HTMLImageElement; representativeImage?: HTMLImageElement } = {};
+    
+    if (!pdfContentRef.current) {
+      console.log('🔍 [DEBUG] pdfContentRef est null, impossible de chercher les signatures');
+      return result;
+    }
+    
+    // Rechercher avec les sélecteurs les plus précis en premier
+    // 1. Rechercher par attributs data-* spécifiques (méthode la plus fiable)
+    const dataSignatureImages = pdfContentRef.current.querySelectorAll('[data-signature="true"]');
+    console.log(`🔍 [DEBUG] ${dataSignatureImages.length} images avec attribut data-signature="true" trouvées`);
+    
+    if (dataSignatureImages.length > 0) {
+      dataSignatureImages.forEach((img) => {
+        const imgEl = img as HTMLImageElement;
+        const type = imgEl.getAttribute('data-signature-type');
+        console.log(`🔍 [DEBUG] Image de signature trouvée avec type: ${type}`, imgEl);
+        
+        if (type === 'participant') {
+          result.participantImage = imgEl;
+          console.log('✅ [DEBUG] Image de signature du participant trouvée dans le document');
+        } else if (type === 'representative') {
+          result.representativeImage = imgEl;
+          console.log('✅ [DEBUG] Image de signature du représentant trouvée dans le document');
+        }
+      });
+    }
+    
+    // 2. Si les attributs data-* n'ont pas fonctionné, rechercher par conteneurs parents
+    if (!result.participantImage || !result.representativeImage) {
+      console.log('🔍 [DEBUG] Recherche de signatures par conteneurs parents');
+      
+      // Rechercher les conteneurs de signature
+      const participantContainer = pdfContentRef.current.querySelector('[data-signature-container="participant"]');
+      const representativeContainer = pdfContentRef.current.querySelector('[data-signature-container="representative"]');
+      
+      if (participantContainer && !result.participantImage) {
+        const img = participantContainer.querySelector('img');
+        if (img) {
+          result.participantImage = img as HTMLImageElement;
+          console.log('✅ [DEBUG] Image de signature du participant trouvée par conteneur parent');
+        }
+      }
+      
+      if (representativeContainer && !result.representativeImage) {
+        const img = representativeContainer.querySelector('img');
+        if (img) {
+          result.representativeImage = img as HTMLImageElement;
+          console.log('✅ [DEBUG] Image de signature du représentant trouvée par conteneur parent');
+        }
+      }
+    }
+    
+    // 3. Si aucune image n'a été trouvée, utiliser une méthode moins précise
+    if (!result.participantImage && !result.representativeImage) {
+      console.log('⚠️ [DEBUG] Aucune signature trouvée avec les méthodes précises, utilisation d\'heuristiques');
+      
+      // Rechercher toutes les images du document
+      const allImages = pdfContentRef.current.querySelectorAll('img');
+      console.log(`🔍 [DEBUG] ${allImages.length} images trouvées au total dans le document`);
+      
+      allImages.forEach((img) => {
+        const imgEl = img as HTMLImageElement;
+        const src = imgEl.src || '';
+        
+        // Analyser l'URL pour déterminer le type de signature
+        if (src.includes('participant_convention') && !result.participantImage) {
+          result.participantImage = imgEl;
+          console.log('✅ [DEBUG] Image de signature du participant trouvée par heuristique URL');
+        } else if ((src.includes('representative_convention') || 
+                   src.includes('trainer_convention')) && 
+                  !result.representativeImage) {
+          result.representativeImage = imgEl;
+          console.log('✅ [DEBUG] Image de signature du représentant trouvée par heuristique URL');
+        }
+      });
+    }
+    
+    // Résumé final
+    console.log('🔍 [DEBUG] Récapitulatif des signatures trouvées:');
+    console.log('- Participant:', result.participantImage ? '✅ Trouvée' : '❌ Non trouvée');
+    console.log('- Représentant:', result.representativeImage ? '✅ Trouvée' : '❌ Non trouvée');
+    
+    return result;
+  };
+
+  // Détecter si on est sur mobile
+  const isMobile = window.innerWidth < 768;
+
+  // Journaux pour le débogage des données du template
+  useEffect(() => {
+    console.log('🧩 [DEBUG] StudentTrainingAgreement - Rendu principal du template avec:', {
+      'company complet': company,
+      'a-t-on une entreprise': !!company,
+      'props participant': participant,
+      'a-t-on une entreprise participant': !!participant.company 
+    });
+  }, [company, participant]);
+
+  // Définition de l'objet trainingAgreement pour centraliser les informations de signature
+  useEffect(() => {
+    // Création de l'objet trainingAgreement qui stocke toutes les signatures
+    const trainingAgreementData = {
+      signatures: {
+        participant: participantSignature,
+        companySeal: companySeal,
+        organizationSeal: organizationSeal,
+        trainer: null,          // Peut être défini si nécessaire
+        representative: null    // Peut être défini si nécessaire
+      }
+    };
+
+    // Stockage dans une variable accessible aux autres effets
+    // @ts-ignore - Nous définissons la variable globalement pour qu'elle soit accessible aux autres effets
+    window.trainingAgreement = trainingAgreementData;
+    
+    console.log('🔄 [DEBUG] trainingAgreement mis à jour:', trainingAgreementData);
+  }, [participantSignature, companySeal, organizationSeal]);
+
+  // Effet pour gérer l'insertion des tampons qui n'apparaissent pas correctement
+  useEffect(() => {
+    if (!companySeal && !organizationSeal) return;
+    
+    // Fonction de vérification avec limitation des tentatives
+    const checkAndFixSeal = () => {
+      // Limiter à 2 tentatives maximum pour éviter les boucles infinies
+      if (sealAttemptsRef.current >= 2) {
+        console.log('🔍 [INFO] Nombre maximum de tentatives atteint pour corriger l\'affichage du tampon');
+      return;
+    }
+
+      sealAttemptsRef.current++;
+      
+      if (companySeal) {
+        const companySealDisplayed = document.querySelector('.company-seal img, [data-seal-container="company"] img');
+        if (!companySealDisplayed) {
+          console.log(`🔍 [WARN] Le tampon n'est pas correctement affiché après enregistrement (tentative ${sealAttemptsRef.current}/2)`);
+          
+          // Fonction interne pour forcer l'affichage du tampon
+          const forceSealDisplay = () => {
+            try {
+              console.log('🔧 [FORCE] Tentative de correction de l\'affichage du tampon');
+              
+              // Nettoyer l'URL et ajouter un unique paramètre de timestamp
+              const baseUrl = companySeal.split('?')[0];
+              const timestamp = Date.now();
+              const cleanSealUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+              
+              console.log('🔧 [FORCE] Nettoyage de l\'URL du tampon:', cleanSealUrl);
+              
+              // Précharger l'image
+              const img = new Image();
+              img.onload = () => {
+                console.log('✅ [FORCE] Image du tampon préchargée avec succès, mise à jour de l\'URL');
+                
+                safeSetCompanySeal(cleanSealUrl);
+                // Mettre à jour le cache global
+                updateSignatureCache(participantSignature, cleanSealUrl, organizationSeal, trainerSignature);
+                // Rafraîchir le composant
+                setShouldRefresh(prev => !prev);
+              };
+              img.onerror = () => {
+                console.error('❌ [FORCE] Erreur de préchargement de l\'image du tampon');
+              };
+              img.src = cleanSealUrl;
+            } catch (error) {
+              console.error('❌ [FORCE] Erreur lors du forçage de l\'affichage du tampon:', error);
+            }
+          };
+          
+          forceSealDisplay();
+        } else {
+          console.log('✅ [SUCCESS] Tampon correctement affiché après correction');
+        }
+      }
+    };
+    
+    // Une seule vérification après un délai raisonnable
+    const sealCheckTimeout = setTimeout(() => {
+      checkAndFixSeal();
+    }, 1500);
+    
+    // Nettoyage des timeouts lors du démontage du composant
+    return () => {
+      clearTimeout(sealCheckTimeout);
+    };
+  }, [companySeal, organizationSeal, safeSetCompanySeal, participantSignature, trainerSignature, updateSignatureCache]);
+
+  // Corriger l'appel dans le useEffect de mise à jour automatique du cache
+  useEffect(() => {
+    log('🔄', '[AUTO_CACHE]', 'Mise à jour automatique du cache suite à modification des signatures');
+    updateSignatureCache(participantSignature, companySeal, organizationSeal, trainerSignature);
+  }, [participantSignature, companySeal, organizationSeal, trainerSignature, updateSignatureCache]);
+
+  // S'assurer que l'état initial est correctement initialisé à partir du cache
+  useEffect(() => {
+    if (initialSignatures.participantSig || initialSignatures.companySeal || initialSignatures.trainerSig) {
+      console.log('🔄 [INIT] Initialisation des signatures depuis le cache:');
+      
+      if (initialSignatures.participantSig) {
+        console.log('✅ [INIT] Signature participant trouvée dans le cache');
+        safeSetParticipantSignature(initialSignatures.participantSig);
+        setIsSigned(true);
+        setHasParticipantSignature(true);
+      }
+      
+      if (initialSignatures.companySeal) {
+        console.log('✅ [INIT] Tampon entreprise trouvé dans le cache');
+        safeSetCompanySeal(initialSignatures.companySeal);
+      }
+      
+      if (initialSignatures.organizationSeal) {
+        console.log('✅ [INIT] Tampon organisme trouvé dans le cache');
+        setOrganizationSeal(initialSignatures.organizationSeal);
+      }
+      
+      if (initialSignatures.trainerSig) {
+        console.log('✅ [INIT] Signature formateur trouvée dans le cache');
+        safeSetTrainerSignature(initialSignatures.trainerSig);
+      }
+      
+      // Définir les signatures comme verrouillées pour éviter les écrasements accidentels
+      setSignaturesLocked(true);
+    }
+  }, []);
+  
+  // Fonction pour sauvegarder une signature
+  const handleSignatureSave = async (signatureDataUrl: string, type: 'participant' | 'companySeal' = 'participant') => {
+    // Vérifier l'authentification
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      alert('Vous devez être connecté pour signer ce document.');
+      return;
+    }
+    
+    if (isSaving) return;
+    setIsSaving(true);
+    
+    // Empêcher la fermeture accidentelle de la page pendant l'enregistrement
+    const preventUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = 'Enregistrement en cours. Êtes-vous sûr de vouloir quitter?';
+    };
+    window.addEventListener('beforeunload', preventUnload);
+    
+    try {
+      console.log(`🔍 [SAVE] Sauvegarde du ${type === 'companySeal' ? 'tampon' : 'signature'} directement dans storage puis dans document_signatures`);
+      
+      try {
+        // Génération d'un nom unique pour le fichier de signature
+        const timestamp = Date.now();
+        const userId = participant.id;
+        const trainingId = training.id;
+        const signatureType = type;
+        
+        // Format: type_userId_trainingId_timestamp.png
+        const fileName = `${signatureType}_${userId}_${trainingId}_${timestamp}.png`;
+        
+        console.log(`🔍 [SAVE] Enregistrement du fichier dans storage avec nom: ${fileName}`);
+        
+        // 1. Enregistrer d'abord le fichier dans le bucket storage
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from('signatures')
+          .upload(fileName, 
+            // Convertir le data URL en Blob
+            await (await fetch(signatureDataUrl)).blob(), 
+            { contentType: 'image/png', upsert: true });
+        
+        if (uploadError) {
+          throw new Error(`Erreur lors de l'upload du fichier: ${uploadError.message}`);
+        }
+        
+        console.log('✅ [SAVE] Fichier enregistré avec succès dans le bucket:', uploadData);
+        
+        // 2. Récupérer l'URL publique du fichier
+        const { data: urlData } = await supabase.storage
+          .from('signatures')
+          .getPublicUrl(fileName);
+        
+        if (!urlData || !urlData.publicUrl) {
+          throw new Error("Impossible d'obtenir l'URL publique du fichier");
+        }
+        
+        const publicUrl = urlData.publicUrl;
+        console.log('✅ [SAVE] URL publique générée:', publicUrl);
+        
+        // 3. Enregistrer l'entrée dans document_signatures
+        const { data: signatureData, error: signatureError } = await supabase
+          .from('document_signatures')
+          .insert([{
+            user_id: participant.id,
+            signature_url: publicUrl,
+            signature_type: signatureType,
+            training_id: training.id,
+            type: 'convention',  // Type de document (convention, attestation, etc.)
+            path: fileName,
+            created_by: session.user.id
+          }])
+          .select();
+        
+        if (signatureError) {
+          console.error('❌ [SAVE] Erreur lors de l\'enregistrement dans document_signatures:', signatureError);
+          throw new Error(`Erreur lors de l'enregistrement dans document_signatures: ${signatureError.message}`);
+        }
+        
+        console.log('✅ [SAVE] Signature enregistrée dans document_signatures:', signatureData);
+        
+        // 4. Anticacher l'URL
+        const antiCacheUrl = `${publicUrl.split('?')[0]}?t=${timestamp}&forcereload=true`;
+        
+        // 5. Précharger l'image avant de mettre à jour l'interface
+        const img = new Image();
+        img.onload = () => {
+          console.log(`✅ [SAVE] Image de ${type === 'companySeal' ? 'tampon' : 'signature'} préchargée avec succès`);
+          
+          // Mettre à jour les états selon le type
+          if (type === 'companySeal') {
+            safeSetCompanySeal(antiCacheUrl);
+            
+            // Notification pour le tampon
+            toast.success('Tampon appliqué avec succès !');
+          } else {
+            // Pour une signature normale de participant
+            safeSetParticipantSignature(antiCacheUrl);
+            setIsSigned(true);
+            setHasParticipantSignature(true);
+            
+            // Mise à jour du statut de signature dans la base de données
+            try {
+              console.log('🔄 [SAVE] Mise à jour du statut de signature dans user_profiles');
+              supabase
+                .from('user_profiles')
+                .update({ has_signed_agreement: true })
+                .eq('id', participant.id)
+                .then(({ error }) => {
+                  if (error) {
+                    console.error('❌ [SAVE] Erreur lors de la mise à jour du statut de signature:', error);
+                  } else {
+                    console.log('✅ [SAVE] Statut de signature mis à jour avec succès');
+                    toast.success('Convention signée avec succès !');
+                  }
+                });
+            } catch (e) {
+              console.error('❌ [SAVE] Erreur inattendue lors de la mise à jour du statut:', e);
+            }
+          }
+          
+          // Mettre à jour le cache global avec la nouvelle valeur
+          updateSignatureCache(
+            type === 'participant' ? antiCacheUrl : participantSignature,
+            type === 'companySeal' ? antiCacheUrl : companySeal,
+            organizationSeal,
+            trainerSignature
+          );
+          
+          // Fermer les canvas
+          setShowSignatureCanvas(false);
+          setShowSealCanvas(false);
+          
+          // Terminer le chargement et rafraîchir
+          setIsSaving(false);
+          setShouldRefresh(prev => !prev);
+        };
+        
+        img.onerror = () => {
+          console.error(`❌ [SAVE] Erreur de préchargement de l'image de ${type === 'companySeal' ? 'tampon' : 'signature'}`);
+          
+          // Continuer malgré l'erreur
+          if (type === 'companySeal') {
+            safeSetCompanySeal(antiCacheUrl);
+          } else {
+            safeSetParticipantSignature(antiCacheUrl);
+            setIsSigned(true);
+          }
+          
+          // Mettre à jour le cache global avec la nouvelle valeur
+          updateSignatureCache(
+            type === 'participant' ? antiCacheUrl : participantSignature,
+            type === 'companySeal' ? antiCacheUrl : companySeal,
+            organizationSeal,
+            trainerSignature
+          );
+          
+          setShowSignatureCanvas(false);
+          setShowSealCanvas(false);
+          setIsSaving(false);
+          toast.error(`Le ${type === 'companySeal' ? 'tampon' : 'la signature'} a été enregistré, mais il pourrait y avoir un problème d'affichage.`);
+        };
+        
+        // Déclencher le chargement
+        img.src = antiCacheUrl;
+        
+      } catch (saveError) {
+        console.error(`🔍 [SAVE] Erreur lors de la sauvegarde:`, saveError);
+        
+        // Mode de secours: utiliser le dataURL local
+        if (type === 'companySeal') {
+          safeSetCompanySeal(signatureDataUrl);
+        } else {
+          safeSetParticipantSignature(signatureDataUrl);
+          setIsSigned(true);
+          setHasParticipantSignature(true);
+        }
+        
+        // Mettre à jour le cache global avec la valeur locale
+        updateSignatureCache(
+          type === 'participant' ? signatureDataUrl : participantSignature,
+          type === 'companySeal' ? signatureDataUrl : companySeal,
+          organizationSeal,
+          trainerSignature
+        );
+        
+        setShowSignatureCanvas(false);
+        setShowSealCanvas(false);
+        setIsSaving(false);
+        toast.error(`Le ${type === 'companySeal' ? 'tampon' : 'la signature'} a été enregistré localement, mais n'a pas pu être sauvegardé sur le serveur.`);
+      }
+    } catch (error) {
+      console.error(`❌ [SAVE] Erreur générale:`, error);
+      toast.error(`Une erreur est survenue lors de la sauvegarde. Veuillez réessayer.`);
+      setIsSaving(false);
+    } finally {
+      // Nettoyer l'événement beforeunload
+      window.removeEventListener('beforeunload', preventUnload);
+    }
+  };
+
+  // Si un document existe déjà, afficher un bouton pour le visualiser
+  if (existingDocumentUrl && !isOnlyTrainerSignature && participantSignature) {
+    return (
+      <div className="fixed inset-0 bg-gray-900 bg-opacity-80 backdrop-blur-lg flex items-center justify-center z-50 p-4">
+        <div className="bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+          <div className="p-6 flex items-center justify-between border-b border-gray-700">
+            <h2 className="text-xl font-semibold text-white">Convention de formation signée</h2>
+            <button
+              onClick={onCancel}
+              className="text-gray-400 hover:text-white transition-colors"
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+          
+          <div className="p-6 overflow-y-auto flex-grow">
+            {pdfLoading ? (
+              <div className="flex flex-col items-center justify-center h-[70vh]">
+                <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+                <p className="text-white">Chargement du document...</p>
+              </div>
+            ) : pdfError ? (
+              <div className="flex flex-col items-center justify-center h-[70vh] bg-gray-700 rounded-lg text-center p-8">
+                <p className="text-white mb-4">Une erreur est survenue lors du chargement du document.</p>
+                <p className="text-gray-300">Veuillez réessayer ultérieurement ou contacter le support.</p>
+              </div>
+            ) : (
+              <iframe 
+                src={documentUrl} 
+                title="Convention de formation signée" 
+                className="w-full h-full min-h-[70vh] rounded-lg border border-gray-600"
+                style={{ backgroundColor: 'white' }}
+                onLoad={() => console.log('🔍 [DEBUG] Document iframe loaded successfully (convention)')}
+                onError={() => {
+                  console.error('🔍 [DEBUG] Error loading document iframe (convention)');
+                  setPdfError(true);
+                }}
+              />
+            )}
+          </div>
+          
+          <div className="p-6 border-t border-gray-700 flex justify-end">
+            <a
+              href={documentUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              download="convention_formation.pdf"
+              className={`flex items-center gap-2 font-medium py-2 px-6 rounded-lg ${
+                pdfLoading || pdfError
+                  ? 'bg-gray-600 text-gray-300 cursor-not-allowed'
+                  : 'bg-blue-600 hover:bg-blue-700 text-white'
+              }`}
+              onClick={(e) => {
+                if (pdfLoading || pdfError) {
+                  e.preventDefault();
+                }
+              }}
+            >
+              <Download className="w-5 h-5" /> Télécharger la convention
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Si le canvas de signature est affiché
+  if (showSignatureCanvas) {
+    return (
+      <div className="fixed inset-0 bg-gray-900 bg-opacity-80 backdrop-blur-lg flex items-center justify-center z-50 p-4">
+        <div className="bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full flex flex-col">
+          <div className="p-6 flex items-center justify-between border-b border-gray-700">
+            <h2 className="text-xl font-semibold text-white">
+              Signature de la convention
+            </h2>
+            <button
+              onClick={() => setShowSignatureCanvas(false)}
+              className="text-gray-400 hover:text-white transition-colors"
+              disabled={isSaving}
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+          
+          <div className="p-6">
+            <h3 className="font-semibold text-lg mb-4">
+              Apposez votre signature
+            </h3>
+            
+            <div className="mb-8">
+              <div className="border border-gray-300 rounded-lg">
+                <SignatureCanvas
+                  onSave={(dataURL) => {
+                    handleSignatureComplete(dataURL);
+                    // Enregistrer comme une signature normale
+                    handleSignatureSave(dataURL);
+                  }}
+                  onCancel={() => setShowSignatureCanvas(false)}
+                  isLoading={isSaving}
+                  initialName={`${participant.first_name} ${participant.last_name}`}
+                  signatureType="participant"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Si le canvas de tampon est affiché
+  if (showSealCanvas) {
+    return (
+      <div className="fixed inset-0 bg-gray-900 bg-opacity-80 backdrop-blur-lg flex items-center justify-center z-50 p-4">
+        <div className="bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full flex flex-col">
+          <div className="p-6 flex items-center justify-between border-b border-gray-700">
+            <h2 className="text-xl font-semibold text-white">
+              Tampon de l'entreprise
+            </h2>
+            <button
+              onClick={() => setShowSealCanvas(false)}
+              className="text-gray-400 hover:text-white transition-colors"
+              disabled={isSaving}
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+          
+          <div className="p-6">
+            <h3 className="font-semibold text-lg mb-4">
+              Apposez le tampon de votre entreprise
+            </h3>
+            
+            <div className="mb-8">
+              <div className="border border-gray-300 rounded-lg">
+                <SignatureCanvas
+                  onSave={(dataURL) => {
+                    handleSignatureComplete(dataURL);
+                    handleSignatureSave(dataURL, 'companySeal');
+                  }}
+                  onCancel={() => setShowSealCanvas(false)}
+                  isLoading={isSaving}
+                  signatureType="companySeal"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Affichage principale de la convention (avec ou sans signature)
+  return (
+    <div className="fixed inset-0 bg-gray-900 bg-opacity-80 backdrop-blur-lg flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+        <div className="p-6 flex items-center justify-between border-b border-gray-700">
+          <h2 className="text-xl font-semibold text-white">
+            {participantSignature ? "Convention de formation signée" : "Convention de formation"}
+            {participantSignature && <span className="ml-2 text-sm bg-green-600 text-white px-2 py-0.5 rounded-full">Signée</span>}
+          </h2>
+          <button
+            onClick={onCancel}
+            className="text-gray-400 hover:text-white transition-colors"
+          >
+            <X className="w-6 h-6" />
+          </button>
+        </div>
+        
+        <div className="p-6 overflow-y-auto flex-grow">
+          {/* PDF Content */}
+          <div 
+            ref={pdfContentRef} 
+            className="bg-white text-black p-8 rounded-lg"
+            style={{ fontFamily: 'Arial, Helvetica, sans-serif', fontSize: '14px' }}
+          >
+            {/* Affichage des détails de l'entreprise avant rendu */}
+            <div style={{ display: 'none' }}>
+              {company ? <div>{`Debug: Entreprise ${company.name}`}</div> : null}
+            </div>
+            <div id="training-agreement-template">
+              <UnifiedTrainingAgreementTemplate
+                training={{
+                  id: training.id,
+                  title: training.title,
+                  duration: training.duration,
+                  location: training.location,
+                  start_date: training.start_date,
+                  end_date: training.end_date,
+                  trainer_name: training.trainer_name,
+                  trainer_details: training.trainer_id,
+                  evaluation_methods: training.evaluation_methods,
+                  tracking_methods: training.tracking_methods,
+                  pedagogical_methods: training.pedagogical_methods,
+                  material_elements: training.material_elements,
+                  objectives: training.objectives,
+                  content: training.content,
+                  price: training.price
+                }}
+                company={company || { 
+                  name: participant.company || 'À compléter',
+                  address: 'À compléter',
+                  postal_code: '',
+                  city: '',
+                  siret: 'À compléter'
+                }}
+                participant={participant ? {
+                  id: participant.id,
+                  first_name: participant.first_name,
+                  last_name: participant.last_name,
+                  job_position: participant.job_position || '',
+                  email: '',
+                  company: participant.company
+                } : undefined}
+                participants={allTrainingParticipants.length > 0 
+                  ? allTrainingParticipants 
+                  : (participant ? [{
+                      id: participant.id,
+                      first_name: participant.first_name, 
+                      last_name: participant.last_name,
+                      job_position: participant.job_position || '',
+                      email: '',
+                      company: participant.company
+                    }] : [])}
+                participantSignature={participantSignature}
+                companySeal={companySeal}
+                organizationSeal={organizationSeal}
+                viewContext="student"
+                pdfMode={false}
+                organizationSettings={organizationSettings || DEFAULT_ORGANIZATION_SETTINGS}
+                trainerId={training.trainer_id}
+                trainerSignature={trainerSignature}
+              />
+            </div>
+          </div>
+        </div>
+        
+        <div className="p-6 border-t border-gray-700 flex flex-wrap gap-3 justify-between">
+          {!participantSignature ? (
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => setShowSignatureCanvas(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex-grow md:flex-grow-0"
+              >
+                Signer la convention
+              </button>
+                
+              {/* Ajout du bouton pour le tampon d'entreprise */}
+              <button
+                onClick={() => setShowSealCanvas(true)}
+                className="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <path d="M12 8v8"></path>
+                  <path d="M8 12h8"></path>
+                </svg>
+                Ajouter un tampon
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* N'afficher le message de succès que si has_signed_agreement est TRUE */}
+              {participant.has_signed_agreement && (
+                <div className="flex items-center text-green-400">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  Convention signée avec succès
+                </div>
+              )}
+              
+              {/* Toujours afficher les boutons de signature et tampon même si déjà signé */}
+              <div className="flex flex-wrap gap-3">
+                <button
+                  onClick={() => setShowSignatureCanvas(true)}
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex-grow md:flex-grow-0"
+                >
+                  Signer la convention
+                </button>
+                <button
+                  onClick={() => setShowSealCanvas(true)}
+                  className="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M12 8v8"></path>
+                    <path d="M8 12h8"></path>
+                  </svg>
+                  Ajouter un tampon
+                </button>
+              </div>
+            </>
+          )}
+          
+          <div className="flex flex-wrap gap-3">
+            {participantSignature && (
+              <>
+                <button
+                  onClick={generatePDF}
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
+                  disabled={isGeneratingPDF}
+                >
+                  {isGeneratingPDF ? (
+                    <>
+                      <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></div>
+                      <span>Génération...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-5 h-5" /> Télécharger (signé)
+                    </>
+                  )}
+                </button>
+              </>
+            )}
+            
+            <button
+              onClick={generatePDF}
+              className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2 flex-grow md:flex-grow-0"
+            >
+              <Download className="w-5 h-5" /> Visualiser PDF
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};

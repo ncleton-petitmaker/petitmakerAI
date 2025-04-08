@@ -28,6 +28,16 @@ import { GenericAttendanceSheetButton } from './GenericAttendanceSheetButton';
 import { CompletionCertificateButton } from './CompletionCertificateButton';
 
 // Interface pour les formations dans la vue
+interface Participant {
+  user: {
+    id: string;
+    first_name: string;
+    last_name: string;
+    job_position?: string;
+    auth_email?: string;
+  };
+}
+
 interface Training {
   id: string;
   title: string;
@@ -74,6 +84,18 @@ interface Training {
   created_at: string;
   learners?: any[];
   trainer_name?: string;
+  participants?: Participant[];
+  companies?: {
+    id: string;
+    name: string;
+    address?: string;
+    postal_code?: string;
+    city?: string;
+    country?: string;
+    phone?: string;
+    email?: string;
+    siret?: string;
+  };
 }
 
 // Interface pour les entreprises
@@ -283,40 +305,80 @@ export const TrainingsView = () => {
 
   const fetchTrainings = async () => {
     try {
+      console.log('🔍 [DEBUG] Début de fetchTrainings');
       setIsLoading(true);
       setError(null);
       
-      // Récupérer toutes les formations
-      const { data: trainingsData, error: trainingsError } = await supabase
+      // Récupérer toutes les formations avec les informations des entreprises
+      console.log('🔍 [DEBUG] Récupération des formations depuis Supabase');
+      const { data: trainings, error: trainingsError } = await supabase
         .from('trainings')
-        .select('*')
+        .select(`
+          *,
+          companies:company_id (
+            id,
+            name,
+            address,
+            postal_code,
+            city,
+            country,
+            phone,
+            email,
+            siret
+          )
+        `)
         .order('created_at', { ascending: false });
       
-      if (trainingsError) throw trainingsError;
-      
-      console.log("Formations récupérées:", trainingsData);
-      
-      // Traiter les données pour chaque formation
-      trainingsData.forEach(training => {
-        // Traiter les objectifs
-        training.objectives = processObjectives(training.objectives);
+      if (trainingsError) {
+        console.error('❌ [ERROR] Erreur lors de la récupération des formations:', trainingsError);
+        if (trainingsError.code === '42P01') {
+          setError('La table des formations n\'existe pas. Veuillez créer les tables nécessaires.');
+        } else {
+          setError(`Erreur lors de la récupération des formations: ${trainingsError.message}`);
+        }
+        return;
+      }
+
+      console.log('✅ [DEBUG] Formations récupérées:', trainings);
+
+      // Pour chaque formation, récupérer les apprenants associés
+      const processedTrainings = await Promise.all(trainings?.map(async (training) => {
+        console.log(`🔍 [DEBUG] Récupération des apprenants pour la formation ${training.id}`);
         
-        // Traiter les méthodes d'évaluation
-        training.evaluation_methods = processJsonField(training.evaluation_methods, {
+        // Récupérer les apprenants pour cette formation qui appartiennent à la même entreprise
+        let query = supabase
+          .from('user_profiles')
+          .select('id, first_name, last_name, job_position')
+          .eq('training_id', training.id);
+        
+        // Si la formation a une entreprise associée, filtrer les apprenants par cette entreprise
+        if (training.company_id) {
+          query = query.eq('company_id', training.company_id);
+        }
+        
+        const { data: learners, error: learnersError } = await query;
+
+        if (learnersError) {
+          console.error(`❌ [ERROR] Erreur lors de la récupération des apprenants pour la formation ${training.id}:`, learnersError);
+        } else {
+          console.log(`✅ [DEBUG] Apprenants récupérés pour la formation ${training.id}:`, learners);
+        }
+        
+        // Traiter les objectifs et autres champs JSON
+        const objectives = processObjectives(training.objectives);
+        const evaluation_methods = processJsonField(training.evaluation_methods, {
           profile_evaluation: true,
           skills_evaluation: true,
           knowledge_evaluation: true,
           satisfaction_survey: true
         });
         
-        // Traiter les méthodes de suivi
-        training.tracking_methods = processJsonField(training.tracking_methods, {
+        const tracking_methods = processJsonField(training.tracking_methods, {
           attendance_sheet: true,
           completion_certificate: true
         });
         
-        // Traiter les méthodes pédagogiques
-        training.pedagogical_methods = processJsonField(training.pedagogical_methods, {
+        const pedagogical_methods = processJsonField(training.pedagogical_methods, {
           needs_evaluation: true,
           theoretical_content: true,
           practical_exercises: true,
@@ -325,71 +387,34 @@ export const TrainingsView = () => {
           digital_support: true
         });
         
-        // Traiter les éléments matériels
-        training.material_elements = processJsonField(training.material_elements, {
-          computer_provided: false,
+        const material_elements = processJsonField(training.material_elements, {
+          computer_provided: true,
           pedagogical_material: true,
           digital_support_provided: true
         });
         
-        console.log(`Formation ${training.id} après traitement:`, {
-          objectives: training.objectives,
-          evaluation_methods: training.evaluation_methods,
-          tracking_methods: training.tracking_methods,
-          pedagogical_methods: training.pedagogical_methods,
-          material_elements: training.material_elements
-        });
-      });
+        return {
+          ...training,
+          company_name: training.companies?.name || 'Entreprise non définie',
+          objectives,
+          evaluation_methods,
+          tracking_methods,
+          pedagogical_methods,
+          material_elements,
+          learners: learners || []
+        };
+      })) || [];
       
-      // Récupérer les noms des entreprises pour les formations qui ont une entreprise associée
-      const trainingsWithCompanyIds = trainingsData.filter(t => t.company_id);
+      console.log('✅ [DEBUG] Formations traitées:', processedTrainings);
+      setTrainings(processedTrainings);
+      setFilteredTrainings(processedTrainings);
       
-      if (trainingsWithCompanyIds.length > 0) {
-        const { data: companiesData, error: companiesError } = await supabase
-          .from('companies')
-          .select('id, name')
-          .in('id', trainingsWithCompanyIds.map(t => t.company_id));
-        
-        if (companiesError) throw companiesError;
-        
-        // Ajouter le nom de l'entreprise à chaque formation
-        trainingsData.forEach(training => {
-          if (training.company_id) {
-            const company = companiesData.find(c => c.id === training.company_id);
-            if (company) {
-              training.company_name = company.name;
-            }
-          }
-        });
-      }
-      
-      // Récupérer les apprenants pour chaque formation
-      const trainingsWithLearners = await Promise.all(trainingsData.map(async (training) => {
-        // Récupérer UNIQUEMENT les apprenants directement associés à la formation via training_id
-        const { data: directLearners, error: directLearnersError } = await supabase
-          .from('user_profiles')
-          .select('id, first_name, last_name, job_position, training_id, company_id')
-          .eq('training_id', training.id);
-        
-        if (directLearnersError) {
-          console.error('Erreur lors de la récupération des apprenants directs:', directLearnersError);
-          return { ...training, learners: [] };
-        }
-        
-        console.log(`Formation ${training.id} - Apprenants associés:`, directLearners);
-        return { ...training, learners: directLearners || [] };
-      }));
-      
-      setTrainings(trainingsWithLearners);
-      setFilteredTrainings(trainingsWithLearners);
     } catch (error: any) {
-      console.error('Erreur lors de la récupération des formations:', error);
-      setError(`Erreur lors de la récupération des formations: ${error.message || 'Erreur inconnue'}`);
-      // Initialiser avec des tableaux vides pour éviter les erreurs
-      setTrainings([]);
-      setFilteredTrainings([]);
+      console.error('❌ [ERROR] Erreur lors de la récupération des formations:', error);
+      setError(`Une erreur est survenue: ${error.message}`);
     } finally {
       setIsLoading(false);
+      console.log('✅ [DEBUG] Fin de fetchTrainings');
     }
   };
 
@@ -455,123 +480,25 @@ export const TrainingsView = () => {
   };
 
   const handleAddTraining = async (trainingData: any) => {
-    console.log('Ajout d\'une nouvelle formation');
-    console.log('Données reçues:', trainingData);
-    console.log('Méthodes d\'évaluation:', trainingData.evaluation_methods);
-    console.log('Moyens pédagogiques:', trainingData.pedagogical_methods);
-    console.log('Éléments matériels:', trainingData.material_elements);
-    console.log('Méthodes de suivi:', trainingData.tracking_methods);
-    console.log('Objectifs:', trainingData.objectives);
+    console.log('🔍 [DEBUG] Début de handleAddTraining');
+    console.log('🔍 [DEBUG] Données reçues complètes:', trainingData);
     
     try {
       setIsLoading(true);
       
-      // Vérifier d'abord si la table existe
-      const { error: tableCheckError } = await supabase
-        .from('trainings')
-        .select('count')
-        .limit(1)
-        .single();
-      
-      if (tableCheckError && tableCheckError.code === '42P01') {
-        console.error('Table trainings does not exist:', tableCheckError);
-        alert('Erreur: La table des formations n\'existe pas dans la base de données');
+      // Vérifier si la formation existe déjà
+      if (trainingData.id) {
+        console.log('🔍 [DEBUG] Formation existante, ID:', trainingData.id);
+        // Si c'est une mise à jour, on ne continue pas avec la création
         setIsLoading(false);
         return;
       }
-      
-      // Traiter les objectifs
-      let processedObjectives;
-      if (trainingData.objectives) {
-        if (Array.isArray(trainingData.objectives)) {
-          processedObjectives = trainingData.objectives;
-        } else if (typeof trainingData.objectives === 'string') {
-          try {
-            // Essayer de parser si c'est une chaîne JSON
-            processedObjectives = JSON.parse(trainingData.objectives);
-          } catch (e) {
-            // Si ce n'est pas du JSON valide, utiliser comme une chaîne simple
-            processedObjectives = [trainingData.objectives];
-          }
-        } else {
-          // Pour tout autre type, convertir en tableau
-          processedObjectives = [String(trainingData.objectives)];
-        }
-      } else {
-        processedObjectives = [''];
-      }
-      
-      // Traiter les méthodes d'évaluation
-      let processedEvaluationMethods;
-      if (trainingData.evaluation_methods) {
-        if (typeof trainingData.evaluation_methods === 'string') {
-          processedEvaluationMethods = trainingData.evaluation_methods;
-        } else {
-          processedEvaluationMethods = JSON.stringify(trainingData.evaluation_methods);
-        }
-      } else {
-        processedEvaluationMethods = JSON.stringify({
-          profile_evaluation: true,
-          skills_evaluation: true,
-          knowledge_evaluation: true,
-          satisfaction_survey: true
-        });
-      }
-      
-      // Traiter les méthodes de suivi
-      let processedTrackingMethods;
-      if (trainingData.tracking_methods) {
-        if (typeof trainingData.tracking_methods === 'string') {
-          processedTrackingMethods = trainingData.tracking_methods;
-        } else {
-          processedTrackingMethods = JSON.stringify(trainingData.tracking_methods);
-        }
-      } else {
-        processedTrackingMethods = JSON.stringify({
-          attendance_sheet: true,
-          completion_certificate: true
-        });
-      }
-      
-      // Traiter les méthodes pédagogiques
-      let processedPedagogicalMethods;
-      if (trainingData.pedagogical_methods) {
-        if (typeof trainingData.pedagogical_methods === 'string') {
-          processedPedagogicalMethods = trainingData.pedagogical_methods;
-        } else {
-          processedPedagogicalMethods = JSON.stringify(trainingData.pedagogical_methods);
-        }
-      } else {
-        processedPedagogicalMethods = JSON.stringify({
-          needs_evaluation: true,
-          theoretical_content: true,
-          practical_exercises: true,
-          case_studies: true,
-          experience_sharing: true,
-          digital_support: true
-        });
-      }
-      
-      // Traiter les éléments matériels
-      let processedMaterialElements;
-      if (trainingData.material_elements) {
-        if (typeof trainingData.material_elements === 'string') {
-          processedMaterialElements = trainingData.material_elements;
-        } else {
-          processedMaterialElements = JSON.stringify(trainingData.material_elements);
-        }
-      } else {
-        processedMaterialElements = JSON.stringify({
-          computer_provided: false,
-          pedagogical_material: true,
-          digital_support_provided: true
-        });
-      }
-      
-      // Créer un objet avec seulement les champs nécessaires pour éviter les erreurs
+
+      // Créer un objet avec seulement les champs nécessaires
       const trainingToAdd = {
         title: trainingData.title || 'Nouvelle formation',
-        company_id: trainingData.company_id || null,
+        company_id: trainingData.company_id,
+        trainer_id: trainingData.trainer_id,
         target_audience: trainingData.target_audience || '',
         prerequisites: trainingData.prerequisites || 'Aucun',
         duration: trainingData.duration || '2 jours soit 14h',
@@ -582,85 +509,79 @@ export const TrainingsView = () => {
         registration_deadline: trainingData.registration_deadline || 'Inscription à réaliser 1 mois avant le démarrage de la formation',
         location: trainingData.location || '',
         price: trainingData.price || 0,
-        objectives: processedObjectives,
+        objectives: Array.isArray(trainingData.objectives) ? trainingData.objectives : [],
         content: trainingData.content || '',
-        evaluation_methods: processedEvaluationMethods,
-        tracking_methods: processedTrackingMethods,
-        pedagogical_methods: processedPedagogicalMethods,
-        material_elements: processedMaterialElements,
+        start_date: trainingData.start_date ? new Date(trainingData.start_date).toISOString() : null,
+        end_date: trainingData.end_date ? new Date(trainingData.end_date).toISOString() : null,
+        evaluation_methods: {
+          profile_evaluation: true,
+          skills_evaluation: true,
+          knowledge_evaluation: true,
+          satisfaction_survey: true
+        },
+        tracking_methods: {
+          attendance_sheet: true,
+          completion_certificate: true
+        },
+        pedagogical_methods: {
+          needs_evaluation: true,
+          theoretical_content: true,
+          practical_exercises: true,
+          case_studies: true,
+          experience_sharing: true,
+          digital_support: true
+        },
+        material_elements: {
+          computer_provided: true,
+          pedagogical_material: true,
+          digital_support_provided: true
+        },
         status: trainingData.status || 'draft',
         trainer_name: trainingData.trainer_name || ''
       };
       
-      console.log('Données préparées pour l\'ajout:', trainingToAdd);
-      
+      console.log('🔍 [DEBUG] Données préparées pour l\'ajout:', trainingToAdd);
+
       // Ajouter la formation
-      const { data, error } = await supabase
+      const { data: newTraining, error: insertError } = await supabase
         .from('trainings')
-        .insert(trainingToAdd)
-        .select();
-      
-      if (error) {
-        console.error('Detailed error adding training:', error);
-        throw error;
+        .insert([trainingToAdd])
+        .select()
+        .single();
+
+      if (insertError) {
+        console.error('❌ [ERROR] Erreur lors de l\'ajout de la formation:', insertError);
+        throw new Error(`Erreur lors de l'ajout de la formation: ${insertError.message}`);
       }
-      
-      // Ajouter la nouvelle formation à la liste avec un nom d'entreprise par défaut
-      const newTraining = {
-        ...data[0],
-        company_name: 'Non assignée'
-      };
-      
-      // Essayer de récupérer le nom de l'entreprise si un ID d'entreprise est fourni
-      if (data && data[0].company_id) {
-        try {
-          const { data: companyData, error: companyError } = await supabase
-            .from('companies')
-            .select('name')
-            .eq('id', data[0].company_id)
-            .single();
-          
-          if (!companyError && companyData) {
-            newTraining.company_name = companyData.name;
-          }
-          
-          // Associer automatiquement les apprenants de l'entreprise à la nouvelle formation
-          if (data[0].id && data[0].company_id) {
-            await handleAutoAssociateLearners(data[0].id, data[0].company_id);
-          }
-        } catch (error) {
-          console.error('Error fetching company name:', error);
-        }
+
+      console.log('✅ [DEBUG] Formation ajoutée avec succès:', newTraining);
+
+      // Si une entreprise est spécifiée, associer les apprenants
+      if (trainingData.company_id && newTraining?.id) {
+        await handleAutoAssociateLearners(newTraining.id, trainingData.company_id);
       }
+
+      // Rafraîchir la liste une seule fois après toutes les opérations
+      await fetchTrainings();
       
-      // Ajouter la nouvelle formation à la liste
-      setTrainings([newTraining, ...trainings]);
-      setFilteredTrainings([newTraining, ...filteredTrainings]);
-      
+      // Fermer le formulaire après la création réussie
       setShowAddForm(false);
-      alert('Formation ajoutée avec succès');
-    } catch (error: any) {
-      console.error('Error adding training:', error);
       
-      // Vérifier si l'erreur est liée à une colonne manquante
-      if (error.message && error.message.includes('column') && error.message.includes('does not exist')) {
-        alert(`Erreur: Une colonne est manquante dans la table des formations. Veuillez exécuter le script de création des tables.`);
-      } else {
-        alert(`Erreur lors de l'ajout de la formation: ${error.message || 'Erreur inconnue'}`);
-      }
+    } catch (error: any) {
+      console.error('❌ [ERROR] Erreur dans handleAddTraining:', error);
+      alert(`Une erreur est survenue lors de l'ajout de la formation: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleUpdateTraining = async (trainingData: any) => {
-    console.log('Mise à jour de la formation:', trainingData.id);
-    console.log('Données reçues:', trainingData);
-    console.log('Méthodes d\'évaluation:', trainingData.evaluation_methods);
-    console.log('Moyens pédagogiques:', trainingData.pedagogical_methods);
-    console.log('Éléments matériels:', trainingData.material_elements);
-    console.log('Méthodes de suivi:', trainingData.tracking_methods);
-    console.log('Objectifs:', trainingData.objectives);
+    console.log('🔍 [DEBUG] Début de handleUpdateTraining');
+    console.log('🔍 [DEBUG] Données reçues:', trainingData);
+    console.log('🔍 [DEBUG] Dates reçues:', {
+      start_date: trainingData.start_date,
+      end_date: trainingData.end_date
+    });
     
     try {
       // Vérifier si le company_id a changé
@@ -671,18 +592,14 @@ export const TrainingsView = () => {
       if (trainingData.id) {
         const { data: originalTraining, error: originalError } = await supabase
           .from('trainings')
-          .select('company_id')
+          .select('company_id, start_date, end_date')
           .eq('id', trainingData.id)
           .single();
         
         if (!originalError && originalTraining) {
           originalCompanyId = originalTraining.company_id;
           companyChanged = originalCompanyId !== trainingData.company_id;
-          console.log('Changement d\'entreprise détecté:', {
-            originalCompanyId,
-            newCompanyId: trainingData.company_id,
-            changed: companyChanged
-          });
+          console.log('🔍 [DEBUG] Formation originale:', originalTraining);
         }
       }
       
@@ -700,13 +617,22 @@ export const TrainingsView = () => {
       const cleanedData: any = {};
       for (const field of allowedFields) {
         if (field in trainingData) {
-          // Convertir les objets en chaînes JSON pour les champs spécifiques
-          if (field === 'evaluation_methods' || field === 'pedagogical_methods' || 
+          if (field === 'start_date' || field === 'end_date') {
+            // S'assurer que les dates sont au format ISO
+            if (trainingData[field]) {
+              try {
+                const date = new Date(trainingData[field]);
+                cleanedData[field] = date.toISOString();
+                console.log(`✅ [DEBUG] Date ${field} formatée:`, cleanedData[field]);
+              } catch (error) {
+                console.error(`❌ [ERROR] Erreur de format pour ${field}:`, error);
+                cleanedData[field] = null;
+              }
+            } else {
+              cleanedData[field] = null;
+            }
+          } else if (field === 'evaluation_methods' || field === 'pedagogical_methods' || 
               field === 'material_elements' || field === 'tracking_methods') {
-            
-            console.log(`Traitement du champ ${field}:`, trainingData[field]);
-            console.log(`Type du champ ${field}:`, typeof trainingData[field]);
-            
             // Si c'est déjà une chaîne JSON, la garder telle quelle
             if (typeof trainingData[field] === 'string') {
               cleanedData[field] = trainingData[field];
@@ -714,79 +640,30 @@ export const TrainingsView = () => {
               // Sinon, convertir en chaîne JSON
               cleanedData[field] = JSON.stringify(trainingData[field]);
             }
-            
-            console.log(`Valeur finale du champ ${field}:`, cleanedData[field]);
           } else if (field === 'objectives') {
             // Gérer les objectifs spécifiquement
             if (Array.isArray(trainingData[field])) {
               cleanedData[field] = trainingData[field];
             } else if (typeof trainingData[field] === 'string') {
               try {
-                // Essayer de parser si c'est une chaîne JSON
                 cleanedData[field] = JSON.parse(trainingData[field]);
               } catch (e) {
-                // Si ce n'est pas du JSON valide, utiliser comme une chaîne simple
                 cleanedData[field] = [trainingData[field]];
               }
             } else {
-              // Pour tout autre type, convertir en tableau
               cleanedData[field] = [String(trainingData[field])];
-            }
-          } else if (field === 'periods' || field === 'time_slots') {
-            // S'assurer que les périodes et créneaux horaires sont en format JSON
-            if (typeof trainingData[field] === 'string') {
-              cleanedData[field] = trainingData[field];
-            } else {
-              cleanedData[field] = JSON.stringify(trainingData[field]);
             }
           } else {
             cleanedData[field] = trainingData[field];
           }
         }
       }
-      
-      // Vérifier et formater les dates
-      if (cleanedData.start_date) {
-        try {
-          const date = new Date(cleanedData.start_date);
-          cleanedData.start_date = date.toISOString();
-        } catch (error) {
-          console.error('Erreur de format pour start_date:', error);
-          delete cleanedData.start_date;
-        }
-      }
-      
-      if (cleanedData.end_date) {
-        try {
-          const date = new Date(cleanedData.end_date);
-          cleanedData.end_date = date.toISOString();
-        } catch (error) {
-          console.error('Erreur de format pour end_date:', error);
-          delete cleanedData.end_date;
-        }
-      }
-      
-      // Gérer le champ metadata
-      if (cleanedData.metadata) {
-        try {
-          // Vérifier si c'est déjà une chaîne JSON
-          if (typeof cleanedData.metadata !== 'string') {
-            cleanedData.metadata = JSON.stringify(cleanedData.metadata);
-          }
-          
-          // Valider que c'est un JSON valide
-          JSON.parse(cleanedData.metadata);
-        } catch (error) {
-          console.error('Erreur de format pour metadata:', error);
-          // Ne pas supprimer le champ metadata, mais le définir comme un objet vide
-          cleanedData.metadata = '{}';
-        }
-      } else {
-        // S'assurer que le champ metadata existe toujours
-        cleanedData.metadata = '{}';
-      }
-      
-      console.log('Données nettoyées avant envoi:', cleanedData);
+
+      console.log('🔍 [DEBUG] Données nettoyées avant envoi:', cleanedData);
+      console.log('🔍 [DEBUG] Dates finales:', {
+        start_date: cleanedData.start_date,
+        end_date: cleanedData.end_date
+      });
       
       // APPROCHE DIRECTE: Utiliser la fonction RPC pour contourner les problèmes de RLS
       console.log('Tentative de mise à jour via fonction RPC bypass_rls_update_training...');
@@ -853,52 +730,91 @@ export const TrainingsView = () => {
     try {
       setIsLoading(true);
       
-      // Créer une copie des données et filtrer les propriétés qui ne sont pas des colonnes dans la table
-      let trainingDataToDuplicate = { ...trainingData };
+      // Create a copy of the training data, excluding the id
+      const { id, learners, participants, ...trainingDataToDuplicate } = trainingData;
       
-      // Supprimer les champs qui ne doivent pas être dupliqués
-      delete trainingDataToDuplicate.id;
-      delete trainingDataToDuplicate.created_at;
-      delete trainingDataToDuplicate.updated_at;
-      delete trainingDataToDuplicate.accessibility_info;
+      // Remove the nested companies object if it exists, as it's not a direct column
+      delete trainingDataToDuplicate.companies; 
+      
+      // Also remove other non-column properties like extractedPeriods and extractedTimeSlots if they exist
       delete trainingDataToDuplicate.extractedPeriods;
       delete trainingDataToDuplicate.extractedTimeSlots;
-      delete trainingDataToDuplicate.learners; // Supprimer la propriété learners qui cause l'erreur
       
-      // Add a suffix to indicate this is a duplicate
+      // Explicitement définir company_id à null pour ne pas conserver l'association à l'entreprise
+      trainingDataToDuplicate.company_id = null;
+      
+      // Définir explicitement company_name à null ou une valeur par défaut pour l'affichage
+      trainingDataToDuplicate.company_name = null;
+      
+      // Modify the title to indicate it's a copy
       trainingDataToDuplicate.title = `${trainingDataToDuplicate.title || 'Formation'} (copie)`;
+      
+      // Réinitialiser les participants_ids à un tableau vide
+      trainingDataToDuplicate.participants_ids = [];
       
       console.log('Attempting to duplicate training with data:', trainingDataToDuplicate);
       
-      const { data, error } = await supabase
+      // Insérer la nouvelle formation
+      const { data: newTraining, error: trainingError } = await supabase
         .from('trainings')
         .insert(trainingDataToDuplicate)
-        .select();
+        .select()
+        .single();
       
-      if (error) {
-        console.error('Supabase error during training duplication:', error);
-        throw error;
+      if (trainingError) {
+        console.error('Supabase error during training duplication:', trainingError);
+        throw trainingError;
       }
       
-      if (!data || data.length === 0) {
+      if (!newTraining) {
         throw new Error('No data returned after training duplication');
       }
       
-      // Get company name
-      if (data && data[0].company_id) {
+      // Get company name if needed
+      if (newTraining.company_id) {
         const { data: companyData, error: companyError } = await supabase
           .from('companies')
           .select('name')
-          .eq('id', data[0].company_id)
+          .eq('id', newTraining.company_id)
           .single();
         
         if (!companyError && companyData) {
-          data[0].company_name = companyData.name;
+          newTraining.company_name = companyData.name;
         }
       }
       
+      // IMPORTANT: Ne pas copier les signatures de l'ancienne formation, à l'exception du tampon d'organisme
+      console.log('🔍 [DEBUG] Une nouvelle formation a été créée. Nettoyage des signatures...');
+      try {
+        // 1. Récupérer le tampon d'organisme global depuis settings
+        const { data: settings } = await supabase
+          .from('settings')
+          .select('organization_seal_url, organization_seal_path')
+          .single();
+          
+        // 2. Vérifier si une signature existait pour la formation originale
+        const { data: existingSignatures } = await supabase
+          .from('documents')
+          .select('id, signature_type')
+          .eq('training_id', id)
+          .in('signature_type', ['participant', 'representative', 'trainer', 'companySeal']);
+          
+        if (existingSignatures && existingSignatures.length > 0) {
+          console.log(`🔒 [INFO] ${existingSignatures.length} signatures trouvées pour la formation d'origine. Elles ne seront PAS copiées.`);
+        }
+        
+        // 3. Seul le tampon d'organisme sera préservé lors de la duplication
+        console.log("✅ [SECURITY] Seul le tampon d'organisme de formation sera conservé pour cette nouvelle formation.");
+        
+        // 4. Si la formation d'origine avait un tampon d'organisme personnalisé (autre que celui des settings), on pourrait le copier ici
+        // Mais dans notre cas, on utilisera simplement le tampon global des settings
+      } catch (signatureError) {
+        console.error('❌ [ERROR] Erreur lors du nettoyage des signatures:', signatureError);
+        // Ne pas bloquer le processus si cette partie échoue
+      }
+      
       // Add the duplicated training to the list
-      setTrainings([data[0], ...trainings]);
+      setTrainings([newTraining, ...trainings]);
       
       // Close the form and open the edit form for the new duplicated training
       setShowAddForm(false);
@@ -909,13 +825,12 @@ export const TrainingsView = () => {
       
       // Open the edit form for the new training
       setTimeout(() => {
-        setEditingTraining(data[0]);
+        setEditingTraining(newTraining);
         setShowAddForm(true);
       }, 100);
       
     } catch (error) {
       console.error('Error duplicating training:', error);
-      // Improved error logging with details
       if (error instanceof Error) {
         console.error('Error message:', error.message);
         console.error('Error stack:', error.stack);
@@ -977,50 +892,92 @@ export const TrainingsView = () => {
   // Fonction pour associer automatiquement tous les apprenants d'une entreprise à une formation
   const handleAutoAssociateLearners = async (trainingId: string, companyId: string) => {
     try {
+      console.log('🔍 [DEBUG] Début de handleAutoAssociateLearners');
+      console.log(`➡️ [INPUT] trainingId: ${trainingId}`);
+      console.log(`➡️ [INPUT] companyId: ${companyId}`);
+      
       setAssociatingTrainingId(trainingId);
-      console.log(`Association automatique des apprenants de l'entreprise ${companyId} à la formation ${trainingId}`);
       
       // Récupérer tous les apprenants de l'entreprise
+      console.log(`🔍 [DEBUG] Récupération des apprenants de l'entreprise ${companyId}`);
       const { data: companyLearners, error: learnersError } = await supabase
         .from('user_profiles')
-        .select('id')
+        .select('id, first_name, last_name, company_id')
         .eq('company_id', companyId);
       
       if (learnersError) {
-        console.error('Erreur lors de la récupération des apprenants de l\'entreprise:', learnersError);
+        console.error('❌ [ERROR] Erreur lors de la récupération des apprenants:', learnersError);
+        console.error('❌ [ERROR] Détails de l\'erreur:', {
+          code: learnersError.code,
+          message: learnersError.message,
+          details: learnersError.details
+        });
         alert('Erreur lors de la récupération des apprenants. Veuillez réessayer.');
         return;
       }
       
       if (!companyLearners || companyLearners.length === 0) {
-        console.log('Aucun apprenant trouvé pour cette entreprise');
+        console.log('ℹ️ [INFO] Aucun apprenant trouvé pour cette entreprise');
         alert('Aucun apprenant trouvé pour cette entreprise.');
         return;
       }
       
-      console.log(`${companyLearners.length} apprenants trouvés pour l'entreprise ${companyId}`);
+      console.log(`✅ [DEBUG] Apprenants trouvés:`, companyLearners);
       
-      // Mettre à jour le champ training_id de tous les apprenants de l'entreprise
-      const { error: updateError } = await supabase
+      // Vérifier d'abord si la requête est correcte en imprimant les IDs
+      const learnerIds = companyLearners.map(learner => learner.id);
+      console.log(`🔍 [DEBUG] IDs des apprenants à mettre à jour:`, learnerIds);
+      
+      // Mettre à jour le training_id UNIQUEMENT pour les apprenants de l'entreprise spécifiée
+      console.log(`🔍 [DEBUG] Mise à jour du training_id pour les apprenants de l'entreprise ${companyId}`);
+      const { data: updatedData, error: updateError } = await supabase
         .from('user_profiles')
         .update({ training_id: trainingId })
-        .eq('company_id', companyId);
+        .eq('company_id', companyId)
+        .select();
       
       if (updateError) {
-        console.error('Erreur lors de l\'association automatique des apprenants:', updateError);
+        console.error('❌ [ERROR] Erreur lors de la mise à jour des apprenants:', updateError);
+        console.error('❌ [ERROR] Détails de l\'erreur:', {
+          code: updateError.code,
+          message: updateError.message,
+          details: updateError.details
+        });
         alert('Erreur lors de l\'association des apprenants. Veuillez réessayer.');
         return;
       }
       
-      console.log(`${companyLearners.length} apprenants associés automatiquement à la formation ${trainingId}`);
+      console.log('✅ [DEBUG] Lignes mises à jour par Supabase:', updatedData);
+      console.log(`✅ [DEBUG] Nombre d'apprenants mis à jour: ${updatedData?.length || 0}`);
       
-      // Afficher une notification de succès
-      alert(`${companyLearners.length} apprenants ont été associés à cette formation avec succès.`);
+      // Si aucune ligne n'a été mise à jour, vérifier manuellement la condition
+      if (!updatedData || updatedData.length === 0) {
+        console.log('⚠️ [WARNING] Aucune ligne mise à jour, vérification manuelle...');
+        
+        // Vérifier si la requête directe fonctionne
+        const { data: directQuery, error: directError } = await supabase
+          .from('user_profiles')
+          .select('id, first_name, last_name, company_id, training_id')
+          .eq('company_id', companyId);
+          
+        console.log('🔍 [DEBUG] Requête directe pour vérifier les profils:', directQuery);
+        
+        if (directError) {
+          console.error('❌ [ERROR] Erreur lors de la vérification directe:', directError);
+        }
+      }
       
       // Rafraîchir la liste des formations pour afficher les apprenants associés
+      console.log('🔍 [DEBUG] Rafraîchissement de la liste des formations');
       await fetchTrainings();
+      
+      console.log('✅ [DEBUG] Fin de handleAutoAssociateLearners avec succès');
+      alert(`${updatedData?.length || 0} apprenant(s) associé(s) à la formation.`);
     } catch (error) {
-      console.error('Erreur lors de l\'association automatique des apprenants:', error);
+      console.error('❌ [ERROR] Erreur lors de l\'association des apprenants:', error);
+      if (error instanceof Error) {
+        console.error('❌ [ERROR] Stack trace:', error.stack);
+      }
       alert('Une erreur est survenue lors de l\'association des apprenants.');
     } finally {
       setAssociatingTrainingId(null);

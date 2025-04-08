@@ -435,13 +435,13 @@ export class DocumentManager {
         console.log('🔍 [DEBUG] Signature téléchargée avec succès, data:', uploadData);
 
         // Obtenir l'URL publique
-        const { data: urlData, error: urlError } = await supabase.storage
+        const { data: urlData } = await supabase.storage
           .from('signatures')
           .getPublicUrl(fullPath);
 
-        if (urlError || !urlData) {
-          console.error('🪲 [TRAÇAGE] Error lors de la génération de l\'URL publique:', urlError);
-          throw new Error('Erreur lors de la génération de l\'URL publique');
+        if (!urlData || !urlData.publicUrl) {
+          console.error('❌ [ERREUR_STORAGE] Impossible d\'obtenir l\'URL publique après upload');
+          throw new Error('Erreur lors de la génération de l\'URL publique après upload');
         }
 
         const publicUrl = urlData.publicUrl;
@@ -449,38 +449,45 @@ export class DocumentManager {
 
         try {
           // Enregistrer la référence dans la base de données
-          console.log('🔍 [DEBUG] Enregistrement de la référence dans la base de données');
+          console.log('🔍 [DEBUG] Préparation de l\'insertion dans la table documents...');
           
-          // CORRECTION: Pour les signatures du formateur et du représentant,
-          // ne pas spécifier user_id pour qu'ils soient globaux à la formation
+          // Redéfinir isGlobalSignature ici car elle était hors scope avec les modifs précédentes
           const isGlobalSignature = params.signature_type === 'trainer' || 
                                    params.signature_type === 'representative' ||
                                    params.signature_type === 'organizationSeal';
-                                   
           console.log('🪲 [TRAÇAGE] Signature globale?', isGlobalSignature, 'pour', params.signature_type);
+
+          const documentPayload = {
+            training_id: params.training_id,
+            user_id: isGlobalSignature ? null : params.user_id,
+            file_url: publicUrl,
+            type: params.type,
+            title: title,
+            created_by: params.created_by,
+            signature_type: params.signature_type 
+          };
+          
+          console.log('🔍 [DEBUG] Données à insérer:', documentPayload);
           
           const { data: insertData, error: insertError } = await supabase
             .from('documents')
-            .insert([
-              {
-                training_id: params.training_id,
-                user_id: isGlobalSignature ? null : params.user_id,
-                file_url: publicUrl,
-                type: params.type,
-                title: title,
-                created_by: params.created_by
-              }
-            ]);
+            .insert([documentPayload]) // Utiliser la variable pour la clarté
+            .select(); // Ajouter .select() pour obtenir les données insérées
           
           if (insertError) {
-            console.error('🪲 [TRAÇAGE] Error lors de l\'insertion dans la base de données:', insertError);
-            console.warn('L\'URL publique reste valide malgré l\'erreur d\'insertion');
+            // Correction des apostrophes dans les messages d'erreur
+            console.error('❌❌❌ [ERREUR_DB] Échec de l\'insertion dans la base de données:', insertError);
+            console.error('❌❌❌ [ERREUR_DB] Détails de l\'erreur:', JSON.stringify(insertError, null, 2));
+            // Ne pas masquer l'erreur, la remonter
+            throw new Error(`Erreur lors de l\'enregistrement en base de données: ${insertError.message}`);
           } else {
-            console.log('🔍 [DEBUG] Référence enregistrée avec succès dans la base de données');
+            console.log('✅ [DEBUG] Référence enregistrée avec succès dans la base de données:', insertData);
           }
-        } catch (dbError) {
-          console.error('🪲 [TRAÇAGE] Exception lors de l\'insertion dans la base de données:', dbError);
-          console.warn('L\'URL publique reste valide malgré l\'erreur d\'insertion');
+        } catch (dbError: any) { // Typage explicite de l'erreur
+          // Correction des apostrophes dans les messages d'erreur
+          console.error('❌❌❌ [EXCEPTION_DB] Exception lors de l\'insertion dans la base de données:', dbError);
+          // Remonter l'erreur pour qu'elle soit visible côté client
+          throw new Error(`Exception lors de l\'enregistrement en base de données: ${dbError.message}`);
         }
 
         console.log('🪲 [TRAÇAGE] DocumentManager.saveSignature TERMINÉ avec succès:', publicUrl);
@@ -552,7 +559,7 @@ export class DocumentManager {
         console.log('🔎 [DIAGNOSTIC_REPRÉSENTANT] Résultat recherche exacte:', { 
           training_id: params.training_id, 
           error: exactError?.message,
-          found: exactData?.length > 0,
+          found: (exactData && exactData.length > 0) || false,
           data: exactData
         });
         
@@ -567,8 +574,8 @@ export class DocumentManager {
           
         console.log('🔎 [DIAGNOSTIC_REPRÉSENTANT] Résultat recherche globale:', { 
           error: globalError?.message,
-          found: globalData?.length > 0,
-          count: globalData?.length,
+          found: (globalData && globalData.length > 0) || false,
+          count: globalData?.length || 0,
           data: globalData
         });
       }
@@ -618,109 +625,115 @@ export class DocumentManager {
           title: title
         });
         
-        // AMÉLIORATION: Essayer de trouver la signature même si elle n'est pas liée à la formation
-        // Cela permet de réutiliser une signature du formateur ou du représentant à travers les formations
-        if (params.signature_type === 'representative' || params.signature_type === 'trainer') {
-          console.log('🔍 [DEBUG] Recherche globale pour une signature de type:', params.signature_type);
-          
-          try {
-            // Rechercher globalement sans training_id (toutes formations confondues)
-            const { data: globalData, error: globalError } = await supabase
-              .from('documents')
-              .select('file_url, created_at')
-              .eq('title', title)
-              .eq('type', dbDocumentType)
-              .order('created_at', { ascending: false })
-              .limit(1);
-              
-            if (!globalError && globalData && globalData.length > 0) {
-              const fileUrl = globalData[0].file_url;
-              console.log(`🔍 [DEBUG] Signature de ${params.signature_type} trouvée globalement:`, fileUrl);
-              return fileUrl;
-            }
-            
-            // Si toujours rien, essayer en cherchant dans les fichiers du bucket signatures
-            const typePrefix = params.signature_type === 'representative' ? 'representative' : 'trainer';
-            
-            const { data: files, error: storageError } = await supabase.storage
-              .from('signatures')
-              .list('', { 
-                limit: 10,
-                search: `${typePrefix}_${params.type}`
-              });
-              
-            if (!storageError && files && files.length > 0) {
-              // Trier par date (nom contient timestamp)
-              const sortedFiles = files
-                .filter(file => file.name.includes(`${typePrefix}_${params.type}`))
-                .sort((a, b) => b.name.localeCompare(a.name));
-                
-              if (sortedFiles.length > 0) {
-                const { data: urlData } = await supabase.storage
-                  .from('signatures')
-                  .getPublicUrl(sortedFiles[0].name);
-                  
-                if (urlData && urlData.publicUrl) {
-                  console.log(`🔍 [DEBUG] Signature de ${params.signature_type} trouvée dans le stockage:`, urlData.publicUrl);
-                  return urlData.publicUrl;
-                }
-              }
-            }
-          } catch (globalSearchError) {
-            console.error('🔍 [DEBUG] Erreur lors de la recherche globale:', globalSearchError);
-          }
-        }
+        // !!!!!!!!!!!!!!!!!! SECTION DANGEREUSE !!!!!!!!!!!!!!!!!!!!
+        // SUPPRIMER / COMMENTER la recherche globale ici pour éviter les fuites de données
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         
-        // Si nous cherchons un tampon et que nous n'avons rien trouvé, essayons de rechercher
-        // directement dans le bucket de stockage avec le nouveau format de nom de fichier
-        if (params.signature_type === 'companySeal' || params.signature_type === 'organizationSeal') {
-          console.log('🔍 [DEBUG] Tentative de récupération directe dans le stockage pour le tampon...');
-          
-          try {
-            // Déterminer le préfixe de recherche en fonction du type de tampon
-            const searchPrefix = params.signature_type === 'companySeal' ? 'seal_company' : 'seal_organization';
-            
-            // Lister tous les fichiers dans le bucket
-            const { data: files, error: listError } = await supabase.storage
-              .from('signatures')
-              .list('', {
-                limit: 100,
-                sortBy: { column: 'created_at', order: 'desc' }
-              });
-            
-            if (listError) {
-              console.error('🔍 [DEBUG] Erreur lors de la récupération des fichiers:', listError);
-            } else if (files && files.length > 0) {
-              console.log(`🔍 [DEBUG] ${files.length} fichiers trouvés dans le bucket signatures`);
-              
-              // Filtrer les fichiers qui correspondent au préfixe et au type de document
-              const matchingFiles = files
-                .filter(file => file.name.startsWith(searchPrefix) && file.name.includes(params.type))
-                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-              
-              if (matchingFiles.length > 0) {
-                console.log('🔍 [DEBUG] Tampons trouvés par recherche dans le stockage:', matchingFiles.length);
-                
-                // Générer l'URL publique du fichier le plus récent
-                const { data: urlData } = await supabase.storage
-                  .from('signatures')
-                  .getPublicUrl(matchingFiles[0].name);
-                
-                if (urlData && urlData.publicUrl) {
-                  console.log('🔍 [DEBUG] URL de tampon trouvée dans le stockage:', urlData.publicUrl);
-                  return urlData.publicUrl;
-                }
-              }
-            }
-          } catch (storageError) {
-            console.error('🔍 [DEBUG] Erreur lors de la recherche dans le stockage:', storageError);
-          }
-        }
+        // // AMÉLIORATION: Essayer de trouver la signature même si elle n'est pas liée à la formation
+        // // Cela permet de réutiliser une signature du formateur ou du représentant à travers les formations
+        // if (params.signature_type === 'representative' || params.signature_type === 'trainer') {
+        //   console.log('🔍 [DEBUG] Recherche globale pour une signature de type:', params.signature_type);
+        //   
+        //   try {
+        //     // Rechercher globalement sans training_id (toutes formations confondues)
+        //     const { data: globalData, error: globalError } = await supabase
+        //       .from('documents')
+        //       .select('file_url, created_at')
+        //       .eq('title', title)
+        //       .eq('type', dbDocumentType)
+        //       .order('created_at', { ascending: false })
+        //       .limit(1);
+        //       
+        //     if (!globalError && globalData && globalData.length > 0) {
+        //       const fileUrl = globalData[0].file_url;
+        //       console.log(`🔍 [DEBUG] Signature de ${params.signature_type} trouvée globalement:`, fileUrl);
+        //       return fileUrl;
+        //     }
+        //     
+        //     // Si toujours rien, essayer en cherchant dans les fichiers du bucket signatures
+        //     const typePrefix = params.signature_type === 'representative' ? 'representative' : 'trainer';
+        //     
+        //     const { data: files, error: storageError } = await supabase.storage
+        //       .from('signatures')
+        //       .list('', { 
+        //         limit: 10,
+        //         search: `${typePrefix}_${params.type}`
+        //       });
+        //       
+        //     if (!storageError && files && files.length > 0) {
+        //       // Trier par date (nom contient timestamp)
+        //       const sortedFiles = files
+        //         .filter(file => file.name.includes(`${typePrefix}_${params.type}`))
+        //         .sort((a, b) => b.name.localeCompare(a.name));
+        //         
+        //       if (sortedFiles.length > 0) {
+        //         const { data: urlData } = await supabase.storage
+        //           .from('signatures')
+        //           .getPublicUrl(sortedFiles[0].name);
+        //           
+        //         if (urlData && urlData.publicUrl) {
+        //           console.log(`🔍 [DEBUG] Signature de ${params.signature_type} trouvée dans le stockage:`, urlData.publicUrl);
+        //           return urlData.publicUrl;
+        //         }
+        //       }
+        //     }
+        //   } catch (globalSearchError) {
+        //     console.error('🔍 [DEBUG] Erreur lors de la recherche globale:', globalSearchError);
+        //   }
+        // }
         
+        // // Si nous cherchons un tampon et que nous n'avons rien trouvé, essayons de rechercher
+        // // directement dans le bucket de stockage avec le nouveau format de nom de fichier
+        // if (params.signature_type === 'companySeal' || params.signature_type === 'organizationSeal') {
+        //   console.log('🔍 [DEBUG] Tentative de récupération directe dans le stockage pour le tampon...');
+        //   
+        //   try {
+        //     // Déterminer le préfixe de recherche en fonction du type de tampon
+        //     const searchPrefix = params.signature_type === 'companySeal' ? 'seal_company' : 'seal_organization';
+        //     
+        //     // Lister tous les fichiers dans le bucket
+        //     const { data: files, error: listError } = await supabase.storage
+        //       .from('signatures')
+        //       .list('', {
+        //         limit: 100,
+        //         sortBy: { column: 'created_at', order: 'desc' }
+        //       });
+        //     
+        //     if (listError) {
+        //       console.error('🔍 [DEBUG] Erreur lors de la récupération des fichiers:', listError);
+        //     } else if (files && files.length > 0) {
+        //       console.log(`🔍 [DEBUG] ${files.length} fichiers trouvés dans le bucket signatures`);
+        //       
+        //       // Filtrer les fichiers qui correspondent au préfixe et au type de document
+        //       const matchingFiles = files
+        //         .filter(file => file.name.startsWith(searchPrefix) && file.name.includes(params.type))
+        //         .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        //       
+        //       if (matchingFiles.length > 0) {
+        //         console.log('🔍 [DEBUG] Tampons trouvés par recherche dans le stockage:', matchingFiles.length);
+        //         
+        //         // Générer l'URL publique du fichier le plus récent
+        //         const { data: urlData } = await supabase.storage
+        //           .from('signatures')
+        //           .getPublicUrl(matchingFiles[0].name);
+        //         
+        //         if (urlData && urlData.publicUrl) {
+        //           console.log('🔍 [DEBUG] URL de tampon trouvée dans le stockage:', urlData.publicUrl);
+        //           return urlData.publicUrl;
+        //         }
+        //       }
+        //     }
+        //   } catch (storageError) {
+        //     console.error('🔍 [DEBUG] Erreur lors de la recherche dans le stockage:', storageError);
+        //   }
+        // }
+        
+        // Si aucune signature n'est trouvée par la requête directe ET que la recherche globale est désactivée,
+        // retourner null.
         return null;
       }
       
-      console.log('🔍 [DEBUG] Signatures trouvées:', data.length, 'résultats');
+      console.log('🔍 [DEBUG] Signatures trouvées par la requête directe:', data.length, 'résultats');
       
       // Essayer chaque URL jusqu'à en trouver une valide
       for (const item of data) {
@@ -732,11 +745,11 @@ export class DocumentManager {
         
         // Vérifier que l'URL est valide avant de la retourner
         try {
-        const isValid = await isValidImageUrl(urlWithCacheBuster, 5000);
-        if (isValid) {
-          console.log('🔍 [DEBUG] Signature trouvée et validée:', urlWithCacheBuster);
-          return item.file_url; // Retourner l'URL originale sans cache-busting
-        } else {
+          const isValid = await isValidImageUrl(urlWithCacheBuster);
+          if (isValid) {
+            console.log('🔍 [DEBUG] Signature trouvée et validée:', urlWithCacheBuster);
+            return item.file_url; // Retourner l'URL originale sans cache-busting
+          } else {
             console.log('🔍 [DEBUG] URL invalide, essai suivant:', item.file_url);
           }
         } catch (validationError) {
@@ -1006,7 +1019,20 @@ export class DocumentManager {
    * @deprecated Utiliser isValidImageUrl de SignatureUtils.ts à la place
    */
   static async isValidImageUrl(url: string | null): Promise<boolean> {
-    return isValidImageUrl(url, 3000);
+    if (!url) return false;
+    
+    // Ajouter la gestion d'erreur pour l'appel fetch
+    try {
+      const response = await fetch(url, {
+        method: 'HEAD',
+        cache: 'no-cache'
+      });
+      return response.ok && (response.headers.get('content-type')?.startsWith('image/') ?? false);
+    } catch (error) {
+      // Correction de l'appel console.error
+      console.error('🔍 [DEBUG] Erreur lors de la validation de l\'URL (HEAD request):', error);
+      return false;
+    }
   }
 
   /**

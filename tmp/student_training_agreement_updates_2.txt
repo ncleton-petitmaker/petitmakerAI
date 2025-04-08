@@ -1,0 +1,37 @@
+// 4. Fonction safeSetRepresentativeSignature à ajouter près des autres fonctions safeSet
+const safeSetRepresentativeSignature = useCallback((value: string | null) => {
+  if (value || !signaturesLocked) {
+    setRepresentativeSignature(value);
+  } else {
+    console.log('🔒 [PROTECT] Tentative de définir representativeSignature à null bloquée');
+  }
+}, [signaturesLocked]);
+
+// 5. Fonction updateSignatureCache à remplacer (vers la ligne 281)
+const updateSignatureCache = (participantSig: string | null, companySeal: string | null, organizationSeal: string | null, trainerSig: string | null, representativeSig: string | null) => {
+  try {
+    // Mettre à jour le cache global
+    GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+      participantSig,
+      companySeal,
+      organizationSeal,
+      trainerSig,
+      representativeSig
+    });
+    
+    // Mettre à jour le localStorage
+    const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+    const cacheData = {
+      participantSig,
+      companySeal,
+      organizationSeal,
+      trainerSig,
+      representativeSig,
+      timestamp: Date.now()
+    };
+    localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+    console.log('💾 [CACHE] Signatures mises à jour dans le cache local');
+  } catch (e) {
+    console.error('❌ [CACHE] Erreur lors de la mise à jour du cache:', e);
+  }
+}; 

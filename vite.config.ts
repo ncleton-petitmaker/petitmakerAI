@@ -2,8 +2,14 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { splitVendorChunkPlugin } from 'vite';
 import { compression } from 'vite-plugin-compression2';
+import path from 'path';
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src')
+    }
+  },
   plugins: [
     react(),
     splitVendorChunkPlugin(),

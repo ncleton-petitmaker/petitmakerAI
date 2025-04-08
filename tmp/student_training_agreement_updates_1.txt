@@ -1,0 +1,12 @@
+import { SignatureType, DocumentType, getSignatureTypeFromString, isSealType, generateStandardSignatureFilename } from '../types/SignatureTypes';
+
+interface SignatureCacheItem {
+  participantSig?: string | null;
+  companySeal?: string | null;
+  organizationSeal?: string | null;
+  trainerSig?: string | null;
+  representativeSig?: string | null;
+  timestamp?: number;
+}
+
+const [hasRepresentativeSignature, setHasRepresentativeSignature] = useState(false);

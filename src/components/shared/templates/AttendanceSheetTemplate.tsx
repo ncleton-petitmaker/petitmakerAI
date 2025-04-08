@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Training, 
   Participant, 
@@ -70,151 +70,173 @@ export const AttendanceSheetTemplate: React.FC<AttendanceSheetTemplateProps> = (
 }) => {
   const dates = getTrainingDates(training.start_date, training.end_date);
   const location = formatLocation(training.location);
+  const [hasDefaultSignature, setHasDefaultSignature] = useState<boolean>(
+    participantSignature !== null || (participantSignatures && !!participantSignatures.all)
+  );
 
-  console.log('🔍 [DEBUG] AttendanceSheetTemplate - signatures reçues:', { 
-    participantSignature, 
-    trainerSignature,
-    participantSignatures,
-    trainerSignatures,
-    viewContext
-  });
+  useEffect(() => {
+    // Vérifier si nous avons déjà une signature par défaut
+    setHasDefaultSignature(
+      participantSignature !== null || (participantSignatures && !!participantSignatures.all)
+    );
+  }, [participantSignature, participantSignatures]);
 
-  const isCellSigned = (date: string, period: 'morning' | 'afternoon') => {
-    return signedCells.some(cell => cell.date === date && cell.period === period);
+  const isCellSigned = (date: string, period: 'morning' | 'afternoon', isTrainer = false) => {
+    // Ne vérifier que les cellules signées dans le contexte approprié
+    // isTrainer indique si on vérifie une cellule formateur
+    if (isTrainer) {
+      // Pour le formateur, vérifier si le formateur a signé cette cellule
+      const signatureKey = `${date}_${period}`;
+      return trainerSignatures && !!trainerSignatures[signatureKey];
+    } else {
+      // Pour l'apprenant, vérifier si l'apprenant a signé cette cellule
+      return signedCells.some(cell => cell.date === date && cell.period === period);
+    }
   };
 
-  const renderSignatureCell = (date: string, period: 'morning' | 'afternoon') => {
-    const signed = isCellSigned(date, period);
-    const canSign = viewContext === 'student' && isSigningEnabled && !signed;
+  const renderSignatureCell = (date: string, period: 'morning' | 'afternoon', isTrainer = false) => {
+    // Vérifier si cette cellule spécifique (date + période) est signée par la personne appropriée
+    const signed = isCellSigned(date, period, isTrainer);
+    const canSign = viewContext === 'student' && !isTrainer && isSigningEnabled && !signed;
+    const canTrainerSign = viewContext === 'crm' && isTrainer && isSigningEnabled;
+
+    // Déterminer quelle signature afficher - UNIQUEMENT pour cette cellule spécifique
+    let signatureUrl = null;
+    
+    if (!isTrainer) {
+      // Pour l'apprenant - vérifier si la cellule spécifique (date + période) a une signature
+      if (signed) {
+        // Si la cellule est signée, chercher d'abord une signature spécifique à cette date et période
+        const signatureKey = `${date}_${period}`;
+        if (participantSignatures && participantSignatures[signatureKey]) {
+          signatureUrl = participantSignatures[signatureKey];
+        } else if (participantSignatures && participantSignatures[date]) {
+          // Pour compatibilité avec d'anciens formats
+          signatureUrl = participantSignatures[date];
+        } else if (participantSignature) {
+          // Utiliser la signature par défaut si nécessaire
+          signatureUrl = participantSignature;
+        }
+      }
+    } else {
+      // Pour le formateur - vérifier uniquement les signatures du formateur
+      const signatureKey = `${date}_${period}`;
+      if (trainerSignatures && trainerSignatures[signatureKey]) {
+        signatureUrl = trainerSignatures[signatureKey];
+      } else if (trainerSignatures && trainerSignatures[date]) {
+        signatureUrl = trainerSignatures[date];
+      } else if (trainerSignature) {
+        // On n'affiche pas automatiquement la signature formateur
+        signatureUrl = null;
+      }
+    }
+
+    console.log(`Cellule ${date} ${period} ${isTrainer ? 'formateur' : 'stagiaire'}: signée=${signed}, URL=${signatureUrl?.substring(0, 20)}...`);
 
     return (
       <td 
-        className={`border border-gray-300 p-2 h-16 ${canSign ? 'cursor-pointer hover:bg-gray-50' : ''}`}
-        onClick={() => canSign && onCellClick && onCellClick(date, period)}
+        className={`border border-gray-300 p-2 h-16 align-middle ${canSign || (canTrainerSign && isTrainer) ? 'cursor-pointer hover:bg-gray-50' : ''}`}
+        onClick={() => {
+          if ((canSign && onCellClick) || (canTrainerSign && onCellClick)) {
+            onCellClick(date, period);
+          }
+        }}
       >
-        {signed && participantSignatures && participantSignatures[date] && (
+        {signatureUrl ? (
           <div className="flex flex-col justify-center items-center h-full">
-            <div className="text-xs text-center mb-1 font-semibold">
-              {participant.first_name} {participant.last_name}
-            </div>
-            <img src={participantSignatures[date]} alt="Signature stagiaire" className="max-h-12 max-w-full" />
+            <img src={signatureUrl} alt={isTrainer ? "Signature formateur" : "Signature stagiaire"} className="max-h-12 max-w-full" />
           </div>
-        )}
-        {canSign && (
+        ) : canSign || canTrainerSign ? (
           <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-            Cliquer pour signer
+            <div className="text-center">
+              <svg className="w-5 h-5 mx-auto mb-1 text-gray-400" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+                <path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
+              </svg>
+              Signer
+            </div>
           </div>
-        )}
+        ) : null}
       </td>
     );
   };
 
-  // Fonction pour obtenir la signature finale du participant (priorité au nouveau format)
-  const getParticipantSignature = (): string | null | undefined => {
-    const signature = participantSignatures && participantSignatures.all 
-      ? participantSignatures.all 
-      : participantSignature;
-    
-    console.log('🔍 [DEBUG] Signature participant finale:', signature);
-    return signature;
-  };
-
-  // Fonction pour obtenir la signature finale du formateur (priorité au nouveau format)
-  const getTrainerSignature = (): string | null | undefined => {
-    const signature = trainerSignatures && trainerSignatures.all
-      ? trainerSignatures.all
-      : trainerSignature;
-    
-    console.log('🔍 [DEBUG] Signature formateur finale:', signature);
-    return signature;
+  // Formatage de la durée de la formation pour l'affichage
+  const formattedDuration = () => {
+    if (!training.duration) return "";
+    // Détection si la durée contient des informations en heures
+    if (training.duration.includes('h') || /\d+\/\d+/.test(training.duration)) {
+      return training.duration;
+    }
+    // Sinon on essaie de formatter en jours avec une estimation en heures
+    const days = parseInt(training.duration);
+    if (!isNaN(days)) {
+      return `${days} jour${days > 1 ? 's' : ''} (soit ${days * 7} heures)`;
+    }
+    return training.duration;
   };
 
   return (
-    <div className="bg-white p-8 shadow-sm border border-gray-200 mx-auto">
-      <div className="text-center mb-8">
-        <h1 className="text-2xl font-bold mb-2">FEUILLE D'ÉMARGEMENT</h1>
+    <div className="bg-white p-8 border border-gray-200 mx-auto relative">
+      <div className="text-center mb-6 border border-blue-900">
+        <h1 className="text-xl font-bold py-2">FEUILLE D'ÉMARGEMENT</h1>
       </div>
       
       <div className="mb-6">
-        {organizationSettings?.organization_name && (
-          <div className="text-center mb-4">
-            <p className="font-semibold">{organizationSettings.organization_name}</p>
-            {organizationSettings.address && <p>{organizationSettings.address}</p>}
-            {organizationSettings.siret && <p>SIRET : {organizationSettings.siret}</p>}
-          </div>
-        )}
+        <div className="mb-4">
+          <p><strong>Stagiaire :</strong> {participant.first_name} {participant.last_name}</p>
+          <p><strong>Formation :</strong> {training.title}</p>
+          <p><strong>Durée :</strong> {formattedDuration()}</p>
+          <p><strong>Formateur :</strong> {training.trainer_name}</p>
+          <p><strong>Lieu de la formation :</strong> {location}</p>
+        </div>
       </div>
       
       <div className="mb-6">
-        <h2 className="text-xl font-bold mb-4">Informations de la formation</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <p><strong>Intitulé :</strong> {training.title}</p>
-            <p><strong>Durée :</strong> {training.duration}</p>
-            <p><strong>Formateur :</strong> {training.trainer_name}</p>
-          </div>
-          <div>
-            <p><strong>Lieu :</strong> {location}</p>
-            <p><strong>Date de début :</strong> {formatDate(training.start_date)}</p>
-            <p><strong>Date de fin :</strong> {formatDate(training.end_date)}</p>
-          </div>
-        </div>
-      </div>
-      
-      <div className="border border-gray-300 p-4 mb-8">
-        <h2 className="text-lg font-bold mb-4">Participant</h2>
-        <p><strong>Nom et prénom :</strong> {participant.first_name} {participant.last_name}</p>
-        {participant.job_position && (
-          <p><strong>Fonction :</strong> {participant.job_position}</p>
-        )}
-      </div>
-      
-      <div className="border border-gray-300 p-4 mb-8">
-        <h2 className="text-lg font-bold mb-4">ÉMARGEMENT</h2>
-        <p className="mb-4">Je soussigné(e) {participant.first_name} {participant.last_name}, atteste avoir participé à la formation "{training.title}" {dates}.</p>
-        
-        <div className="mt-8 grid grid-cols-2 gap-6">
-          <div className="border p-4">
-            <h4 className="font-bold mb-2">Signature du formateur</h4>
-            <p>{training.trainer_name}</p>
-            {getTrainerSignature() ? (
-              <img 
-                src={getTrainerSignature() || ''} 
-                alt="Signature du formateur" 
-                className="max-h-20 mt-2" 
-              />
-            ) : (
-              <div className="h-20 flex items-center justify-center border-t mt-2 text-gray-400">
-                {viewContext === 'crm' ? 'Votre signature ici' : 'En attente de signature'}
-              </div>
-            )}
-          </div>
-          
-          <div className="border p-4">
-            <h4 className="font-bold mb-2">Signature du stagiaire</h4>
-            <p>{participant.first_name} {participant.last_name}</p>
-            {getParticipantSignature() ? (
-              <img 
-                src={getParticipantSignature() || ''} 
-                alt="Signature du stagiaire" 
-                className="max-h-20 mt-2" 
-              />
-            ) : (
-              <div className="h-20 flex items-center justify-center border-t mt-2 text-gray-400">
-                {viewContext === 'student' ? 'Votre signature ici' : 'En attente de signature'}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-      
-      <div className="mt-8 text-right">
-        <p>Document généré le {getCurrentDate()}</p>
-      </div>
-      
-      <div className="mt-12 text-center">
-        <p className="text-sm text-gray-500">PetitMaker - SIRET : 123 456 789 00010 - Déclaration d'activité enregistrée sous le numéro 11 75 12345 67</p>
-        <p className="text-sm text-gray-500">Cet enregistrement ne vaut pas agrément de l'État</p>
+        <table className="w-full border-collapse border border-gray-400">
+          <thead>
+            <tr className="bg-gray-100">
+              <th className="border border-gray-400 p-3 w-1/4 text-center">Dates</th>
+              <th className="border border-gray-400 p-3 w-1/4 text-center">Horaires</th>
+              <th className="border border-gray-400 p-3 w-1/4 text-center">
+                Signature<br />du stagiaire
+              </th>
+              <th className="border border-gray-400 p-3 w-1/4 text-center">
+                Signature<br />du formateur
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {dates.map((date, index) => (
+              <React.Fragment key={date}>
+                {/* Matin */}
+                <tr className={index % 2 === 0 ? 'bg-gray-50' : ''}>
+                  <td rowSpan={2} className="border border-gray-300 p-3 text-center align-middle font-medium">
+                    {date.replace(/\//g, '/')}
+                  </td>
+                  <td className="border border-gray-300 p-3 text-center">
+                    De 9h à 12h30
+                  </td>
+                  {renderSignatureCell(date, 'morning')}
+                  {renderSignatureCell(date, 'morning', true)}
+                </tr>
+                {/* Après-midi */}
+                <tr className={index % 2 === 0 ? 'bg-gray-50' : ''}>
+                  <td className="border border-gray-300 p-3 text-center">
+                    De 13h30 à 17h
+                  </td>
+                  {renderSignatureCell(date, 'afternoon')}
+                  {renderSignatureCell(date, 'afternoon', true)}
+                </tr>
+                {/* Ajouter une légère séparation entre les jours */}
+                {index < dates.length - 1 && (
+                  <tr className="h-1 bg-white">
+                    <td colSpan={4} className="p-0"></td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

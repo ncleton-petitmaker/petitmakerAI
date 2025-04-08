@@ -1,0 +1,324 @@
+import { SignatureType, DocumentType, getSignatureTypeFromString, isSealType, generateStandardSignatureFilename } from '../types/SignatureTypes';
+
+interface SignatureCacheItem {
+  participantSig?: string | null;
+  companySeal?: string | null;
+  organizationSeal?: string | null;
+  trainerSig?: string | null;
+  representativeSig?: string | null;
+  timestamp?: number;
+}
+
+const [hasRepresentativeSignature, setHasRepresentativeSignature] = useState(false);
+
+const safeSetRepresentativeSignature = useCallback((value: string | null) => {
+  if (value || !signaturesLocked) {
+    setRepresentativeSignature(value);
+  } else {
+    console.log('🔒 [PROTECT] Tentative de définir representativeSignature à null bloquée');
+  }
+}, [signaturesLocked]);
+
+const updateSignatureCache = (participantSig: string | null, companySeal: string | null, organizationSeal: string | null, trainerSig: string | null, representativeSig: string | null) => {
+  try {
+    GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+      participantSig,
+      companySeal,
+      organizationSeal,
+      trainerSig,
+      representativeSig
+    });
+    
+    const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+    const cacheData = {
+      participantSig,
+      companySeal,
+      organizationSeal,
+      trainerSig,
+      representativeSig
+    };
+    localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+    
+    console.log('🔄 [CACHE] Cache de signatures mis à jour:', cacheData);
+  } catch (e) {
+    console.error('❌ [CACHE] Erreur lors de la mise à jour du cache:', e);
+  }
+};
+
+const handleSignatureSave = async (signatureDataUrl: string, type: SignatureType | 'participant' | 'companySeal' | 'representative' = SignatureType.PARTICIPANT) => {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) {
+    alert('Vous devez être connecté pour signer ce document.');
+    return;
+  }
+  
+  if (isSaving) return;
+  setIsSaving(true);
+  
+  const preventUnload = (e: BeforeUnloadEvent) => {
+    e.preventDefault();
+    e.returnValue = 'Enregistrement en cours. Êtes-vous sûr de vouloir quitter?';
+  };
+  window.addEventListener('beforeunload', preventUnload);
+  
+  try {
+    const signatureType = typeof type === 'string' ? getSignatureTypeFromString(type) : type;
+    
+    console.log(`🔍 [SAVE] Sauvegarde du ${isSealType(signatureType) ? 'tampon' : 'signature'} directement dans storage puis dans document_signatures`);
+    
+    try {
+      const timestamp = Date.now();
+      const userId = participant.id;
+      const trainingId = training.id;
+      
+      const fileName = generateStandardSignatureFilename(
+        signatureType,
+        DocumentType.CONVENTION,
+        trainingId,
+        userId
+      );
+      
+      console.log(`🔍 [SAVE] Enregistrement du fichier dans storage avec nom: ${fileName}`);
+      
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('signatures')
+        .upload(fileName, 
+          await (await fetch(signatureDataUrl)).blob(), 
+          { contentType: 'image/png', upsert: true });
+      
+      if (uploadError) {
+        throw new Error(`Erreur lors de l'upload du fichier: ${uploadError.message}`);
+      }
+      
+      console.log('✅ [SAVE] Fichier enregistré avec succès dans le bucket:', uploadData);
+      
+      const { data: urlData } = await supabase.storage
+        .from('signatures')
+        .getPublicUrl(fileName);
+      
+      if (!urlData || !urlData.publicUrl) {
+        throw new Error("Impossible d'obtenir l'URL publique du fichier");
+      }
+      
+      const publicUrl = urlData.publicUrl;
+      console.log('✅ [SAVE] URL publique générée:', publicUrl);
+      
+      const { data: signatureData, error: signatureError } = await supabase
+        .from('document_signatures')
+        .insert([{
+          user_id: participant.id,
+          signature_url: publicUrl,
+          signature_type: signatureType.toLowerCase(),
+          training_id: training.id,
+          type: DocumentType.CONVENTION,
+          path: fileName,
+          created_by: session.user.id
+        }])
+        .select();
+      
+      if (signatureError) {
+        console.error('❌ [SAVE] Erreur lors de l\'enregistrement dans document_signatures:', signatureError);
+        throw new Error(`Erreur lors de l'enregistrement dans document_signatures: ${signatureError.message}`);
+      }
+      
+      console.log('✅ [SAVE] Signature enregistrée dans document_signatures:', signatureData);
+      
+      const antiCacheUrl = `${publicUrl.split('?')[0]}?t=${timestamp}&forcereload=true`;
+      
+      const img = new Image();
+      img.onload = () => {
+        console.log(`✅ [SAVE] Image de ${isSealType(signatureType) ? 'tampon' : 'signature'} préchargée avec succès`);
+        
+        if (signatureType === SignatureType.COMPANY_SEAL) {
+          safeSetCompanySeal(antiCacheUrl);
+          toast.success('Tampon appliqué avec succès !');
+        } else if (signatureType === SignatureType.REPRESENTATIVE) {
+          safeSetRepresentativeSignature(antiCacheUrl);
+          setIsSigned(true);
+          setHasRepresentativeSignature(true);
+          toast.success('Signature du représentant légal enregistrée avec succès !');
+          
+          supabase.from('user_profiles')
+            .update({ has_signed_agreement: true })
+            .eq('user_id', participant.id)
+            .then(({ error }) => {
+              if (error) {
+                console.error('❌ [SAVE] Erreur lors de la mise à jour du statut has_signed_agreement:', error);
+              } else {
+                console.log('✅ [SAVE] Statut has_signed_agreement mis à jour avec succès');
+              }
+            });
+        } else {
+          safeSetParticipantSignature(antiCacheUrl);
+          setIsSigned(true);
+          setHasParticipantSignature(true);
+          toast.success('Signature enregistrée avec succès !');
+          
+          supabase.from('user_profiles')
+            .update({ has_signed_agreement: true })
+            .eq('user_id', participant.id)
+            .then(({ error }) => {
+              if (error) {
+                console.error('❌ [SAVE] Erreur lors de la mise à jour du statut has_signed_agreement:', error);
+              } else {
+                console.log('✅ [SAVE] Statut has_signed_agreement mis à jour avec succès');
+              }
+            });
+        }
+        
+        updateSignatureCache(
+          signatureType === SignatureType.PARTICIPANT ? antiCacheUrl : participantSignature,
+          signatureType === SignatureType.COMPANY_SEAL ? antiCacheUrl : companySeal,
+          organizationSeal,
+          trainerSignature,
+          signatureType === SignatureType.REPRESENTATIVE ? antiCacheUrl : representativeSignature
+        );
+        
+        setCanGeneratePDF(true);
+        
+        if (signatureType === SignatureType.PARTICIPANT || signatureType === SignatureType.REPRESENTATIVE) {
+          setShowConfetti(true);
+          setTimeout(() => {
+            setShowConfetti(false);
+          }, 5000);
+        }
+      };
+      
+      img.onerror = (error) => {
+        console.error('❌ [SAVE] Erreur lors du préchargement de l\'image:', error);
+        
+        if (signatureType === SignatureType.COMPANY_SEAL) {
+          safeSetCompanySeal(antiCacheUrl);
+        } else if (signatureType === SignatureType.REPRESENTATIVE) {
+          safeSetRepresentativeSignature(antiCacheUrl);
+          setIsSigned(true);
+          setHasRepresentativeSignature(true);
+        } else {
+          safeSetParticipantSignature(antiCacheUrl);
+          setIsSigned(true);
+          setHasParticipantSignature(true);
+        }
+        
+        updateSignatureCache(
+          signatureType === SignatureType.PARTICIPANT ? antiCacheUrl : participantSignature,
+          signatureType === SignatureType.COMPANY_SEAL ? antiCacheUrl : companySeal,
+          organizationSeal,
+          trainerSignature,
+          signatureType === SignatureType.REPRESENTATIVE ? antiCacheUrl : representativeSignature
+        );
+      };
+      
+      img.src = antiCacheUrl;
+    } catch (error: any) {
+      console.error('❌ [SAVE] Erreur lors de la sauvegarde de la signature:', error);
+      toast.error(`Erreur lors de la sauvegarde: ${error.message}`);
+    }
+  } catch (error: any) {
+    console.error('❌ [SAVE] Erreur globale:', error);
+    toast.error(`Une erreur est survenue: ${error.message}`);
+  } finally {
+    window.removeEventListener('beforeunload', preventUnload);
+    setIsSaving(false);
+  }
+};
+
+const loadSignaturesFromSupabase = async () => {
+  try {
+    const now = Date.now();
+    const timeSinceLastLoad = now - lastSignatureLoadTimeRef.current;
+    
+    if (timeSinceLastLoad < 5000 && 
+        (participantSignature || companySeal || representativeSignature) && 
+        lastSignatureLoadTimeRef.current > 0) {
+      console.log('⏱️ [LOAD] Chargement des signatures ignoré (dernière charge < 5s)');
+      return;
+    }
+    
+    lastSignatureLoadTimeRef.current = now;
+    console.log('🔍 [LOAD] Chargement des signatures depuis Supabase...');
+    
+    const { data: participantSigData, error: participantSigError } = await supabase
+      .from('document_signatures')
+      .select('*')
+      .eq('user_id', participant.id)
+      .eq('training_id', training.id)
+      .eq('type', 'convention')
+      .eq('signature_type', 'participant')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    
+    if (participantSigError) {
+      console.error('❌ [LOAD] Erreur lors de la récupération de la signature du participant:', participantSigError);
+    } else if (participantSigData && participantSigData.length > 0) {
+      const sigUrl = optimizeSealUrl(participantSigData[0].signature_url);
+      console.log('✅ [LOAD] Signature du participant trouvée:', sigUrl);
+      safeSetParticipantSignature(sigUrl);
+      setHasParticipantSignature(true);
+    } else {
+      console.log('ℹ️ [LOAD] Aucune signature de participant trouvée');
+      safeSetParticipantSignature(null);
+    }
+    
+    const { data: representativeSigData, error: representativeSigError } = await supabase
+      .from('document_signatures')
+      .select('*')
+      .eq('user_id', participant.id)
+      .eq('training_id', training.id)
+      .eq('type', 'convention')
+      .eq('signature_type', 'representative')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    
+    if (representativeSigError) {
+      console.error('❌ [LOAD] Erreur lors de la récupération de la signature du représentant:', representativeSigError);
+    } else if (representativeSigData && representativeSigData.length > 0) {
+      const sigUrl = optimizeSealUrl(representativeSigData[0].signature_url);
+      console.log('✅ [LOAD] Signature du représentant trouvée:', sigUrl);
+      safeSetRepresentativeSignature(sigUrl);
+      setHasRepresentativeSignature(true);
+    } else {
+      console.log('ℹ️ [LOAD] Aucune signature de représentant trouvée');
+      safeSetRepresentativeSignature(null);
+    }
+    
+    const { data: companySealData, error: companySealError } = await supabase
+      .from('document_signatures')
+      .select('*')
+      .eq('user_id', participant.id)
+      .eq('training_id', training.id)
+      .eq('type', 'convention')
+      .eq('signature_type', 'companyseal')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    
+    if (companySealError) {
+      console.error('❌ [LOAD] Erreur lors de la récupération du tampon d\'entreprise:', companySealError);
+    } else if (companySealData && companySealData.length > 0) {
+      const sealUrl = optimizeSealUrl(companySealData[0].signature_url);
+      console.log('✅ [LOAD] Tampon d\'entreprise trouvé:', sealUrl);
+      safeSetCompanySeal(sealUrl);
+    } else {
+      console.log('ℹ️ [LOAD] Aucun tampon d\'entreprise trouvé');
+      safeSetCompanySeal(null);
+    }
+    
+    const isSigned = !!participantSignature || !!representativeSignature;
+    setIsSigned(isSigned);
+    
+    const orgSeal = await fetchOrganizationSeal();
+    
+    const trainerSig = await loadTrainerSignature();
+    
+    updateSignatureCache(
+      participantSignature, 
+      companySeal, 
+      orgSeal, 
+      trainerSig,
+      representativeSignature
+    );
+    
+    console.log('✅ [LOAD] Chargement des signatures terminé');
+  } catch (error) {
+    console.error('❌ [LOAD] Erreur lors du chargement des signatures:', error);
+  }
+}; 

@@ -1,0 +1,2238 @@
+From f29d8938a47297b2bcebb0eccde6243c3e5351c7 Mon Sep 17 00:00:00 2001
+From: nicolascleton <nicolas.cleton@petitmaler.fr>
+Date: Tue, 8 Apr 2025 21:18:52 +0200
+Subject: [PATCH] =?UTF-8?q?fix(student):=20utiliser=20une=20fonction=20SQL?=
+ =?UTF-8?q?=20s=C3=A9curis=C3=A9e=20pour=20afficher=20tous=20les=20partici?=
+ =?UTF-8?q?pants=20d'une=20formation=20dans=20la=20convention=20c=C3=B4t?=
+ =?UTF-8?q?=C3=A9=20apprenant?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/components/StudentTrainingAgreement.tsx | 1481 +++++++------------
+ 1 file changed, 549 insertions(+), 932 deletions(-)
+
+diff --git a/src/components/StudentTrainingAgreement.tsx b/src/components/StudentTrainingAgreement.tsx
+index 38d658e..abd7430 100644
+--- a/src/components/StudentTrainingAgreement.tsx
++++ b/src/components/StudentTrainingAgreement.tsx
+@@ -3,7 +3,9 @@ import { useParams } from 'react-router-dom';
+ import { supabase } from '../lib/supabase';
+ import { format } from 'date-fns';
+ import { fr } from 'date-fns/locale';
+-import UnifiedTrainingAgreementTemplate from './shared/templates/unified/TrainingAgreementTemplate';
++import UnifiedTrainingAgreementTemplate, { 
++  OrganizationSettings as TemplateOrganizationSettings 
++} from './shared/templates/unified/TrainingAgreementTemplate';
+ import SignatureCanvas from './SignatureCanvas';
+ import { createPortal } from 'react-dom';
+ import { X, Download, CheckCircle } from 'lucide-react';
+@@ -21,7 +23,8 @@ import Confetti from 'react-confetti';
+ // @ts-ignore
+ import { BeatLoader } from 'react-spinners';
+ import { optimizeSealUrl } from '../utils/SignatureUtils';
+-import { OrganizationSettings } from './shared/DocumentUtils';
++// Utiliser l'alias pour éviter conflit
++type OrganizationSettings = TemplateOrganizationSettings;
+ 
+ // Types
+ interface Company {
+@@ -68,7 +71,8 @@ const parseJsonField = (field: any) => {
+       // Parser directement si c'est un format JSON standard
+       return JSON.parse(field);
+     } catch (e) {
+-      console.error('Erreur lors du parsing JSON:', e, 'field:', field);
++      // Ne pas logguer ici pour éviter le bruit
++      // console.error('Erreur lors du parsing JSON:', e, 'field:', field);
+       return null;
+     }
+   }
+@@ -77,7 +81,7 @@ const parseJsonField = (field: any) => {
+ };
+ 
+ // Définition des paramètres par défaut pour l'organisation
+-const DEFAULT_ORGANIZATION_SETTINGS: OrganizationSettings = {
++const DEFAULT_ORGANIZATION_SETTINGS: TemplateOrganizationSettings = {
+   organization_name: 'PETITMAKER',
+   address: '2 rue Héraclès',
+   siret: '928 386 044 00012',
+@@ -89,22 +93,14 @@ const DEFAULT_ORGANIZATION_SETTINGS: OrganizationSettings = {
+   country: 'France'
+ };
+ 
+-// Fonction utilitaire de log
+-const log = (emoji: string, type: string, message: string, data?: any) => {
+-  if (data) {
+-    console.log(`${emoji} ${type}`, message, data);
+-  } else {
+-    console.log(`${emoji} ${type}`, message);
+-  }
+-};
+-
+ // Interface pour le cache global de signatures
+ interface SignatureCacheItem {
+-  participantSig?: string | null;
+-  companySeal?: string | null;
+-  organizationSeal?: string | null;
+-  trainerSig?: string | null;
+-  timestamp?: number;
++  participantSig: string | null;
++  representativeSig?: string | null; // AJOUT: Signature du représentant pour la convention
++  companySeal: string | null;
++  organizationSeal: string | null;
++  trainerSig: string | null;
++  timestamp: number;
+ }
+ 
+ // Cache global des signatures
+@@ -143,11 +139,10 @@ const GLOBAL_SIGNATURE_CACHE = {
+ // Fonction utilitaire pour charger les signatures de façon synchrone
+ function loadSignaturesSync(trainingId: string, participantId: string): SignatureCacheItem {
+   try {
+-    console.log('⚡ [INIT] Chargement synchrone des signatures:', { trainingId, participantId });
++    // console.log('⚡ [INIT] Chargement synchrone initial...'); // Log supprimé
+     
+     // Récupérer depuis le cache local
+     const cached = GLOBAL_SIGNATURE_CACHE.getCache(trainingId, participantId);
+-    console.log('📋 [INIT] Données du cache:', cached);
+     
+     // Vérifier également dans le localStorage pour plus de robustesse
+     try {
+@@ -156,26 +151,24 @@ function loadSignaturesSync(trainingId: string, participantId: string): Signatur
+       
+       if (storedData) {
+         const parsedData = JSON.parse(storedData);
+-        console.log('📋 [INIT] Données du localStorage:', parsedData);
+         
+         // Si le cache en mémoire est vide mais qu'on a des données dans le localStorage
+         if (!cached.participantSig && !cached.companySeal && 
+             (parsedData.participantSig || parsedData.companySeal)) {
+           // Mettre à jour le cache en mémoire avec les données du localStorage
+           GLOBAL_SIGNATURE_CACHE.setCache(trainingId, participantId, parsedData);
+-          console.log('🔄 [INIT] Cache en mémoire mis à jour depuis localStorage');
+           
+           // Retourner les données du localStorage
+           return parsedData;
+         }
+       }
+     } catch (e) {
+-      console.error('❌ [INIT] Erreur lors de la récupération depuis localStorage:', e);
++      // Ne pas logguer ici pour éviter le bruit
++      // console.error('❌ [INIT] Erreur lors de la récupération depuis localStorage:', e);
+     }
+     
+     // Précharger les images si disponibles
+     if (cached.participantSig || cached.companySeal || cached.organizationSeal) {
+-      console.log('🔄 [INIT] Préchargement des images du cache');
+       GLOBAL_SIGNATURE_CACHE.preloadImages([
+         cached.participantSig, 
+         cached.companySeal,
+@@ -183,10 +176,27 @@ function loadSignaturesSync(trainingId: string, participantId: string): Signatur
+       ]);
+     }
+     
+-    return cached;
++    // Retourner les données du cache, en s'assurant que tous les champs sont présents
++    return {
++      participantSig: cached?.participantSig ?? null,
++      representativeSig: cached?.representativeSig ?? null,
++      companySeal: cached?.companySeal ?? null,
++      trainerSig: cached?.trainerSig ?? null, // Assurer que trainerSig est inclus
++      organizationSeal: cached?.organizationSeal ?? null,
++      timestamp: cached?.timestamp ?? 0 // Assurer que timestamp est inclus
++    };
+   } catch (e) {
+-    console.error('❌ [INIT] Erreur du chargement synchrone des signatures:', e);
+-    return { participantSig: null, companySeal: null, organizationSeal: null };
++    // Ne pas logguer ici pour éviter le bruit
++    // console.error('❌ [INIT] Erreur du chargement synchrone des signatures:', e);
++    // Retourner un objet complet même en cas d'erreur
++    return { 
++      participantSig: null, 
++      representativeSig: null,
++      companySeal: null, 
++      trainerSig: null,
++      organizationSeal: null, 
++      timestamp: 0 
++    };
+   }
+ }
+ 
+@@ -249,14 +259,9 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   onDocumentClose
+ }) => {
+   const [company, setCompany] = useState<Company | null>(null);
+-  const [organizationSettings, setOrganizationSettings] = useState<OrganizationSettings | null>(null);
++  const [organizationSettings, setOrganizationSettings] = useState<TemplateOrganizationSettings | null>(null);
+   const [showSignatureCanvas, setShowSignatureCanvas] = useState(false);
+   const [showSealCanvas, setShowSealCanvas] = useState(false);
+-  const [participantSignature, setParticipantSignature] = useState<string | null>(null);
+-  const [representativeSignature, setRepresentativeSignature] = useState<string | null>(null);
+-  const [trainerSignature, setTrainerSignature] = useState<string | null>(null);
+-  const [companySeal, setCompanySeal] = useState<string | null>(null);
+-  const [organizationSeal, setOrganizationSeal] = useState<string | null>(null);
+   const [generatingPDF, setGeneratingPDF] = useState(false);
+   const [saved, setSaved] = useState(false);
+   const [showSuccess, setShowSuccess] = useState(false);
+@@ -277,14 +282,25 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   // Ajouter cette référence pour suivre la dernière fois que les signatures ont été chargées
+   const lastSignatureLoadTimeRef = useRef<number>(0);
+ 
+-  // Fonction pour mettre à jour le cache de signatures
++  // Charger immédiatement les signatures avant le premier rendu
++  const initialSignatures = loadSignaturesSync(training.id, participant.id);
++
++  // Initialiser les états AVEC les valeurs du cache (sauf représentant), en gérant les undefined
++  // Déplacer CES declarations AVANT updateSignatureCache
++  const [participantSignature, setParticipantSignature] = useState<string | null>(initialSignatures.participantSig ?? null);
++  const [representativeSignature, setRepresentativeSignature] = useState<string | null>(null); // Représentant n'est pas dans le cache sync
++  const [trainerSignature, setTrainerSignature] = useState<string | null>(initialSignatures.trainerSig ?? null);
++  const [companySeal, setCompanySeal] = useState<string | null>(initialSignatures.companySeal ?? null);
++  const [organizationSeal, setOrganizationSeal] = useState<string | null>(initialSignatures.organizationSeal ?? null);
++
++  // Fonction pour mettre à jour le cache de signatures (MAINTENANT APRES LES STATES)
+   const updateSignatureCache = useCallback((
+     newParticipantSig?: string | null,
+     newCompanySeal?: string | null,
+     newOrganizationSeal?: string | null,
+     newTrainerSig?: string | null
+   ) => {
+-    log('🔄', '[CACHE_UPDATE]', 'Mise à jour du cache de signatures');
++    // console.log('🔄 [CACHE_UPDATE] Mise à jour du cache de signatures'); // Log supprimé
+     
+     try {
+       // Utiliser les nouvelles valeurs ou conserver les valeurs actuelles
+@@ -301,27 +317,33 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+       
+       // Sauvegarder dans le localStorage
+       try {
+-        const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
++      const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+         localStorage.setItem(localStorageKey, JSON.stringify(updatedCache));
+-      } catch (e) {
+-        console.error('❌ [CACHE_UPDATE] Erreur lors de la sauvegarde localStorage:', e);
++    } catch (e) {
++        // console.error('❌ [CACHE_UPDATE] Erreur lors de la sauvegarde localStorage:', e); // Log supprimé
+       }
+       
+-      log('✅', '[CACHE_UPDATE]', 'Cache de signatures mis à jour avec succès');
++      // console.log('✅ [CACHE_UPDATE] Cache de signatures mis à jour avec succès'); // Log supprimé
+     } catch (e) {
+-      console.error('❌ [CACHE_UPDATE] Erreur lors de la mise à jour du cache:', e);
++      // console.error('❌ [CACHE_UPDATE] Erreur lors de la mise à jour du cache:', e); // Log supprimé
+     }
+   }, [participantSignature, companySeal, organizationSeal, trainerSignature, training.id, participant.id]);
+ 
+-  // Charger immédiatement les signatures avant même le premier rendu
+-  const initialSignatures = loadSignaturesSync(training.id, participant.id);
+-  
+-  // Log critique pour diagnostiquer le problème initial
+-  console.log('🚨 [DIAGNOSTIC_CRITIQUE] Initialisation des états avec:', {
+-    initialSignatures,
+-    organizationSealInitialValue: initialSignatures.organizationSeal || 'NON PRÉSENT DANS LE CACHE', 
+-    cacheKeys: Object.keys(initialSignatures)
+-  });
++  // AJOUT: Setter sécurisé pour representativeSignature
++  const safeSetRepresentativeSignature = useCallback((url: string | null) => {
++    setRepresentativeSignature(prev => url !== null ? url : prev);
++  }, []);
++
++  // SUPPRIMÉ: useEffect d'initialisation, car on initialise directement avec useState
++
++  // Log critique pour diagnostiquer le problème initial (après initialisation)
++  // console.log('🚨 [DIAGNOSTIC_CRITIQUE] États initiaux après chargement sync:', { // Log supprimé
++  //   participantSig: participantSignature,
++  //   representativeSig: representativeSignature,
++  //   trainerSig: trainerSignature,
++  //   companySeal,
++  //   organizationSeal,
++  // });
+ 
+   const pdfContentRef = useRef<HTMLDivElement>(null);
+   const [portalElement, setPortalElement] = useState<HTMLElement | null>(null);
+@@ -338,7 +360,6 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   const [localSignatureDataURL, setLocalSignatureDataURL] = useState<string | null>(null);
+   const [hasParticipantSignature, setHasParticipantSignature] = useState(false);
+   const [signatureAction, setSignatureAction] = useState<string | null>(null);
+-  const [shouldRefresh, setShouldRefresh] = useState(false);
+   
+   // Référence pour savoir si les signatures ont été chargées depuis Supabase
+   const signaturesLoadedRef = useRef(false);
+@@ -356,35 +377,41 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   // Effet séparé pour récupérer tous les participants de la formation
+   useEffect(() => {
+     const fetchAllParticipants = async () => {
++      const companyName = participant.company || '';
++      
++      console.log('🚨🚨🚨 DÉBUT CHARGEMENT DES PARTICIPANTS POUR FORMATION', training.id);
++      
+       try {
+-        console.log('🔍 [PARTICIPANTS] Récupération des participants pour la formation:', training.id);
+-        
+-        // Récupérer tous les utilisateurs associés à cette formation via user_profiles
++        console.log(`🔍 [PARTICIPANTS] Recherche des apprenants pour l'entreprise: ${companyName}`);
++           
++        // MÉTHODE ULTRA-DRASTIQUE: Utiliser une nouvelle fonction SQL encore plus spécifique
++        // qui retourne exactement les champs dont nous avons besoin sans RLS
+         const { data: participantsData, error: participantsError } = await supabase
+-          .from('user_profiles')
+-          .select('*')
+-          .eq('training_id', training.id);
+-          
++          .rpc('find_training_participants', {
++            training_id_param: training.id
++          });
++        
++        // Vérifier si on a des erreurs
+         if (participantsError) {
+-          console.error('❌ [PARTICIPANTS] Erreur lors de la récupération des apprenants via user_profiles:', participantsError);
+-          
++          console.error('❌ [PARTICIPANTS] Erreur lors de la récupération des participants:', participantsError);
++            
+           // En cas d'erreur, utiliser au moins le participant actuel
+           const defaultParticipant: ParticipantData = {
+-            id: participant.id,
+-            first_name: participant.first_name,
+-            last_name: participant.last_name,
+-            job_position: participant.job_position || '',
+-            company: participant.company || '',
+-            email: '',
++              id: participant.id,
++              first_name: participant.first_name,
++              last_name: participant.last_name,
++              job_position: participant.job_position || '',
++              company: participant.company || '',
++              email: '',
+             status: 'Inscrit'
+-          };
++            };
+           
+           setAllTrainingParticipants([defaultParticipant]);
+           return;
+         }
+         
+         if (participantsData && participantsData.length > 0) {
+-          console.log('✅ [PARTICIPANTS] Apprenants trouvés via user_profiles:', participantsData.length);
++          console.log(`✅ [PARTICIPANTS] ${participantsData.length} apprenants trouvés pour la formation`);
+           
+           // Transformer les données dans le bon format avec un typage explicite
+           const formattedParticipants: ParticipantData[] = participantsData.map((p: any) => ({
+@@ -396,34 +423,36 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             email: p.email || '',
+             status: p.status || 'Inscrit'
+           }));
++        
++          // S'assurer que l'apprenant actuel est toujours présent dans la liste si son entreprise correspond
++        const currentParticipantIncluded = formattedParticipants.some(p => p.id === participant.id);
++        
++          if (!currentParticipantIncluded && participant.company && 
++              participant.company.toLowerCase().includes(companyName.toLowerCase())) {
++            console.log('➕ [PARTICIPANTS] Ajout du participant actuel (même entreprise) qui n\'était pas dans la liste');
+           
+-          console.log('🔄 [PARTICIPANTS] Participants formatés depuis user_profiles:', formattedParticipants.length);
+-          
+-          // S'assurer que l'apprenant actuel est toujours présent dans la liste
+-          const currentParticipantIncluded = formattedParticipants.some(p => p.id === participant.id);
+-          
+-          if (!currentParticipantIncluded) {
+-            console.log('➕ [PARTICIPANTS] Ajout du participant actuel qui n\'était pas dans la liste:', participant);
+-            
+             const currentParticipant: ParticipantData = {
+-              id: participant.id,
+-              first_name: participant.first_name,
+-              last_name: participant.last_name,
+-              job_position: participant.job_position || '',
+-              company: participant.company || '',
+-              email: '',
+-              status: 'Inscrit'
++            id: participant.id,
++            first_name: participant.first_name,
++            last_name: participant.last_name,
++            job_position: participant.job_position || '',
++            company: participant.company || '',
++            email: '',
++            status: 'Inscrit'
+             };
+             
+             formattedParticipants.push(currentParticipant);
+           }
+           
+-          setAllTrainingParticipants(formattedParticipants);
++        setAllTrainingParticipants(formattedParticipants);
++        console.log('🚨🚨🚨 PARTICIPANTS CHARGÉS:', JSON.stringify(formattedParticipants));
++        console.log('🚨🚨🚨 NOMBRE DE PARTICIPANTS:', formattedParticipants.length);
+         } else {
+-          console.log('⚠️ [PARTICIPANTS] Aucun participant trouvé via user_profiles, utilisation du participant actuel');
++          console.log(`⚠️ [PARTICIPANTS] Aucun apprenant trouvé pour l'entreprise ${companyName}`);
++          console.log('🚨🚨🚨 AUCUN PARTICIPANT TROUVÉ DANS LA REQUÊTE');
+           
+-          // Si aucun participant n'est trouvé dans la table user_profiles,
+-          // utiliser au moins le participant actuel
++          // Si aucun participant n'est trouvé et que le participant actuel est de cette entreprise
++          if (participant.company && participant.company.toLowerCase().includes(companyName.toLowerCase())) {
+           const defaultParticipant: ParticipantData = {
+             id: participant.id,
+             first_name: participant.first_name,
+@@ -434,10 +463,17 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             status: 'Inscrit'
+           };
+           
++            console.log('➕ [PARTICIPANTS] Utilisation du participant actuel (même entreprise)');
+           setAllTrainingParticipants([defaultParticipant]);
++          } else {
++            // Si le participant actuel n'est pas de cette entreprise, liste vide
++            console.log('⚠️ [PARTICIPANTS] Le participant actuel n\'est pas de l\'entreprise associée à la formation');
++            setAllTrainingParticipants([]);
++          }
+         }
+       } catch (error) {
+         console.error('❌ [PARTICIPANTS] Erreur générale lors de la récupération des participants:', error);
++        console.log('🚨🚨🚨 ERREUR CRITIQUE LORS DU CHARGEMENT DES PARTICIPANTS:', error);
+         
+         // Fallback au participant actuel
+         const defaultParticipant: ParticipantData = {
+@@ -452,33 +488,43 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         
+         setAllTrainingParticipants([defaultParticipant]);
+       }
+++      
+++      console.log('🚨🚨🚨 FIN CHARGEMENT DES PARTICIPANTS');
+     };
+     
+     fetchAllParticipants();
+-  }, [training.id, participant.id, participant.first_name, participant.last_name, participant.job_position, participant.company]);
++  }, [training.id, training.company_id, participant.id, participant.first_name, participant.last_name, participant.job_position, participant.company]);
+ 
+   // Wrapper pour setParticipantSignature qui protège contre les nulls indésirables
+   const safeSetParticipantSignature = useCallback((value: string | null) => {
+     if (value || !signaturesLocked) {
+       setParticipantSignature(value);
+     } else {
+-      console.log('🔒 [PROTECT] Tentative de définir participantSignature à null bloquée');
++      // console.log('🔒 [PROTECT] Tentative de définir participantSignature à null bloquée'); // Log supprimé
+     }
+   }, [signaturesLocked]);
+ 
+-  // Wrapper pour setCompanySeal qui protège contre les nulls indésirables
++  // Ajouter la fonction pour mettre à jour le tampon d'entreprise de manière sécurisée
+   const safeSetCompanySeal = useCallback((value: string | null) => {
+     if (value || !signaturesLocked) {
+       setCompanySeal(value);
+     } else {
+-      console.log('🔒 [PROTECT] Tentative de définir companySeal à null bloquée');
++      // console.log('🔒 [PROTECT] Set companySeal to null blocked'); // Log supprimé
+     }
+   }, [signaturesLocked]);
+ 
+-  // Ajouter la fonction pour mettre à jour la signature du formateur de manière sécurisée (vers ligne 370-380 avec les autres fonctions safe)
++  // Ajouter la fonction pour mettre à jour le tampon d'organisme de manière sécurisée
++  const safeSetOrganizationSeal = useCallback((value: string | null) => {
++    if (value || !signaturesLocked) {
++      setOrganizationSeal(value);
++    } else {
++      // console.log('🔒 [PROTECT] Set organizationSeal to null blocked'); // Log supprimé
++    }
++  }, [signaturesLocked]);
++
++  // Ajouter la fonction pour mettre à jour la signature du formateur de manière sécurisée
+   const safeSetTrainerSignature = useCallback((url: string | null) => {
+-    console.log('🔒 [TRAINER] Mise à jour sécurisée de la signature du formateur:', 
+-      url ? `${url.substring(0, 50)}...` : 'null');
++    // console.log('🔒 [TRAINER] Mise à jour sécurisée de la signature du formateur:', url ? `${url.substring(0, 50)}...` : 'null'); // Log supprimé
+     setTrainerSignature(url);
+     setHasTrainerSignature(!!url);
+   }, []);
+@@ -486,141 +532,89 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   // Effet pour charger les signatures depuis Supabase (asynchrone, après le premier rendu)
+   useEffect(() => {
+     const loadSignaturesFromSupabase = async () => {
+-      try {
+-        // Vérifier si nous avons chargé les signatures récemment
+-        const now = Date.now();
+-        const timeSinceLastLoad = now - lastSignatureLoadTimeRef.current;
+-        
+-        // Ne charger que toutes les 30 secondes maximum
+-        if (timeSinceLastLoad < 30000 && lastSignatureLoadTimeRef.current > 0) {
+-          console.log(`⏱️ [THROTTLE] Chargement des signatures ignoré (dernier chargement il y a ${Math.round(timeSinceLastLoad/1000)}s, minimum 30s)`);
++      if (signaturesLoadedRef.current) {
+         return;
+       }
+       
+-        // Mettre à jour le timestamp du dernier chargement
+-        lastSignatureLoadTimeRef.current = now;
+-        
++      try {
+         console.log('🔄 [SUPABASE] Chargement des signatures depuis Supabase:', {
+           training_id: training.id,
+-          user_id: participant.id,
+           type: 'convention'
+         });
+         
+-        // Toujours charger les signatures de Supabase, même si on a déjà vérifié (pour les réouvertures de modale)
+-        signaturesLoadedRef.current = false;
++        // Récupérer toutes les signatures pour cette formation et ce type de document
++        let documentsData = [];
+         
+-        // Requête Supabase pour les signatures les plus récentes
+-        const { data: signatureData, error: signatureError } = await supabase
+-          .from('document_signatures')
++        // 1. Chercher tous les documents pour cette formation, y compris les signatures
++        const { data: documentData, error: documentsError } = await supabase
++          .from('documents')
+           .select('*')
+           .eq('training_id', training.id)
+-          .eq('user_id', participant.id)
+           .eq('type', 'convention')
+           .order('created_at', { ascending: false });
+           
+-        if (signatureError) {
+-          console.error('❌ [SUPABASE] Erreur lors de la récupération des signatures:', signatureError);
++        if (documentData && documentData.length > 0) {
++          documentsData = documentData;
++          console.log(`✅ [DOCUMENTS] ${documentData.length} documents trouvés pour la formation`);
++        } else {
++          console.log(`⚠️ [DOCUMENTS] Aucun document trouvé pour la formation id=${training.id}`);
++        }
+           
+-          // Si échec avec document_signatures, essayer avec la table documents
+-          console.log('⚠️ [SUPABASE] Tentative de récupération via la table documents');
++        // Chercher spécifiquement le tampon de l'organisation (qui peut être sans training_id)
++        const { data: orgSealData, error: orgSealError } = await supabase
++          .from('documents')
++          .select('*')
++          .is('training_id', null)
++          .eq('signature_type', 'organizationSeal')
++          .order('created_at', { ascending: false })
++          .limit(1);
+           
+-          const { data: documentsData, error: documentsError } = await supabase
++        if (orgSealData && orgSealData.length > 0) {
++          console.log(`✅ [DOCUMENTS] Tampon d'organisation global trouvé`);
++          documentsData = [...(documentsData || []), ...orgSealData];
++        }
++        
++        // Si l'entreprise est définie, chercher aussi les signatures partagées pour le tampon de l'entreprise
++        if (company && company.id) {
++          // Récupérer les tampons d'entreprise pour cette formation et cette entreprise
++          const { data: sharedDocs, error: sharedError } = await supabase
+             .from('documents')
+             .select('*')
+             .eq('training_id', training.id)
+-            .eq('user_id', participant.id)
++            .eq('company_id', company.id)
+             .eq('type', 'convention')
++            .in('signature_type', ['companySeal'])
+             .order('created_at', { ascending: false });
+           
+-          if (documentsError || !documentsData || documentsData.length === 0) {
+-            console.log('⚠️ [SUPABASE] Aucun document trouvé dans la table documents');
+-            return;
+-          }
+-          
+-          // Traiter les données de la table documents
+-          let participantSigUrl = null;
+-          let companySealUrl = null;
+-          
+-          for (const doc of documentsData) {
+-            if (!doc.file_url) continue;
+-            
+-            const baseUrl = doc.file_url.split('?')[0];
+-            const timestamp = Date.now();
+-            const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-            
+-            if (doc.title === "Signature de l'apprenant") {
+-              participantSigUrl = antiCacheUrl;
+-              console.log('✅ [SUPABASE] Signature participant trouvée dans documents:', antiCacheUrl.substring(0, 50) + '...');
+-            } else if (doc.title === "Tampon de l'entreprise") {
+-              companySealUrl = antiCacheUrl;
+-              console.log('✅ [SUPABASE] Tampon entreprise trouvé dans documents:', antiCacheUrl.substring(0, 50) + '...');
+-            }
+-          }
+-          
+-          // Mettre à jour les états si on a trouvé des signatures
+-          if (participantSigUrl) {
+-            safeSetParticipantSignature(participantSigUrl);
+-            setIsSigned(true);
+-            setHasParticipantSignature(true);
+-          }
+-          
+-          if (companySealUrl) {
+-            safeSetCompanySeal(companySealUrl);
++          if (!sharedError && sharedDocs && sharedDocs.length > 0) {
++            // Ajouter les signatures partagées aux documents personnels
++            documentsData = [...(documentsData || []), ...sharedDocs];
++            console.log(`✅ [COMPANY_SEAL] ${sharedDocs.length} tampons d'entreprise trouvés`);
+           }
+-          
+-          // Mettre à jour le cache global
+-          if (participantSigUrl || companySealUrl) {
+-            GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+-              participantSig: participantSigUrl,
+-              companySeal: companySealUrl,
+-              // Conserver le tampon de l'organisme s'il existe déjà
+-              organizationSeal: organizationSeal
+-            });
+-            
+-            // Mettre à jour le localStorage
+-            try {
+-              const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+-              const cacheData = {
+-                participantSig: participantSigUrl,
+-                companySeal: companySealUrl,
+-                organizationSeal: organizationSeal,
+-                timestamp: Date.now()
+-              };
+-              localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+-              console.log('💾 [SUPABASE] Cache sauvegardé dans localStorage');
+-            } catch (e) {
+-              console.error('❌ [SUPABASE] Erreur lors de la sauvegarde localStorage:', e);
+-            }
+-            
+-            // Forcer un rafraîchissement
+-            setTimeout(() => {
+-              setShouldRefresh(prev => !prev);
+-            }, 100);
++        } 
++      
++        if (documentsError) {
++          console.error('❌ [DOCUMENTS] Erreur lors de la récupération des documents:', documentsError);
++            return;
+           }
+-          
+-          return;
+-        }
+         
+-        if (!signatureData || signatureData.length === 0) {
+-          console.log('ℹ️ [SUPABASE] Aucune signature trouvée dans document_signatures, tentative avec documents');
+-          
+-          // Essayer avec la table documents
+-          const { data: documentsData, error: documentsError } = await supabase
+-            .from('documents')
+-            .select('*')
+-            .eq('training_id', training.id)
+-            .eq('user_id', participant.id)
+-            .eq('type', 'convention')
+-            .order('created_at', { ascending: false });
+-          
+-          if (documentsError || !documentsData || documentsData.length === 0) {
+-            console.log('⚠️ [SUPABASE] Aucun document trouvé dans la table documents non plus');
++        if (!documentsData || documentsData.length === 0) {
++            console.log('⚠️ [DOCUMENTS] Aucun document trouvé après fusion');
+             return;
+           }
++
++        console.log(`🔍 [DEBUG] Traitement de ${documentsData.length} documents pour les signatures`);
+           
+           // Traiter les données de la table documents
+-          let participantSigUrl = null;
+-          let companySealUrl = null;
++        let participantSigUrl: string | null = null; // On ne cherche plus la signature participant ici
++        let representativeSigUrl: string | null = null; 
++        let companySealUrl: string | null = null;
++        let trainerSigUrl: string | null = null;
++        let organizationSealUrl: string | null = null;
++        
++        // Vérifier quels types de signatures sont présents dans les données
++        const signatureTypes = documentsData.map(doc => doc.signature_type);
++        console.log('🔍 [DEBUG] Types de signatures disponibles:', [...new Set(signatureTypes)].filter(Boolean));
+           
+           for (const doc of documentsData) {
+             if (!doc.file_url) continue;
+@@ -629,124 +623,175 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             const timestamp = Date.now();
+             const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+             
+-            if (doc.title === "Signature de l'apprenant") {
+-              participantSigUrl = antiCacheUrl;
+-              console.log('✅ [SUPABASE] Signature participant trouvée dans documents:', antiCacheUrl.substring(0, 50) + '...');
+-            } else if (doc.title === "Tampon de l'entreprise") {
++          // MODIFIÉ: Chercher la signature du représentant sans vérifier company_id
++          if (doc.signature_type === 'representative') {
++            if (!representativeSigUrl) {
++              representativeSigUrl = antiCacheUrl;
++              console.log('✅ [DEBUG] Representative signature document FOUND in loop', antiCacheUrl);
++            }
++          } else if ((doc.signature_type === 'companySeal' || doc.title === "Tampon de l'entreprise") && company?.id) {
++            // Permettre un sceau d'entreprise même sans company_id correspondant
++            if (!companySealUrl) {
+               companySealUrl = antiCacheUrl;
+-              console.log('✅ [SUPABASE] Tampon entreprise trouvé dans documents:', antiCacheUrl.substring(0, 50) + '...');
++              console.log('✅ [DEBUG] Company seal FOUND', antiCacheUrl);
++            }
++          } else if (doc.signature_type === 'trainer' || doc.title === "Signature du formateur") {
++            if (!trainerSigUrl) {
++              trainerSigUrl = antiCacheUrl;
++              console.log('✅ [DEBUG] Trainer signature FOUND', antiCacheUrl);
++            }
++          } else if (doc.signature_type === 'organizationSeal' || doc.title === "Tampon de l'organisme") {
++            if (!organizationSealUrl) {
++              organizationSealUrl = antiCacheUrl;
++              console.log('✅ [DEBUG] Organization seal FOUND in documents table', antiCacheUrl);
++              // Force reload for organization seal to ensure it's visible
++              const forceReloadUrl = `${doc.file_url.split('?')[0]}?t=${Date.now()}&forcereload=true&nocache=${Math.random()}`;
++              organizationSealUrl = forceReloadUrl;
+             }
+           }
++        }
+           
+-          // Mettre à jour les états si on a trouvé des signatures
+-          if (participantSigUrl) {
+-            safeSetParticipantSignature(participantSigUrl);
+-            setIsSigned(true);
+-            setHasParticipantSignature(true);
+-          }
+-          
+-          if (companySealUrl) {
+-            safeSetCompanySeal(companySealUrl);
+-          }
+-          
+-          // Mettre à jour le cache global
+-          if (participantSigUrl || companySealUrl) {
+-            GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+-              participantSig: participantSigUrl,
+-              companySeal: companySealUrl,
+-              // Conserver le tampon de l'organisme s'il existe déjà
+-              organizationSeal: organizationSeal
+-            });
++        // Si le tampon de l'organisme n'a pas été trouvé dans les documents, essayer de le récupérer depuis settings
++        if (!organizationSealUrl) {
++          console.log('🔍 [ORG_SEAL] Tampon non trouvé dans documents, recherche dans la table settings...');
++          try {
++            const { data: settingsData, error: settingsError } = await supabase
++              .from('settings')
++              .select('organization_seal_url, organization_seal_path')
++              .single();
+             
+-            // Mettre à jour le localStorage
+-            try {
+-              const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+-              const cacheData = {
+-                participantSig: participantSigUrl,
+-                companySeal: companySealUrl,
+-                organizationSeal: organizationSeal,
+-                timestamp: Date.now()
+-              };
+-              localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+-              console.log('💾 [SUPABASE] Cache sauvegardé dans localStorage');
+-            } catch (e) {
+-              console.error('❌ [SUPABASE] Erreur lors de la sauvegarde localStorage:', e);
++            if (settingsError) {
++              console.error('❌ [ORG_SEAL] Erreur lors de la recherche dans settings:', settingsError);
++            } else if (settingsData && settingsData.organization_seal_url) {
++              console.log('✅ [ORG_SEAL] Tampon trouvé dans settings, URL:', settingsData.organization_seal_url);
++              
++              // Ajouter un anti-cache à l'URL avec plus de paramètres pour éviter tout problème de cache
++              const timestamp = Date.now();
++              const random = Math.random();
++              organizationSealUrl = `${settingsData.organization_seal_url.split('?')[0]}?t=${timestamp}&forcereload=true&nocache=${random}`;
++              
++              // Test d'accessibilité de l'URL
++              try {
++                const testImg = new Image();
++                testImg.onload = () => {
++                  console.log('✅ [ORG_SEAL] Test d\'accès au tampon réussi:', organizationSealUrl);
++                  // SUPPRIMÉ: Mise à jour forcée du DOM ici
++                };
++                testImg.onerror = () => {
++                  console.error('❌ [ORG_SEAL] Test d\'accès au tampon échoué:', organizationSealUrl);
++                };
++                testImg.src = organizationSealUrl;
++              } catch (testError) {
++                console.error('❌ [ORG_SEAL] Erreur lors du test d\'accès au tampon:', testError);
++              }
++            } else if (settingsData && settingsData.organization_seal_path) {
++              // Si nous avons un chemin mais pas d'URL, générer l'URL
++              console.log('🔍 [ORG_SEAL] Génération d\'URL à partir du chemin:', settingsData.organization_seal_path);
++              
++              const { data: urlData } = await supabase.storage
++                .from('organization-seals')
++                .getPublicUrl(settingsData.organization_seal_path);
++              
++              if (urlData && urlData.publicUrl) {
++                // Ajouter un anti-cache à l'URL
++                const timestamp = Date.now();
++                organizationSealUrl = `${urlData.publicUrl.split('?')[0]}?t=${timestamp}&forcereload=true`;
++                console.log('✅ [ORG_SEAL] URL générée à partir du chemin:', organizationSealUrl);
++              } else {
++                console.error('❌ [ORG_SEAL] Impossible de générer une URL publique pour le chemin');
++              }
++            } else {
++              console.log('⚠️ [ORG_SEAL] Aucune information de tampon trouvée dans settings');
++              
++              // Dernière tentative: chercher directement dans le bucket organization-seals
++              console.log('🔍 [ORG_SEAL] Recherche directe dans le bucket organization-seals');
++              
++              const { data: sealFiles, error: sealListError } = await supabase.storage
++                .from('organization-seals')
++                .list('', { 
++                  sortBy: { column: 'created_at', order: 'desc' },
++                  limit: 1
++                });
++                
++              if (sealListError) {
++                console.error('❌ [ORG_SEAL] Erreur lors de la recherche dans le bucket:', sealListError);
++              } else if (sealFiles && sealFiles.length > 0) {
++                const sealFile = sealFiles[0];
++                console.log('✅ [ORG_SEAL] Fichier trouvé dans le bucket:', sealFile.name);
++                
++                const { data: urlData } = await supabase.storage
++                  .from('organization-seals')
++                  .getPublicUrl(sealFile.name);
++                  
++                if (urlData && urlData.publicUrl) {
++            const timestamp = Date.now();
++                  organizationSealUrl = `${urlData.publicUrl.split('?')[0]}?t=${timestamp}&forcereload=true`;
++                  console.log('✅ [ORG_SEAL] URL générée depuis le bucket:', organizationSealUrl);
++                }
++              } else {
++                console.log('⚠️ [ORG_SEAL] Aucun fichier trouvé dans le bucket organization-seals');
++              }
+             }
+-            
+-            // Forcer un rafraîchissement
+-            setTimeout(() => {
+-              setShouldRefresh(prev => !prev);
+-            }, 100);
++          } catch (settingsErr) {
++            console.error('❌ [ORG_SEAL] Exception lors de la recherche dans settings:', settingsErr);
+           }
+-          
+-          return;
+         }
++          
++        // Mettre à jour les états si on a trouvé des signatures/tampons
+         
+-        console.log('✅ [SUPABASE] Signatures trouvées dans Supabase:', signatureData);
++        // AJOUT: Mettre à jour l'état de la signature du représentant
++        if (representativeSigUrl) {
++          safeSetRepresentativeSignature(representativeSigUrl);
++          console.log('✅ [DEBUG] safeSetRepresentativeSignature CALLED with URL:', representativeSigUrl);
++          setIsSigned(true); // Considérer comme signé si le représentant a signé
++        }
+         
+-        // Variables pour stocker les dernières signatures de chaque type
+-        let participantSigUrl = null;
+-        let companySealUrl = null;
++        if (companySealUrl) {
++          safeSetCompanySeal(companySealUrl);
++          console.log('✅ [DEBUG] safeSetCompanySeal CALLED with URL:', companySealUrl);
++        }
+         
+-        // Extraire les signatures et tampons
+-        for (const sig of signatureData) {
+-          if (!sig.signature_url) continue;
+-          
+-          const baseUrl = sig.signature_url.split('?')[0];
+-          const timestamp = Date.now();
+-          const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-          
+-          if (sig.signature_type === 'participant' || sig.signature_type === 'representative') {
+-            participantSigUrl = antiCacheUrl;
+-            console.log('✅ [SUPABASE] Signature participant trouvée:', antiCacheUrl.substring(0, 50) + '...');
+-          } else if (sig.signature_type === 'companySeal') {
+-            companySealUrl = antiCacheUrl;
+-            console.log('✅ [SUPABASE] Tampon entreprise trouvé:', antiCacheUrl.substring(0, 50) + '...');
+-          }
++        if (trainerSigUrl) {
++          safeSetTrainerSignature(trainerSigUrl);
++          console.log('✅ [DEBUG] safeSetTrainerSignature CALLED with URL:', trainerSigUrl);
++          setHasTrainerSignature(true);
+         }
+         
+-        // Mettre à jour les états
+-        if (participantSigUrl) {
+-            safeSetParticipantSignature(participantSigUrl);
+-            setIsSigned(true);
+-            setHasParticipantSignature(true);
+-          }
+-          
+-        if (companySealUrl) {
+-            safeSetCompanySeal(companySealUrl);
+-          }
++        if (organizationSealUrl) {
++          console.log('✅ [ORG_SEAL] Mise à jour du tampon de l\'organisme avec URL:', organizationSealUrl);
++          safeSetOrganizationSeal(organizationSealUrl);
++        } else {
++          console.error('❌ [ORG_SEAL] Échec de toutes les tentatives de récupération du tampon de l\'organisme');
++        }
+           
+-        // Mettre à jour le cache global
+-          GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+-          participantSig: participantSigUrl,
++        // Mettre à jour le cache global et localStorage (MODIFIÉ)
++        if (representativeSigUrl || companySealUrl || trainerSigUrl || organizationSealUrl) {
++          const cacheData: SignatureCacheItem = {
++            participantSig: null, // Participant ne signe pas la convention
++            representativeSig: representativeSigUrl, 
+           companySeal: companySealUrl,
+-          // Conserver le tampon de l'organisme s'il existe déjà
+-          organizationSeal: organizationSeal
+-        });
++            trainerSig: trainerSigUrl,
++            organizationSeal: organizationSealUrl,
++            timestamp: Date.now()
++          };
++          
++          GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, cacheData);
+         
+         // Mettre à jour le localStorage
+         try {
+           const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+-          const cacheData = {
+-            participantSig: participantSigUrl,
+-            companySeal: companySealUrl,
+-            organizationSeal: organizationSeal,
+-            timestamp: Date.now()
+-          };
+           localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+-          console.log('💾 [SUPABASE] Cache sauvegardé dans localStorage');
++            // SUPPRIMÉ: Log cache
+         } catch (e) {
+-          console.error('❌ [SUPABASE] Erreur lors de la sauvegarde localStorage:', e);
+-        }
+-        
+-        // Forcer un rafraîchissement
+-        if (participantSigUrl || companySealUrl) {
+-            setTimeout(() => {
+-              setShouldRefresh(prev => !prev);
+-            }, 100);
++            console.error('❌ [CACHE] Erreur lors de la mise à jour du cache:', e);
++          }
++      
++          // SUPPRIMÉ: Rafraîchissement forcé
++        } else {
++          // console.log('⚠️ [SIGNATURES] Aucune signature ni tampon trouvé'); // Log conservé pour info
+         }
+       } catch (error) {
+-        console.error('❌ [SUPABASE] Erreur lors du chargement des signatures depuis Supabase:', error);
++        console.error('❌ [GLOBAL] Erreur lors du chargement des signatures:', error);
+       } finally {
+         signaturesLoadedRef.current = true;
+       }
+@@ -754,22 +799,22 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+     
+     // Lancer le chargement asynchrone
+     loadSignaturesFromSupabase();
+-  }, [training.id, participant.id, safeSetParticipantSignature, safeSetCompanySeal, organizationSeal]);
++  }, [training.id, participant.id, safeSetParticipantSignature, safeSetCompanySeal, safeSetOrganizationSeal, organizationSeal, company, trainerSignature, safeSetRepresentativeSignature]);
+ 
+-  // Moniteur d'état des signatures
++  // Moniteur d'état des signatures SIMPLIFIÉ
+   useEffect(() => {
+-    console.log('👁️ [MONITOR] État des signatures:', {
+-      participantSignature: participantSignature ? '✅ Présente' : '❌ Absente',
+-      companySeal: companySeal ? '✅ Présent' : '❌ Absent',
+-      trainerSignature: trainerSignature ? '✅ Présente' : '❌ Absente',
+-      signaturesLocked: signaturesLocked ? '🔒 Verrouillées' : '🔓 Déverrouillées'
+-    });
+-  }, [participantSignature, companySeal, trainerSignature, signaturesLocked]);
++    // console.log('👁️ [MONITOR] État actuel:', { // Log supprimé
++    //   Représentant: representativeSignature ? '✅' : '❌',
++    //   TamponEnt: companySeal ? '✅' : '❌',
++    //   Formateur: trainerSignature ? '✅' : '❌',
++    //   TamponOrg: organizationSeal ? '✅' : '❌'
++    // });
++  }, [representativeSignature, companySeal, trainerSignature, organizationSeal]);
+ 
+   // Ajouter une fonction pour charger la signature du formateur depuis Supabase
+   const loadTrainerSignature = async () => {
+     try {
+-      console.log('🔄 [TRAINER] Chargement de la signature du formateur pour la formation:', training.id);
++      // console.log('🔄', '[TRAINER]', 'Chargement signature formateur...'); // Log supprimé
+       
+       // Récupérer d'abord depuis la table documents
+       const { data: trainerDocs, error: docsError } = await supabase
+@@ -782,9 +827,10 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         .limit(1);
+         
+       if (docsError) {
+-        console.error('❌ [TRAINER] Erreur lors de la recherche dans la table documents:', docsError);
++        // console.error('❌ [TRAINER] ERROR', 'Erreur recherche documents:', docsError); // Log supprimé
+       } else if (trainerDocs && trainerDocs.length > 0 && trainerDocs[0].file_url) {
+-        console.log('✅ [TRAINER] Signature du formateur trouvée dans documents:', trainerDocs[0].file_url.substring(0, 50) + '...');
++        // console.log('✅', '[TRAINER]', 'Signature formateur trouvée dans documents'); // Log supprimé
++        // console.log('✅ [TRAINER] Signature du formateur trouvée dans documents:', trainerDocs[0].file_url.substring(0, 50) + '...'); // Log supprimé
+         
+         // Ajouter un anti-cache à l'URL
+         const baseUrl = trainerDocs[0].file_url.split('?')[0];
+@@ -800,54 +846,25 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         return;
+       }
+       
+-      // Si rien n'est trouvé dans documents, essayer avec document_signatures
+-      const { data: trainerSigData, error: sigError } = await supabase
+-        .from('document_signatures')
+-        .select('signature_url')
+-        .eq('training_id', training.id)
+-        .eq('type', 'convention')
+-        .eq('signature_type', 'trainer')
+-        .order('created_at', { ascending: false })
+-        .limit(1);
+-        
+-      if (sigError) {
+-        console.error('❌ [TRAINER] Erreur lors de la recherche dans document_signatures:', sigError);
+-      } else if (trainerSigData && trainerSigData.length > 0 && trainerSigData[0].signature_url) {
+-        console.log('✅ [TRAINER] Signature formateur trouvée dans document_signatures:', trainerSigData[0].signature_url.substring(0, 50) + '...');
+-        
+-        // Ajouter un anti-cache à l'URL
+-        const baseUrl = trainerSigData[0].signature_url.split('?')[0];
+-        const timestamp = Date.now();
+-        const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-        
+-        // Mettre à jour l'état
+-        safeSetTrainerSignature(antiCacheUrl);
+-        
+-        // Mettre à jour le cache
+-        updateSignatureCache(undefined, undefined, undefined, antiCacheUrl);
+-        
+-        return;
+-      }
+-      
+       // En dernier recours, rechercher dans le bucket signatures
+-      const { data: storageFiles, error: storageError } = await supabase.storage
+-        .from('signatures')
+-        .list('', { 
++        const { data: storageFiles, error: storageError } = await supabase.storage
++          .from('signatures')
++          .list('', { 
+           search: `trainer_convention_${training.id}`,
+-          sortBy: { column: 'created_at', order: 'desc' }
+-        });
++            sortBy: { column: 'created_at', order: 'desc' }
++          });
+         
+-      if (storageError) {
+-        console.error('❌ [TRAINER] Erreur lors de la recherche dans le bucket signatures:', storageError);
+-      } else if (storageFiles && storageFiles.length > 0) {
++        if (storageError) {
++        // console.error('❌ [TRAINER] ERROR', 'Erreur recherche bucket:', storageError); // Log supprimé
++        } else if (storageFiles && storageFiles.length > 0) {
+         const sigFile = storageFiles[0];
+         // Générer l'URL du fichier trouvé
+-        const { data: urlData } = await supabase.storage
+-          .from('signatures')
++            const { data: urlData } = await supabase.storage
++              .from('signatures')
+           .getPublicUrl(sigFile.name);
+-          
+-        if (urlData && urlData.publicUrl) {
+-          console.log('✅ [TRAINER] Signature formateur trouvée dans le bucket:', urlData.publicUrl.substring(0, 50) + '...');
++            
++            if (urlData && urlData.publicUrl) {
++          // console.log('✅ [TRAINER]', 'Signature formateur trouvée dans le bucket:', urlData.publicUrl.substring(0, 50) + '...'); // Log supprimé
+           
+           // Ajouter un anti-cache à l'URL
+           const baseUrl = urlData.publicUrl.split('?')[0];
+@@ -864,10 +881,10 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         }
+       }
+       
+-      console.log('ℹ️ [TRAINER] Aucune signature de formateur trouvée pour cette formation');
++      // console.warn('ℹ️ [TRAINER] Aucune signature de formateur trouvée pour cette formation'); // Log supprimé
+       
+     } catch (error) {
+-      console.error('❌ [TRAINER] Erreur lors du chargement de la signature du formateur:', error);
++      // console.error('❌ [TRAINER] ERROR', 'Erreur chargement signature formateur:', error); // Log supprimé
+     }
+   };
+ 
+@@ -875,7 +892,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   useEffect(() => {
+     // Charger depuis le cache d'abord
+     if (initialSignatures.trainerSig) {
+-      console.log('✅ [INIT] Signature formateur trouvée dans le cache local');
++      // console.log('✅', '[INIT]', 'Signature formateur trouvée cache local'); // Log supprimé
+       safeSetTrainerSignature(initialSignatures.trainerSig);
+     } else {
+       // Charger depuis Supabase si pas dans le cache
+@@ -883,323 +900,69 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+     }
+   }, [training.id, safeSetTrainerSignature, initialSignatures.trainerSig]);
+ 
+-  // Effet pour charger les signatures depuis Supabase (asynchrone, après le premier rendu)
+-  useEffect(() => {
+-    const loadSignaturesFromSupabase = async () => {
+-      try {
+-        // Vérifier si nous avons chargé les signatures récemment
+-        const now = Date.now();
+-        const timeSinceLastLoad = now - lastSignatureLoadTimeRef.current;
+-        
+-        // Ne charger que toutes les 30 secondes maximum
+-        if (timeSinceLastLoad < 30000 && lastSignatureLoadTimeRef.current > 0) {
+-          console.log(`⏱️ [THROTTLE] Chargement des signatures ignoré (dernier chargement il y a ${Math.round(timeSinceLastLoad/1000)}s, minimum 30s)`);
+-        return;
+-      }
+-      
+-        // Mettre à jour le timestamp du dernier chargement
+-        lastSignatureLoadTimeRef.current = now;
+-        
+-        console.log('🔄 [SUPABASE] Chargement des signatures depuis Supabase:', {
+-          training_id: training.id,
+-          user_id: participant.id,
+-          type: 'convention'
+-        });
+-        
+-        // Toujours charger les signatures de Supabase, même si on a déjà vérifié (pour les réouvertures de modale)
+-        signaturesLoadedRef.current = false;
+-        
+-        // Requête Supabase pour les signatures les plus récentes
+-        const { data: signatureData, error: signatureError } = await supabase
+-          .from('document_signatures')
+-          .select('*')
+-          .eq('training_id', training.id)
+-          .eq('user_id', participant.id)
+-          .eq('type', 'convention')
+-          .order('created_at', { ascending: false });
+-          
+-        if (signatureError) {
+-          console.error('❌ [SUPABASE] Erreur lors de la récupération des signatures:', signatureError);
+-          
+-          // Si échec avec document_signatures, essayer avec la table documents
+-          console.log('⚠️ [SUPABASE] Tentative de récupération via la table documents');
+-          
+-          const { data: documentsData, error: documentsError } = await supabase
+-            .from('documents')
+-            .select('*')
+-            .eq('training_id', training.id)
+-            .eq('user_id', participant.id)
+-            .eq('type', 'convention')
+-            .order('created_at', { ascending: false });
+-          
+-          if (documentsError || !documentsData || documentsData.length === 0) {
+-            console.log('⚠️ [SUPABASE] Aucun document trouvé dans la table documents');
+-            return;
+-          }
+-          
+-          // Traiter les données de la table documents
+-          let participantSigUrl = null;
+-          let companySealUrl = null;
+-          
+-          for (const doc of documentsData) {
+-            if (!doc.file_url) continue;
+-            
+-            const baseUrl = doc.file_url.split('?')[0];
+-            const timestamp = Date.now();
+-            const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-            
+-            if (doc.title === "Signature de l'apprenant") {
+-              participantSigUrl = antiCacheUrl;
+-              console.log('✅ [SUPABASE] Signature participant trouvée dans documents:', antiCacheUrl.substring(0, 50) + '...');
+-            } else if (doc.title === "Tampon de l'entreprise") {
+-              companySealUrl = antiCacheUrl;
+-              console.log('✅ [SUPABASE] Tampon entreprise trouvé dans documents:', antiCacheUrl.substring(0, 50) + '...');
+-            }
+-          }
+-          
+-          // Mettre à jour les états si on a trouvé des signatures
+-          if (participantSigUrl) {
+-            safeSetParticipantSignature(participantSigUrl);
+-            setIsSigned(true);
+-            setHasParticipantSignature(true);
+-          }
+-          
+-          if (companySealUrl) {
+-            safeSetCompanySeal(companySealUrl);
+-          }
+-          
+-          // Mettre à jour le cache global
+-          if (participantSigUrl || companySealUrl) {
+-            GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+-              participantSig: participantSigUrl,
+-              companySeal: companySealUrl,
+-              // Conserver le tampon de l'organisme s'il existe déjà
+-              organizationSeal: organizationSeal
+-            });
+-            
+-            // Mettre à jour le localStorage
+-            try {
+-              const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+-              const cacheData = {
+-                participantSig: participantSigUrl,
+-                companySeal: companySealUrl,
+-                organizationSeal: organizationSeal,
+-                timestamp: Date.now()
+-              };
+-              localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+-              console.log('💾 [SUPABASE] Cache sauvegardé dans localStorage');
+-            } catch (e) {
+-              console.error('❌ [SUPABASE] Erreur lors de la sauvegarde localStorage:', e);
+-            }
+-            
+-            // Forcer un rafraîchissement
+-            setTimeout(() => {
+-              setShouldRefresh(prev => !prev);
+-            }, 100);
+-          }
+-          
+-          return;
+-        }
+-        
+-        if (!signatureData || signatureData.length === 0) {
+-          console.log('ℹ️ [SUPABASE] Aucune signature trouvée dans document_signatures, tentative avec documents');
+-          
+-          // Essayer avec la table documents
+-          const { data: documentsData, error: documentsError } = await supabase
+-            .from('documents')
+-            .select('*')
+-            .eq('training_id', training.id)
+-            .eq('user_id', participant.id)
+-            .eq('type', 'convention')
+-            .order('created_at', { ascending: false });
+-          
+-          if (documentsError || !documentsData || documentsData.length === 0) {
+-            console.log('⚠️ [SUPABASE] Aucun document trouvé dans la table documents non plus');
+-            return;
+-          }
+-          
+-          // Traiter les données de la table documents
+-          let participantSigUrl = null;
+-          let companySealUrl = null;
+-          
+-          for (const doc of documentsData) {
+-            if (!doc.file_url) continue;
+-            
+-            const baseUrl = doc.file_url.split('?')[0];
+-            const timestamp = Date.now();
+-            const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-            
+-            if (doc.title === "Signature de l'apprenant") {
+-              participantSigUrl = antiCacheUrl;
+-              console.log('✅ [SUPABASE] Signature participant trouvée dans documents:', antiCacheUrl.substring(0, 50) + '...');
+-            } else if (doc.title === "Tampon de l'entreprise") {
+-              companySealUrl = antiCacheUrl;
+-              console.log('✅ [SUPABASE] Tampon entreprise trouvé dans documents:', antiCacheUrl.substring(0, 50) + '...');
+-            }
+-          }
+-          
+-          // Mettre à jour les états si on a trouvé des signatures
+-          if (participantSigUrl) {
+-            safeSetParticipantSignature(participantSigUrl);
+-            setIsSigned(true);
+-            setHasParticipantSignature(true);
+-          }
+-          
+-          if (companySealUrl) {
+-            safeSetCompanySeal(companySealUrl);
+-          }
+-          
+-          // Mettre à jour le cache global
+-          if (participantSigUrl || companySealUrl) {
+-            GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+-              participantSig: participantSigUrl,
+-              companySeal: companySealUrl,
+-              // Conserver le tampon de l'organisme s'il existe déjà
+-              organizationSeal: organizationSeal
+-            });
+-            
+-            // Mettre à jour le localStorage
+-            try {
+-              const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+-              const cacheData = {
+-                participantSig: participantSigUrl,
+-                companySeal: companySealUrl,
+-                organizationSeal: organizationSeal,
+-                timestamp: Date.now()
+-              };
+-              localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+-              console.log('💾 [SUPABASE] Cache sauvegardé dans localStorage');
+-            } catch (e) {
+-              console.error('❌ [SUPABASE] Erreur lors de la sauvegarde localStorage:', e);
+-            }
+-            
+-            // Forcer un rafraîchissement
+-            setTimeout(() => {
+-              setShouldRefresh(prev => !prev);
+-            }, 100);
+-          }
+-          
+-          return;
+-        }
+-        
+-        console.log('✅ [SUPABASE] Signatures trouvées dans Supabase:', signatureData);
+-        
+-        // Variables pour stocker les dernières signatures de chaque type
+-        let participantSigUrl = null;
+-        let companySealUrl = null;
+-        
+-        // Extraire les signatures et tampons
+-        for (const sig of signatureData) {
+-          if (!sig.signature_url) continue;
+-          
+-          const baseUrl = sig.signature_url.split('?')[0];
+-          const timestamp = Date.now();
+-          const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-          
+-          if (sig.signature_type === 'participant' || sig.signature_type === 'representative') {
+-            participantSigUrl = antiCacheUrl;
+-            console.log('✅ [SUPABASE] Signature participant trouvée:', antiCacheUrl.substring(0, 50) + '...');
+-          } else if (sig.signature_type === 'companySeal') {
+-            companySealUrl = antiCacheUrl;
+-            console.log('✅ [SUPABASE] Tampon entreprise trouvé:', antiCacheUrl.substring(0, 50) + '...');
+-          }
+-        }
+-        
+-        // Mettre à jour les états
+-        if (participantSigUrl) {
+-            safeSetParticipantSignature(participantSigUrl);
+-            setIsSigned(true);
+-            setHasParticipantSignature(true);
+-          }
+-          
+-        if (companySealUrl) {
+-            safeSetCompanySeal(companySealUrl);
+-          }
+-          
+-        // Mettre à jour le cache global
+-          GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {
+-          participantSig: participantSigUrl,
+-          companySeal: companySealUrl,
+-          // Conserver le tampon de l'organisme s'il existe déjà
+-          organizationSeal: organizationSeal
+-        });
+-        
+-        // Mettre à jour le localStorage
+-        try {
+-          const localStorageKey = `signatures_cache_${training.id}_${participant.id}`;
+-          const cacheData = {
+-            participantSig: participantSigUrl,
+-            companySeal: companySealUrl,
+-            organizationSeal: organizationSeal,
+-            timestamp: Date.now()
+-          };
+-          localStorage.setItem(localStorageKey, JSON.stringify(cacheData));
+-          console.log('💾 [SUPABASE] Cache sauvegardé dans localStorage');
+-        } catch (e) {
+-          console.error('❌ [SUPABASE] Erreur lors de la sauvegarde localStorage:', e);
+-        }
+-        
+-        // Forcer un rafraîchissement
+-        if (participantSigUrl || companySealUrl) {
+-            setTimeout(() => {
+-              setShouldRefresh(prev => !prev);
+-            }, 100);
+-        }
+-      } catch (error) {
+-        console.error('❌ [SUPABASE] Erreur lors du chargement des signatures depuis Supabase:', error);
+-      } finally {
+-        signaturesLoadedRef.current = true;
+-      }
+-    };
+-    
+-    // Lancer le chargement asynchrone
+-    loadSignaturesFromSupabase();
+-  }, [training.id, participant.id, safeSetParticipantSignature, safeSetCompanySeal, organizationSeal]);
++  // Effet doublon de chargement des signatures supprimé
+ 
+   // Effet pour vérifier l'accessibilité des tampons dès le chargement
+   useEffect(() => {
+     const verifySeals = async () => {
+-      if (companySeal || organizationSeal) {
+-        console.log('🔍 [INITIALIZATION] Vérification de l\'accessibilité des tampons');
++      const currentCompanySeal = companySeal;
++      const currentOrganizationSeal = organizationSeal;
++      
++      if (currentCompanySeal || currentOrganizationSeal) {
++        // console.log('🔍 [INIT] Verifying seal accessibility'); // Log supprimé
+         
+         try {
+-          // Importer de manière dynamique pour éviter les problèmes de référence circulaire
+           const { checkSealAccess } = await import('../utils/SignatureUtils');
+           
+-          // Vérifier et potentiellement optimiser les URLs des tampons
+-          const { companySeal: optimizedCompanySeal, organizationSeal: optimizedOrgSeal, diagnosticMessage } = 
+-            await checkSealAccess({
+-              companySeal,
+-              organizationSeal
+-            });
++          const { 
++            companySeal: optimizedCompanySeal, 
++            organizationSeal: optimizedOrgSeal, 
++            diagnosticMessage 
++          } = await checkSealAccess({
++            companySeal: currentCompanySeal,
++            organizationSeal: currentOrganizationSeal
++          });
+           
+-          console.log(`🔍 [INITIALIZATION] Diagnostic des tampons: ${diagnosticMessage}`);
++          // console.log(`🔍 [INIT] Seal diagnostic:`, diagnosticMessage); // Log supprimé
+           
+-          // Mettre à jour les URLs si elles ont été optimisées
+-          if (optimizedCompanySeal && optimizedCompanySeal !== companySeal) {
+-            console.log('🔍 [INITIALIZATION] Mise à jour de l\'URL du tampon d\'entreprise');
+-            setCompanySeal(optimizedCompanySeal);
++          // Fonction pour extraire l'URL de base sans les paramètres
++          const getBaseUrl = (url: string | null | undefined): string | null => {
++            if (!url) return null;
++            return url.split('?')[0];
++          };
++          
++          const currentCompanySealBase = getBaseUrl(currentCompanySeal);
++          const optimizedCompanySealBase = getBaseUrl(optimizedCompanySeal);
++          const currentOrganizationSealBase = getBaseUrl(currentOrganizationSeal);
++          const optimizedOrgSealBase = getBaseUrl(optimizedOrgSeal);
++
++          // Comparer les URLs de base
++          if (optimizedCompanySealBase && optimizedCompanySealBase !== currentCompanySealBase) {
++            // console.log('🔄 [INIT] Updating company seal URL (base different)'); // Log supprimé
++            safeSetCompanySeal(optimizedCompanySeal); // Utiliser l'URL optimisée complète (avec timestamp)
++          } else {
++             // console.log('✅ [INIT] Company seal base URL up-to-date or unchanged'); // Log supprimé
+           }
+           
+-          if (optimizedOrgSeal && optimizedOrgSeal !== organizationSeal) {
+-            console.log('🔍 [INITIALIZATION] Mise à jour de l\'URL du tampon d\'organisme');
+-            setOrganizationSeal(optimizedOrgSeal);
++          // Comparer les URLs de base
++          if (optimizedOrgSealBase && optimizedOrgSealBase !== currentOrganizationSealBase) {
++            // console.log('🔄 [INIT] Updating organization seal URL (base different)'); // Log supprimé
++            safeSetOrganizationSeal(optimizedOrgSeal); // Utiliser l'URL optimisée complète (avec timestamp)
++          } else {
++             // console.log('✅ [INIT] Organization seal base URL up-to-date or unchanged'); // Log supprimé
+           }
+           
+-          // Retourner le résultat pour un usage ultérieur
+-          return { companySeal: optimizedCompanySeal, organizationSeal: optimizedOrgSeal };
+-        } catch (error) {
+-          console.error('❌ [ERROR] Erreur lors de la vérification des tampons:', error);
+-          return { companySeal, organizationSeal };
++          setSealsVerified(true);
++          
++    } catch (error) {
++          // console.error('❌ [ERROR] Error verifying seals:', error); // Log supprimé
++          setSealsVerified(true); // Avoid loop on error
+         }
+       }
+-      
+-      return { companySeal, organizationSeal };
+     };
+     
+-    // Lancer la vérification
+     verifySeals();
+-  }, [companySeal, organizationSeal]);
++  }, [companySeal, organizationSeal, safeSetCompanySeal, safeSetOrganizationSeal]);
+ 
+   useEffect(() => {
+     // Créer un élément div pour le portail s'il n'existe pas déjà
+@@ -1278,7 +1041,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+           .single();
+ 
+         if (settingsError) {
+-          console.error('Erreur lors de la récupération des paramètres:', settingsError);
++          // console.error('Erreur lors de la récupération des paramètres:', settingsError); // Log supprimé
+         } else if (settingsData) {
+           // Transformer les données dans le format attendu par le template
+           const formattedSettings: OrganizationSettings = {
+@@ -1291,7 +1054,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             representative_name: 'Nicolas Cleton',
+             representative_title: 'Président',
+             activity_declaration_number: settingsData.training_number || '32 59 10753 59',
+-            organization_seal_url: settingsData.organization_seal_url
++            // organization_seal_url: settingsData.organization_seal_url // Propriété supprimée car non existante dans le type importé
+           };
+           setOrganizationSettings(formattedSettings);
+         }
+@@ -1304,10 +1067,10 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+           .single();
+         
+         if (fullTrainingError) {
+-          console.error('Erreur lors de la récupération des données complètes de la formation:', fullTrainingError);
++          // console.error('Erreur lors de la récupération des données complètes de la formation:', fullTrainingError); // Log supprimé
+         } else if (fullTrainingData) {
+-          console.log('✅ [DATA] Données complètes de la formation récupérées:', fullTrainingData);
+-          console.log('✅ [PRICE] Prix récupéré:', fullTrainingData.price);
++          // console.log('✅ [DATA] Données complètes de la formation récupérées:', fullTrainingData); // Log supprimé
++          // console.log('✅ [PRICE] Prix récupéré:', fullTrainingData.price); // Log supprimé
+           
+           // S'assurer que le prix est bien un nombre ou null
+           const price = fullTrainingData.price !== undefined ? 
+@@ -1325,8 +1088,8 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             material_elements: parseJsonField(fullTrainingData.material_elements) || training.material_elements,
+           };
+           
+-          console.log('🔄 [DATA] Données de formation parsées:', parsedTraining);
+-          console.log('🔄 [PRICE] Prix après parsing:', parsedTraining.price);
++          // console.log('🔄 [DATA] Données de formation parsées:', parsedTraining); // Log supprimé
++          // console.log('🔄 [PRICE] Prix après parsing:', parsedTraining.price); // Log supprimé
+           
+           // Mise à jour directe des propriétés de l'objet training
+           Object.assign(training, parsedTraining);
+@@ -1341,11 +1104,11 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             .single();
+ 
+           if (companyError) {
+-            console.error('Erreur lors de la récupération de la société:', companyError);
++            // console.error('Erreur lors de la récupération de la société:', companyError); // Log supprimé
+             
+             // Si pas de company_id mais que le participant a une entreprise renseignée, essayer de la trouver
+             if (participant.company) {
+-              console.log('🔍 [DEBUG] Pas de company_id trouvée, recherche par nom:', participant.company);
++              // console.log('🔍 [DEBUG] Pas de company_id trouvée, recherche par nom:', participant.company); // Log supprimé
+               
+               const { data: companyByNameData, error: companyByNameError } = await supabase
+                 .from('companies')
+@@ -1355,7 +1118,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+                 .single();
+               
+               if (companyByNameError) {
+-                console.log('⚠️ [WARN] Entreprise non trouvée par nom:', companyByNameError);
++                // console.warn('⚠️ [WARN] Entreprise non trouvée par nom:', companyByNameError); // Log supprimé
+                 
+                 // Créer une entreprise de base à partir du nom
+                 setCompany({
+@@ -1366,7 +1129,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+                   siret: participant.company ? 'SIRET non renseigné' : 'À compléter'
+                 });
+               } else if (companyByNameData) {
+-                console.log('✅ [SUCCESS] Entreprise trouvée par nom:', companyByNameData);
++                // console.log('✅ [SUCCESS] Entreprise trouvée par nom:', companyByNameData); // Log supprimé
+                 setCompany(companyByNameData);
+               }
+             } else {
+@@ -1384,7 +1147,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+           }
+         } else if (participant.company) {
+           // Si pas de company_id mais que le participant a une entreprise renseignée, essayer de la trouver
+-          console.log('🔍 [DEBUG] Pas de company_id, recherche par nom:', participant.company);
++          // console.log('🔍 [DEBUG] Pas de company_id, recherche par nom:', participant.company); // Log supprimé
+           
+           const { data: companyByNameData, error: companyByNameError } = await supabase
+             .from('companies')
+@@ -1394,7 +1157,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             .single();
+           
+           if (companyByNameError) {
+-            console.log('⚠️ [WARN] Entreprise non trouvée par nom:', companyByNameError);
++            // console.warn('⚠️ [WARN] Entreprise non trouvée par nom:', companyByNameError); // Log supprimé
+             
+             // Créer une entreprise de base à partir du nom
+             setCompany({
+@@ -1405,7 +1168,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+               siret: participant.company ? 'SIRET non renseigné' : 'À compléter'
+             });
+           } else if (companyByNameData) {
+-            console.log('✅ [SUCCESS] Entreprise trouvée par nom:', companyByNameData);
++            // console.log('✅ [SUCCESS] Entreprise trouvée par nom:', companyByNameData); // Log supprimé
+             setCompany(companyByNameData);
+           }
+         } else {
+@@ -1419,88 +1182,13 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+           });
+                       }
+                     } catch (error) {
+-        console.error('Erreur lors de la récupération des données:', error);
++        // console.error('Erreur lors de la récupération des données:', error); // Log supprimé
+                     }
+                   };
+                   
+                   fetchCompanyAndSettings();
+   }, [training.company_id, participant.company]);
+ 
+-  // Après avoir reçu la signature du participant
+-  useEffect(() => {
+-    if (participantSignature) {
+-      setHasParticipantSignature(true);
+-    }
+-  }, [participantSignature]);
+-
+-  // Effet pour récupérer le tampon de l'organisme et le mémoriser
+-  useEffect(() => {
+-    const fetchOrganizationSeal = async () => {
+-      try {
+-        // D'abord vérifier dans le cache
+-        const cachedSeal = initialSignatures.organizationSeal;
+-        if (cachedSeal) {
+-          console.log('✅ [ORG_SEAL] Tampon trouvé dans le cache:', cachedSeal);
+-          setOrganizationSeal(cachedSeal);
+-          // Actualiser aussi le cache pour ne pas perdre l'information
+-          updateSignatureCache(undefined, undefined, cachedSeal);
+-          return;
+-        }
+-        
+-        // Vérifier si nous avons déjà une URL de tampon dans les paramètres de l'organisme
+-        if (organizationSettings?.organization_seal_url) {
+-          console.log('✅ [ORG_SEAL] URL du tampon trouvée dans les paramètres:', organizationSettings.organization_seal_url);
+-          
+-          // Ajouter un paramètre anticache
+-          const baseUrl = organizationSettings.organization_seal_url.split('?')[0];
+-          const timestamp = Date.now();
+-          const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-          
+-          // Attribuer directement l'URL au tampon d'organisme
+-          setOrganizationSeal(antiCacheUrl);
+-          // Mettre à jour le cache également
+-          updateSignatureCache(undefined, undefined, antiCacheUrl);
+-          return;
+-        }
+-        
+-        // Si aucune URL n'est présente dans les paramètres, rechercher dans les signatures
+-        const { data: sealData, error: sealError } = await supabase
+-          .from('document_signatures')
+-          .select('signature_url')
+-          .eq('signature_type', 'organizationSeal')
+-          .order('created_at', { ascending: false })
+-          .limit(1)
+-          .single();
+-          
+-        if (sealError) {
+-          console.log('⚠️ [ORG_SEAL] Aucun tampon trouvé dans document_signatures:', sealError);
+-          return;
+-        }
+-        
+-        if (sealData && sealData.signature_url) {
+-          console.log('✅ [ORG_SEAL] Tampon trouvé dans document_signatures:', sealData.signature_url);
+-          
+-          // Ajouter un paramètre anticache
+-          const baseUrl = sealData.signature_url.split('?')[0];
+-          const timestamp = Date.now();
+-          const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-          
+-          // Attribuer l'URL au tampon d'organisme
+-          setOrganizationSeal(antiCacheUrl);
+-          // Mettre à jour le cache également
+-          updateSignatureCache(undefined, undefined, antiCacheUrl);
+-        }
+-      } catch (error) {
+-        console.error('❌ [ORG_SEAL] Erreur lors de la récupération du tampon d\'organisme:', error);
+-      }
+-    };
+-    
+-    // Exécuter seulement si nous avons les paramètres de l'organisme et que le tampon n'est pas déjà défini
+-    if ((organizationSettings || initialSignatures.organizationSeal) && !organizationSeal) {
+-      fetchOrganizationSeal();
+-    }
+-  }, [organizationSettings, organizationSeal, initialSignatures, updateSignatureCache]);
+-
+   // Lors de la signature locale
+   const handleSignatureComplete = (dataURL: string) => {
+     setLocalSignatureDataURL(dataURL);
+@@ -1521,7 +1209,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+       const blobUrl = URL.createObjectURL(pdfBlob);
+       window.open(blobUrl, '_blank');
+     } catch (error) {
+-      console.error('Erreur lors de la génération du PDF:', error);
++      // console.error('Erreur lors de la génération du PDF:', error); // Log supprimé
+       alert('Une erreur est survenue lors de la génération du PDF. Veuillez réessayer.');
+     }
+   };
+@@ -1532,7 +1220,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+       const date = new Date(dateString);
+       return format(date, 'dd/MM/yyyy', { locale: fr });
+     } catch (e) {
+-      console.error('Erreur de formatage de date:', e);
++      // console.error('Erreur de formatage de date:', e); // Log supprimé
+       return dateString;
+     }
+   };
+@@ -1623,34 +1311,34 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+     const result: { participantImage?: HTMLImageElement; representativeImage?: HTMLImageElement } = {};
+     
+     if (!pdfContentRef.current) {
+-      console.log('🔍 [DEBUG] pdfContentRef est null, impossible de chercher les signatures');
++      // console.log('🔍 [DEBUG] pdfContentRef est null, impossible de chercher les signatures'); // Log supprimé
+       return result;
+     }
+     
+     // Rechercher avec les sélecteurs les plus précis en premier
+     // 1. Rechercher par attributs data-* spécifiques (méthode la plus fiable)
+     const dataSignatureImages = pdfContentRef.current.querySelectorAll('[data-signature="true"]');
+-    console.log(`🔍 [DEBUG] ${dataSignatureImages.length} images avec attribut data-signature="true" trouvées`);
++    // console.log(`🔍 [DEBUG] ${dataSignatureImages.length} images avec attribut data-signature="true" trouvées`); // Log supprimé
+     
+     if (dataSignatureImages.length > 0) {
+       dataSignatureImages.forEach((img) => {
+         const imgEl = img as HTMLImageElement;
+         const type = imgEl.getAttribute('data-signature-type');
+-        console.log(`🔍 [DEBUG] Image de signature trouvée avec type: ${type}`, imgEl);
++        // console.log(`🔍 [DEBUG] Image de signature trouvée avec type: ${type}`, imgEl); // Log supprimé
+         
+         if (type === 'participant') {
+           result.participantImage = imgEl;
+-          console.log('✅ [DEBUG] Image de signature du participant trouvée dans le document');
++          // console.log('✅ [DEBUG] Image de signature du participant trouvée dans le document'); // Log supprimé
+         } else if (type === 'representative') {
+           result.representativeImage = imgEl;
+-          console.log('✅ [DEBUG] Image de signature du représentant trouvée dans le document');
++          // console.log('✅ [DEBUG] Image de signature du représentant trouvée dans le document'); // Log supprimé
+         }
+       });
+     }
+     
+     // 2. Si les attributs data-* n'ont pas fonctionné, rechercher par conteneurs parents
+     if (!result.participantImage || !result.representativeImage) {
+-      console.log('🔍 [DEBUG] Recherche de signatures par conteneurs parents');
++      // console.log('🔍 [DEBUG] Recherche de signatures par conteneurs parents'); // Log supprimé
+       
+       // Rechercher les conteneurs de signature
+       const participantContainer = pdfContentRef.current.querySelector('[data-signature-container="participant"]');
+@@ -1660,7 +1348,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         const img = participantContainer.querySelector('img');
+         if (img) {
+           result.participantImage = img as HTMLImageElement;
+-          console.log('✅ [DEBUG] Image de signature du participant trouvée par conteneur parent');
++          // console.log('✅ [DEBUG] Image de signature du participant trouvée par conteneur parent'); // Log supprimé
+         }
+       }
+       
+@@ -1668,18 +1356,18 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         const img = representativeContainer.querySelector('img');
+         if (img) {
+           result.representativeImage = img as HTMLImageElement;
+-          console.log('✅ [DEBUG] Image de signature du représentant trouvée par conteneur parent');
++          // console.log('✅ [DEBUG] Image de signature du représentant trouvée par conteneur parent'); // Log supprimé
+         }
+       }
+     }
+     
+     // 3. Si aucune image n'a été trouvée, utiliser une méthode moins précise
+     if (!result.participantImage && !result.representativeImage) {
+-      console.log('⚠️ [DEBUG] Aucune signature trouvée avec les méthodes précises, utilisation d\'heuristiques');
++      // console.log('⚠️ [DEBUG] Aucune signature trouvée avec les méthodes précises, utilisation d\'heuristiques'); // Log supprimé
+       
+       // Rechercher toutes les images du document
+       const allImages = pdfContentRef.current.querySelectorAll('img');
+-      console.log(`🔍 [DEBUG] ${allImages.length} images trouvées au total dans le document`);
++      // console.log(`🔍 [DEBUG] ${allImages.length} images trouvées au total dans le document`); // Log supprimé
+       
+       allImages.forEach((img) => {
+         const imgEl = img as HTMLImageElement;
+@@ -1688,20 +1376,20 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         // Analyser l'URL pour déterminer le type de signature
+         if (src.includes('participant_convention') && !result.participantImage) {
+           result.participantImage = imgEl;
+-          console.log('✅ [DEBUG] Image de signature du participant trouvée par heuristique URL');
++          // console.log('✅ [DEBUG] Image de signature du participant trouvée par heuristique URL'); // Log supprimé
+         } else if ((src.includes('representative_convention') || 
+                    src.includes('trainer_convention')) && 
+                   !result.representativeImage) {
+           result.representativeImage = imgEl;
+-          console.log('✅ [DEBUG] Image de signature du représentant trouvée par heuristique URL');
++          // console.log('✅ [DEBUG] Image de signature du représentant trouvée par heuristique URL'); // Log supprimé
+         }
+       });
+     }
+     
+     // Résumé final
+-    console.log('🔍 [DEBUG] Récapitulatif des signatures trouvées:');
+-    console.log('- Participant:', result.participantImage ? '✅ Trouvée' : '❌ Non trouvée');
+-    console.log('- Représentant:', result.representativeImage ? '✅ Trouvée' : '❌ Non trouvée');
++    // console.log('🔍 [DEBUG] Récapitulatif des signatures trouvées:'); // Log supprimé
++    // console.log('- Participant:', result.participantImage ? '✅ Trouvée' : '❌ Non trouvée'); // Log supprimé
++    // console.log('- Représentant:', result.representativeImage ? '✅ Trouvée' : '❌ Non trouvée'); // Log supprimé
+     
+     return result;
+   };
+@@ -1711,34 +1399,14 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+ 
+   // Journaux pour le débogage des données du template
+   useEffect(() => {
+-    console.log('🧩 [DEBUG] StudentTrainingAgreement - Rendu principal du template avec:', {
+-      'company complet': company,
+-      'a-t-on une entreprise': !!company,
+-      'props participant': participant,
+-      'a-t-on une entreprise participant': !!participant.company 
+-    });
++    // console.log('🧩 [DEBUG] StudentTrainingAgreement - Rendu principal du template avec:', { // Log supprimé
++    //   'company complet': company,
++    //   'a-t-on une entreprise': !!company,
++    //   'props participant': participant,
++    //   'a-t-on une entreprise participant': !!participant.company
++    // });
+   }, [company, participant]);
+ 
+-  // Définition de l'objet trainingAgreement pour centraliser les informations de signature
+-  useEffect(() => {
+-    // Création de l'objet trainingAgreement qui stocke toutes les signatures
+-    const trainingAgreementData = {
+-      signatures: {
+-        participant: participantSignature,
+-        companySeal: companySeal,
+-        organizationSeal: organizationSeal,
+-        trainer: null,          // Peut être défini si nécessaire
+-        representative: null    // Peut être défini si nécessaire
+-      }
+-    };
+-
+-    // Stockage dans une variable accessible aux autres effets
+-    // @ts-ignore - Nous définissons la variable globalement pour qu'elle soit accessible aux autres effets
+-    window.trainingAgreement = trainingAgreementData;
+-    
+-    console.log('🔄 [DEBUG] trainingAgreement mis à jour:', trainingAgreementData);
+-  }, [participantSignature, companySeal, organizationSeal]);
+-
+   // Effet pour gérer l'insertion des tampons qui n'apparaissent pas correctement
+   useEffect(() => {
+     if (!companySeal && !organizationSeal) return;
+@@ -1747,7 +1415,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+     const checkAndFixSeal = () => {
+       // Limiter à 2 tentatives maximum pour éviter les boucles infinies
+       if (sealAttemptsRef.current >= 2) {
+-        console.log('🔍 [INFO] Nombre maximum de tentatives atteint pour corriger l\'affichage du tampon');
++        // console.log('🔍 [INFO] Nombre maximum de tentatives atteint pour corriger l\'affichage du tampon'); // Log supprimé
+       return;
+     }
+ 
+@@ -1756,10 +1424,10 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+       if (companySeal) {
+         const companySealDisplayed = document.querySelector('.company-seal img, [data-seal-container="company"] img');
+         if (!companySealDisplayed) {
+-          console.log(`🔍 [WARN] Le tampon n'est pas correctement affiché après enregistrement (tentative ${sealAttemptsRef.current}/2)`);
+-          forceSealDisplay();
++          // console.log(`🔍 [WARN] Le tampon n'est pas correctement affiché après enregistrement (tentative ${sealAttemptsRef.current}/2)`); // Log supprimé
++          // forceSealDisplay(); // Supprimer cet appel car la fonction n'existe plus
+         } else {
+-          console.log('✅ [SUCCESS] Tampon correctement affiché après correction');
++          // console.log('✅ [SUCCESS] Tampon correctement affiché après correction'); // Log supprimé
+         }
+       }
+     };
+@@ -1775,36 +1443,30 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+     };
+   }, [companySeal, organizationSeal]);
+ 
+-  // Ajouter un effet pour mettre à jour automatiquement le cache quand les signatures changent
+-  useEffect(() => {
+-    log('🔄', '[AUTO_CACHE]', 'Mise à jour automatique du cache suite à modification des signatures');
+-    updateSignatureCache();
+-  }, [participantSignature, companySeal, organizationSeal, updateSignatureCache]);
+-
+   // S'assurer que l'état initial est correctement initialisé à partir du cache
+   useEffect(() => {
+     if (initialSignatures.participantSig || initialSignatures.companySeal || initialSignatures.trainerSig) {
+-      console.log('🔄 [INIT] Initialisation des signatures depuis le cache:');
++      // console.log('🔄 [INIT] Initialisation des signatures depuis le cache:'); // Log supprimé
+       
+       if (initialSignatures.participantSig) {
+-        console.log('✅ [INIT] Signature participant trouvée dans le cache');
++        // console.log('✅ [INIT] Signature participant trouvée dans le cache'); // Log supprimé
+         safeSetParticipantSignature(initialSignatures.participantSig);
+         setIsSigned(true);
+         setHasParticipantSignature(true);
+       }
+       
+       if (initialSignatures.companySeal) {
+-        console.log('✅ [INIT] Tampon entreprise trouvé dans le cache');
++        // console.log('✅ [INIT] Tampon entreprise trouvé dans le cache'); // Log supprimé
+         safeSetCompanySeal(initialSignatures.companySeal);
+       }
+       
+       if (initialSignatures.organizationSeal) {
+-        console.log('✅ [INIT] Tampon organisme trouvé dans le cache');
++        // console.log('✅ [INIT] Tampon organisme trouvé dans le cache'); // Log supprimé
+         setOrganizationSeal(initialSignatures.organizationSeal);
+       }
+       
+       if (initialSignatures.trainerSig) {
+-        console.log('✅ [INIT] Signature formateur trouvée dans le cache');
++        // console.log('✅ [INIT] Signature formateur trouvée dans le cache'); // Log supprimé
+         safeSetTrainerSignature(initialSignatures.trainerSig);
+       }
+       
+@@ -1833,39 +1495,63 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+     window.addEventListener('beforeunload', preventUnload);
+     
+     try {
+-      console.log(`🔍 [SAVE] Sauvegarde du ${type === 'companySeal' ? 'tampon' : 'signature'} dans DocumentManager`);
+-      
++      // console.log(`🔍 [SAVE] Sauvegarde du ${type === 'companySeal' ? 'tampon' : 'signature'} dans DocumentManager`); // Log supprimé
++
++      // Déterminer le type de signature (représentant pour les conventions)
++      const signatureType =
++        type === 'participant' ? 'representative' : type;
++
++      // console.log(`🔍 [SAVE] Type de signature utilisé: ${signatureType} pour un document de type convention`); // Log supprimé
++
+       // Sauvegarder l'image avec le DocumentManager
+       try {
+-        const correctedType = 
+-          type === 'participant' ? 'participant' : type;
+-        
+-        console.log(`🔍 [SAVE] Type de signature utilisé: ${correctedType} pour un document de type convention`);
+-        
+         const signatureUrl = await DocumentManager.saveSignature({
+-          training_id: training.id,
++            training_id: training.id,
+           user_id: participant.id,
+           signature: signatureDataUrl,
+           type: 'convention',
+-          signature_type: correctedType as 'participant' | 'representative' | 'trainer' | 'companySeal' | 'organizationSeal',
+-          created_by: session.user.id
++          signature_type: signatureType as 'participant' | 'representative' | 'trainer' | 'companySeal' | 'organizationSeal',
++            created_by: session.user.id
+         });
+         
+         if (!signatureUrl) {
+           throw new Error(`Impossible d'obtenir l'URL de ${type === 'companySeal' ? 'tampon' : 'signature'}`);
+         }
+         
+-        console.log(`🔍 [SAVE] ${type === 'companySeal' ? 'Tampon' : 'Signature'} enregistré:`, signatureUrl.substring(0, 50) + '...');
++        // console.log(`🔍 [SAVE] ${type === 'companySeal' ? 'Tampon' : 'Signature'} enregistré:`, signatureUrl.substring(0, 50) + '...'); // Log supprimé
+         
+         // Anticacher l'URL
+         const baseUrl = signatureUrl.split('?')[0];
+         const timestamp = Date.now();
+         const antiCacheUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
++
++        // Si c'est une signature de représentant, la partager avec tous les participants de la même entreprise
++        if (type === 'participant' && company && company.id) {
++          try {
++            // console.log('🔄 [SHARE] Partage de la signature...'); // Log supprimé
++            // Importer et utiliser le service de partage
++            const { SignatureService } = await import('../utils/SignatureUtils');
++
++            const shareResult = await SignatureService.shareRepresentativeSignature(
++              training.id,
++              participant.id,
++              company.id
++            );
++
++            if (shareResult) {
++              // console.log('✅ [SHARE] Signature partagée avec succès'); // Log supprimé
++            } else {
++              // console.warn('⚠️ [SHARE] Aucun partage effectué'); // Log supprimé
++            }
++          } catch (shareError) {
++            // console.error('❌ [SHARE] ERROR', 'Erreur partage signature:', shareError); // Log supprimé
++          }
++        }
+         
+         // Précharger l'image avant de mettre à jour l'interface
+         const img = new Image();
+         img.onload = () => {
+-          console.log(`✅ [SAVE] Image de ${type === 'companySeal' ? 'tampon' : 'signature'} préchargée avec succès`);
++          // console.log(`✅ [SAVE] Image de ${type === 'companySeal' ? 'tampon' : 'signature'} préchargée avec succès`); // Log supprimé
+           
+           // Mettre à jour les états selon le type
+           if (type === 'companySeal') {
+@@ -1896,20 +1582,20 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             
+             // Mise à jour du statut de signature dans la base de données
+             try {
+-              console.log('🔄 [SAVE] Mise à jour du statut de signature dans user_profiles');
++              // console.log('🔄 [SAVE] Mise à jour du statut de signature dans user_profiles'); // Log supprimé
+               supabase
+                 .from('user_profiles')
+                 .update({ has_signed_agreement: true })
+                 .eq('id', participant.id)
+                 .then(({ error }) => {
+                   if (error) {
+-                    console.error('❌ [SAVE] Erreur lors de la mise à jour du statut de signature:', error);
++                    // console.error('❌ [SAVE] Erreur lors de la mise à jour du statut de signature:', error); // Log supprimé
+                   } else {
+-                    console.log('✅ [SAVE] Statut de signature mis à jour avec succès');
++                    // console.log('✅ [SAVE] Statut de signature mis à jour avec succès'); // Log supprimé
+                   }
+                 });
+             } catch (e) {
+-              console.error('❌ [SAVE] Erreur inattendue lors de la mise à jour du statut:', e);
++              // console.error('❌ [SAVE] Erreur inattendue lors de la mise à jour du statut:', e); // Log supprimé
+             }
+           }
+           
+@@ -1925,17 +1611,18 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+           
+           // Terminer le chargement et rafraîchir
+           setIsSaving(false);
+-          setShouldRefresh(prev => !prev);
++          // SUPPRIMÉ: Rafraîchissement forcé
+         };
+         
+         img.onerror = () => {
+-          console.error(`❌ [SAVE] Erreur de préchargement de l'image de ${type === 'companySeal' ? 'tampon' : 'signature'}`);
++          // console.error(`❌ [SAVE] ERROR Erreur de préchargement de l\'image de ${type === 'companySeal' ? 'tampon' : 'signature'}`); // Log supprimé
+           // Continuer malgré l'erreur
+           if (type === 'companySeal') {
+             safeSetCompanySeal(antiCacheUrl);
+           } else {
+             safeSetParticipantSignature(antiCacheUrl);
+             setIsSigned(true);
++            setHasParticipantSignature(true);
+           }
+           
+           // Mettre à jour le cache global avec la nouvelle valeur
+@@ -1953,8 +1640,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         // Déclencher le chargement
+         img.src = antiCacheUrl;
+       } catch (saveError) {
+-        console.error(`🔍 [SAVE] Erreur lors de la sauvegarde:`, saveError);
+-        
++        // console.error(`❌ [SAVE] ERROR Erreur sauvegarde DocumentManager:`, saveError); // Log supprimé
+         // Mode de secours: utiliser le dataURL local
+         if (type === 'companySeal') {
+           safeSetCompanySeal(signatureDataUrl);
+@@ -1976,7 +1662,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+         alert(`Le ${type === 'companySeal' ? 'tampon' : 'la signature'} a été enregistré localement, mais n'a pas pu être sauvegardé sur le serveur. Veuillez réessayer si nécessaire.`);
+       }
+     } catch (error) {
+-      console.error(`❌ [SAVE] Erreur générale:`, error);
++      // console.error(`❌ [SAVE] ERROR Erreur générale sauvegarde:`, error); // Log supprimé
+       alert(`Une erreur est survenue lors de la sauvegarde. Veuillez réessayer.`);
+       setIsSaving(false);
+     } finally {
+@@ -2017,9 +1703,9 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+                 title="Convention de formation signée" 
+                 className="w-full h-full min-h-[70vh] rounded-lg border border-gray-600"
+                 style={{ backgroundColor: 'white' }}
+-                onLoad={() => console.log('🔍 [DEBUG] Document iframe loaded successfully (convention)')}
++                onLoad={() => { /* console.log('✅ [IFRAME] Document iframe loaded successfully (convention)') */ }} // Log supprimé
+                 onError={() => {
+-                  console.error('🔍 [DEBUG] Error loading document iframe (convention)');
++                  // console.error('❌ [IFRAME] Error loading document iframe (convention)'); // Log supprimé
+                   setPdfError(true);
+                 }}
+               />
+@@ -2055,14 +1741,14 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   if (showSignatureCanvas) {
+     return (
+       <div className="fixed inset-0 bg-gray-900 bg-opacity-80 backdrop-blur-lg flex items-center justify-center z-50 p-4">
+-        <div className="bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full flex flex-col">
+-          <div className="p-6 flex items-center justify-between border-b border-gray-700">
+-            <h2 className="text-xl font-semibold text-white">
++        <div className="bg-white rounded-xl shadow-lg max-w-4xl w-full flex flex-col">
++          <div className="p-6 flex items-center justify-between border-b border-gray-200">
++            <h2 className="text-xl font-semibold text-gray-900">
+               Signature de la convention
+             </h2>
+             <button
+               onClick={() => setShowSignatureCanvas(false)}
+-              className="text-gray-400 hover:text-white transition-colors"
++              className="text-gray-500 hover:text-gray-700 transition-colors"
+               disabled={isSaving}
+             >
+               <X className="w-6 h-6" />
+@@ -2070,7 +1756,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+           </div>
+           
+           <div className="p-6">
+-            <h3 className="font-semibold text-lg mb-4">
++            <h3 className="font-semibold text-lg mb-4 text-gray-900">
+               Apposez votre signature
+             </h3>
+             
+@@ -2099,14 +1785,14 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   if (showSealCanvas) {
+     return (
+       <div className="fixed inset-0 bg-gray-900 bg-opacity-80 backdrop-blur-lg flex items-center justify-center z-50 p-4">
+-        <div className="bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full flex flex-col">
+-          <div className="p-6 flex items-center justify-between border-b border-gray-700">
+-            <h2 className="text-xl font-semibold text-white">
++        <div className="bg-white rounded-xl shadow-lg max-w-4xl w-full flex flex-col">
++          <div className="p-6 flex items-center justify-between border-b border-gray-200">
++            <h2 className="text-xl font-semibold text-gray-900">
+               Tampon de l'entreprise
+             </h2>
+             <button
+               onClick={() => setShowSealCanvas(false)}
+-              className="text-gray-400 hover:text-white transition-colors"
++              className="text-gray-500 hover:text-gray-700 transition-colors"
+               disabled={isSaving}
+             >
+               <X className="w-6 h-6" />
+@@ -2114,7 +1800,7 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+           </div>
+           
+           <div className="p-6">
+-            <h3 className="font-semibold text-lg mb-4">
++            <h3 className="font-semibold text-lg mb-4 text-gray-900">
+               Apposez le tampon de votre entreprise
+             </h3>
+             
+@@ -2138,17 +1824,18 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+   }
+ 
+   // Affichage principale de la convention (avec ou sans signature)
++  console.log('[DEBUG] Value passed to template - representativeSignature:', representativeSignature); // AJOUT: Vérifier la valeur passée
+   return (
+     <div className="fixed inset-0 bg-gray-900 bg-opacity-80 backdrop-blur-lg flex items-center justify-center z-50 p-4">
+-      <div className="bg-gray-800 rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+-        <div className="p-6 flex items-center justify-between border-b border-gray-700">
+-          <h2 className="text-xl font-semibold text-white">
++      <div className="bg-white rounded-xl shadow-lg max-w-4xl w-full max-h-[90vh] flex flex-col">
++        <div className="p-6 flex items-center justify-between border-b border-gray-200">
++          <h2 className="text-xl font-semibold text-gray-900">
+             {participantSignature ? "Convention de formation signée" : "Convention de formation"}
+             {participantSignature && <span className="ml-2 text-sm bg-green-600 text-white px-2 py-0.5 rounded-full">Signée</span>}
+           </h2>
+           <button
+             onClick={onCancel}
+-            className="text-gray-400 hover:text-white transition-colors"
++            className="text-gray-500 hover:text-gray-700 transition-colors"
+           >
+             <X className="w-6 h-6" />
+           </button>
+@@ -2167,30 +1854,8 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+             </div>
+             <div id="training-agreement-template">
+               <UnifiedTrainingAgreementTemplate
+-                training={{
+-                  id: training.id,
+-                  title: training.title,
+-                  duration: training.duration,
+-                  location: training.location,
+-                  start_date: training.start_date,
+-                  end_date: training.end_date,
+-                  trainer_name: training.trainer_name,
+-                  trainer_details: training.trainer_id,
+-                  evaluation_methods: training.evaluation_methods,
+-                  tracking_methods: training.tracking_methods,
+-                  pedagogical_methods: training.pedagogical_methods,
+-                  material_elements: training.material_elements,
+-                  objectives: training.objectives,
+-                  content: training.content,
+-                  price: training.price
+-                }}
+-                company={company || { 
+-                  name: participant.company || 'À compléter',
+-                  address: 'À compléter',
+-                  postal_code: '',
+-                  city: '',
+-                  siret: 'À compléter'
+-                }}
++                training={training}
++                company={company || { name: '' }}
+                 participant={participant ? {
+                   id: participant.id,
+                   first_name: participant.first_name,
+@@ -2199,24 +1864,32 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+                   email: '',
+                   company: participant.company
+                 } : undefined}
+-                participants={allTrainingParticipants.length > 0 
+-                  ? allTrainingParticipants 
+-                  : (participant ? [{
+-                      id: participant.id,
+-                      first_name: participant.first_name, 
+-                      last_name: participant.last_name,
+-                      job_position: participant.job_position || '',
+-                      email: '',
+-                      company: participant.company
+-                    }] : [])}
++                participants={allTrainingParticipants}
+                 participantSignature={participantSignature}
++                // AJOUT: Passer la signature du représentant
++                representativeSignature={representativeSignature}
+                 companySeal={companySeal}
+                 organizationSeal={organizationSeal}
+                 viewContext="student"
+                 pdfMode={false}
+-                organizationSettings={organizationSettings || DEFAULT_ORGANIZATION_SETTINGS}
++                organizationSettings={{
++                  organization_name: organizationSettings?.organization_name || DEFAULT_ORGANIZATION_SETTINGS.organization_name,
++                  address: organizationSettings?.address || DEFAULT_ORGANIZATION_SETTINGS.address,
++                  siret: organizationSettings?.siret || DEFAULT_ORGANIZATION_SETTINGS.siret,
++                  activity_declaration_number: organizationSettings?.activity_declaration_number || DEFAULT_ORGANIZATION_SETTINGS.activity_declaration_number,
++                  representative_name: organizationSettings?.representative_name || DEFAULT_ORGANIZATION_SETTINGS.representative_name,
++                  representative_title: organizationSettings?.representative_title || DEFAULT_ORGANIZATION_SETTINGS.representative_title,
++                  city: organizationSettings?.city || DEFAULT_ORGANIZATION_SETTINGS.city,
++                  postal_code: organizationSettings?.postal_code || DEFAULT_ORGANIZATION_SETTINGS.postal_code,
++                  country: organizationSettings?.country || DEFAULT_ORGANIZATION_SETTINGS.country,
++                }}
+                 trainerId={training.trainer_id}
+                 trainerSignature={trainerSignature}
++                onRenderComplete={() => {
++                  // SUPPRIMÉ: Log détaillé ici
++                  // SUPPRIMÉ: Forçage du DOM du tampon organisme ici
++                  console.log('✅ [RENDER_COMPLETE] Template rendu.');
++                }}
+               />
+             </div>
+           </div>
+@@ -2281,8 +1954,8 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+           )}
+           
+           <div className="flex flex-wrap gap-3">
+-            {participantSignature && (
+-              <>
++            {participantSignature ? (
++              // Si la convention est signée, afficher un seul bouton pour télécharger/visualiser le PDF signé
+                 <button
+                   onClick={generatePDF}
+                   className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
+@@ -2295,78 +1968,22 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
+                     </>
+                   ) : (
+                     <>
+-                      <Download className="w-5 h-5" /> Télécharger (signé)
++                    <Download className="w-5 h-5" /> Télécharger PDF
+                     </>
+                   )}
+                 </button>
+-              </>
+-            )}
+-            
++            ) : (
++              // Si la convention n'est pas encore signée, afficher un bouton pour visualiser le PDF
+             <button
+               onClick={generatePDF}
+-              className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2 flex-grow md:flex-grow-0"
++                className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
+             >
+               <Download className="w-5 h-5" /> Visualiser PDF
+             </button>
++            )}
+           </div>
+         </div>
+       </div>
+     </div>
+   );
+-};
+-
+-// Restaurer la fonction forceSealDisplay qui a été supprimée par erreur
+-// Fonction pour forcer l'affichage des tampons qui ne s'affichent pas correctement
+-const forceSealDisplay = () => {
+-  if (!companySeal) return;
+-  
+-  try {
+-    // Limiter le nombre de tentatives pour éviter les boucles infinies
+-    if (sealAttemptsRef.current >= 2) {
+-      console.log('🛑 [FORCE] Nombre maximum de tentatives atteint (2), abandon');
+-      return;
+-    }
+-    
+-    // Incrémenter le compteur de tentatives
+-    sealAttemptsRef.current++;
+-    
+-    // Nettoyer l'URL et ajouter un unique paramètre de timestamp
+-    const baseUrl = companySeal.split('?')[0];
+-    const timestamp = Date.now();
+-    const cleanSealUrl = `${baseUrl}?t=${timestamp}&forcereload=true`;
+-    
+-    console.log('🔧 [FORCE] Nettoyage de l\'URL du tampon:', cleanSealUrl);
+-    
+-    // Utiliser le cache d'images pour éviter les rechargements multiples
+-    if (PRELOADED_IMAGES[baseUrl]) {
+-      console.log('✅ [CACHE] Image déjà dans le cache local, utilisation directe');
+-      safeSetCompanySeal(cleanSealUrl);
+-      // Mettre à jour le cache global
+-      GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {companySeal: cleanSealUrl});
+-      // Rafraîchir le composant
+-      setShouldRefresh(prev => !prev);
+-      return;
+-    }
+-    
+-    // Précharger l'image
+-    const img = new Image();
+-    img.onload = () => {
+-      console.log('✅ [FORCE] Image du tampon préchargée avec succès, mise à jour de l\'URL');
+-      
+-      // Ajouter au cache local d'images
+-      PRELOADED_IMAGES[baseUrl] = true;
+-      
+-      safeSetCompanySeal(cleanSealUrl);
+-      // Mettre à jour le cache global
+-      GLOBAL_SIGNATURE_CACHE.setCache(training.id, participant.id, {companySeal: cleanSealUrl});
+-      // Rafraîchir le composant
+-      setShouldRefresh(prev => !prev);
+-    };
+-    img.onerror = () => {
+-      console.error('❌ [FORCE] Erreur de préchargement de l\'image du tampon');
+-    };
+-    img.src = cleanSealUrl;
+-  } catch (error) {
+-    console.error('❌ [FORCE] Erreur lors du forçage de l\'affichage du tampon:', error);
+-  }
+ };
+\ No newline at end of file
+-- 
+2.39.5 (Apple Git-154)
+

@@ -936,7 +936,7 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
         <PositioningQuestionnaire 
           onClose={() => setShowQuestionnaire(null)} 
           readOnly={true}
-          type={null}
+          type="positioning"
           adminResponseData={prepareQuestionnaireData(questionnaireResponses.positioning)}
           onSubmitSuccess={fetchLearnerDetails}
         />
@@ -968,6 +968,7 @@ export const LearnerDetail: React.FC<LearnerDetailProps> = ({ onBack }) => {
           readOnly={true}
           adminResponseData={prepareQuestionnaireData(questionnaireResponses.satisfaction)}
           onSubmitSuccess={fetchLearnerDetails}
+          trainingId={learner?.training_id}
         />
       )}
 

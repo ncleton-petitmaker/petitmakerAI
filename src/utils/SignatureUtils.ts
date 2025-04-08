@@ -8,7 +8,7 @@ import {
   SignatureType, 
   SignatureMetadata,
   SignatureSearchOptions,
-  SignatureSaveOptions,
+  DocumentSaveOptions,
   generateStandardSignatureFilename,
   getDocumentTypeFromString,
   getSignatureTypeFromString 
@@ -45,7 +45,7 @@ export interface SignatureResult {
   trainingId?: string;
   createdAt?: string;
   found: boolean;
-  source?: 'document_signatures' | 'documents' | 'storage';
+  source?: 'documents' | 'storage';
   id?: string;
 }
 
@@ -54,104 +54,93 @@ export interface SignatureResult {
  */
 export class SignatureService {
   /**
-   * Recherche une signature selon les critères spécifiés
-   * Cherche d'abord dans la table document_signatures, 
-   * puis dans la table documents, 
-   * puis directement dans le stockage
+   * Recherche une signature
    */
-  static async findSignature(options: SignatureSearchOptions): Promise<SignatureResult> {
-    console.log(`🔍 [SIGNATURE] Recherche d'une signature de type ${options.signatureType} pour ${options.documentType}`);
-    
-    // Normaliser les types
-    const signatureType = typeof options.signatureType === 'string' 
-      ? getSignatureTypeFromString(options.signatureType)
-      : options.signatureType;
-      
-    const documentType = typeof options.documentType === 'string'
-      ? getDocumentTypeFromString(options.documentType)
-      : options.documentType;
-    
-    // Résultat par défaut si rien n'est trouvé
-    const emptyResult: SignatureResult = {
-      url: '',
-      filename: '',
-      signatureType,
-      documentType,
-      found: false
-    };
-    
-    try {
-      // 1. Chercher dans la table document_signatures
-      const signature = await this.findSignatureInDocumentSignatures(
-        signatureType,
-        documentType,
-        options.trainingId,
-        options.userId,
-        options
-      );
-      
-      if (signature.found) {
-        console.log(`✅ [SIGNATURE] Signature trouvée dans document_signatures`);
-        return signature;
-      }
-      
-      // 2. Chercher dans la table documents (ancienne méthode)
-      const legacySignature = await this.findSignatureInDocumentsTable(
-        signatureType,
-        documentType,
-        options.trainingId,
-        options.userId
-      );
-      
-      if (legacySignature.found) {
-        console.log(`✅ [SIGNATURE] Signature trouvée dans la table documents`);
-        return legacySignature;
-      }
-      
-      // 3. Chercher directement dans le bucket de stockage
-      const storageSignature = await this.findSignatureInStorage(
-        signatureType,
-        documentType,
-        options.trainingId,
-        options.userId
-      );
-      
-      if (storageSignature.found) {
-        console.log(`✅ [SIGNATURE] Signature trouvée dans le stockage`);
-        return storageSignature;
-      }
-      
-      console.log(`⚠️ [SIGNATURE] Aucune signature trouvée`);
-      return emptyResult;
-      } catch (error) {
-      console.error(`❌ [SIGNATURE] Erreur lors de la recherche de signature:`, error);
-      return emptyResult;
-    }
-  }
-  
-  /**
-   * Recherche une signature dans la table document_signatures
-   */
-  private static async findSignatureInDocumentSignatures(
+  static async findSignature(
     signatureType: SignatureType,
     documentType: DocumentType,
     trainingId?: string,
     userId?: string,
-    options?: SignatureSearchOptions
+    additionalFilters?: Record<string, any>
+  ): Promise<SignatureResult>;
+  
+  static async findSignature(options: SignatureSearchOptions): Promise<SignatureResult>;
+  
+  static async findSignature(...args: any[]): Promise<SignatureResult> {
+    // Normaliser les arguments, selon la signature utilisée
+    let signatureType: SignatureType;
+    let documentType: DocumentType;
+    let trainingId: string | undefined;
+    let userId: string | undefined;
+    let additionalFilters: Record<string, any> | undefined;
+    
+    if (typeof args[0] === 'object') {
+      // Utilisation avec un objet d'options
+      const options = args[0] as SignatureSearchOptions;
+      signatureType = options.signature_type || SignatureType.PARTICIPANT;
+      documentType = options.type ? getDocumentTypeFromString(options.type.toString()) : DocumentType.CONVENTION;
+      trainingId = options.training_id;
+      userId = options.user_id;
+      additionalFilters = options;
+    } else {
+      // Utilisation avec des arguments positionnels
+      signatureType = args[0];
+      documentType = args[1];
+      trainingId = args[2];
+      userId = args[3];
+      additionalFilters = args[4];
+    }
+    
+    // S'assurer que les types requis sont définis
+    if (!signatureType) {
+      console.error('❌ [SIGNATURE] Type de signature non défini dans findSignature');
+      return {
+        url: '',
+        filename: '',
+        signatureType: SignatureType.PARTICIPANT, // Valeur par défaut
+        documentType: documentType || DocumentType.CONVENTION, // Valeur par défaut
+        found: false
+      };
+    }
+    
+    // Rechercher d'abord en base de données
+    const result = await this.findSignatureInDatabase(
+      signatureType,
+      documentType,
+      trainingId,
+      userId,
+      additionalFilters
+    );
+    
+    if (result.found) {
+      return result;
+    }
+    
+    // Si non trouvé en base, chercher dans le stockage
+    return this.findSignatureInStorage(
+      signatureType,
+      documentType,
+      trainingId,
+      userId
+    );
+  }
+
+  private static async findSignatureInDocumentsTable(
+    signatureType: SignatureType,
+    documentType: DocumentType,
+    trainingId?: string,
+    userId?: string
   ): Promise<SignatureResult> {
     try {
-      // Construire la requête de base
       let query = supabase
-        .from('document_signatures')
+        .from('documents')
         .select('*')
-        .eq('signature_type', signatureType.toLowerCase())
-        .eq('document_type', documentType.toLowerCase());
-      
-      // Ajouter les filtres optionnels
+        .eq('type', documentType.toLowerCase());
+
       if (trainingId) {
         query = query.eq('training_id', trainingId);
       }
-      
+
       // Pour les signatures de formateur, on peut se passer de l'ID utilisateur
       // Pour les tampons de l'organisme, on peut se passer de l'ID utilisateur
       if (userId && 
@@ -159,18 +148,32 @@ export class SignatureService {
           signatureType !== SignatureType.ORGANIZATION_SEAL) {
         query = query.eq('user_id', userId);
       }
-      
-      // Pour les représentants, chercher d'abord par user_id, puis par company_id si disponible
-      if (signatureType === SignatureType.REPRESENTATIVE && !userId) {
-        // Option avancée: permettre de chercher les signatures de représentant par entreprise
-        if (options?.metadata?.companyId) {
-          query = query.contains('metadata', { companyId: options.metadata.companyId });
-        }
+
+      // Déterminer le titre en fonction du type de signature
+      let title = '';
+      switch (signatureType) {
+        case SignatureType.PARTICIPANT:
+          title = "Signature de l'apprenant";
+          break;
+        case SignatureType.REPRESENTATIVE:
+          title = "Signature du représentant";
+          break;
+        case SignatureType.TRAINER:
+          title = "Signature du formateur";
+          break;
+        case SignatureType.COMPANY_SEAL:
+          title = "Tampon de l'entreprise";
+          break;
+        case SignatureType.ORGANIZATION_SEAL:
+          title = "Tampon de l'organisme de formation";
+          break;
       }
+
+      query = query.eq('title', title);
       
-      const { data: signatures, error } = await query;
+      const { data: documents, error } = await query.order('created_at', { ascending: false }).limit(1);
       
-      if (error || !signatures || signatures.length === 0) {
+      if (error || !documents || documents.length === 0) {
         return {
           url: '',
           filename: '',
@@ -180,135 +183,11 @@ export class SignatureService {
         };
       }
       
-      // Prendre la signature la plus récente
-      const signature = signatures[0];
-      
-      return {
-        url: signature.signature_url,
-        filename: signature.signature_url.split('/').pop() || '',
-        signatureType,
-        documentType,
-        metadata: signature.metadata,
-        userId: signature.user_id,
-        trainingId: signature.training_id,
-        createdAt: signature.created_at,
-        id: signature.id,
-        found: true,
-        source: 'document_signatures'
-      };
-  } catch (error) {
-      console.error(`❌ [SIGNATURE] Erreur lors de la recherche dans document_signatures:`, error);
-      return {
-        url: '',
-        filename: '',
-        signatureType,
-        documentType,
-        found: false
-      };
-    }
-  }
-  
-  /**
-   * Recherche une signature dans la table documents (ancienne méthode)
-   */
-  private static async findSignatureInDocumentsTable(
-    signatureType: SignatureType,
-    documentType: DocumentType,
-    trainingId?: string,
-    userId?: string
-  ): Promise<SignatureResult> {
-    try {
-      // Déterminer le titre en fonction du type de signature
-      let title: string;
-      
-      switch (signatureType) {
-        case SignatureType.TRAINER:
-          title = 'Signature du formateur';
-          break;
-        case SignatureType.PARTICIPANT:
-          title = 'Signature de l\'apprenant';
-          break;
-        case SignatureType.REPRESENTATIVE:
-          title = 'Signature du représentant légal';
-          break;
-        case SignatureType.COMPANY_SEAL:
-          title = 'Tampon de l\'entreprise';
-          break;
-        case SignatureType.ORGANIZATION_SEAL:
-          title = 'Tampon de l\'organisme';
-          break;
-        default:
-          title = '';
-      }
-      
-      if (!title) {
-      return {
-          url: '',
-          filename: '',
-          signatureType,
-          documentType,
-          found: false
-        };
-      }
-      
-      // Construire la requête
-      let query = supabase
-        .from('documents')
-        .select('*')
-        .eq('title', title);
-      
-      // Déterminer le type de document
-      let docType: string;
-      switch (documentType) {
-        case DocumentType.CONVENTION:
-          docType = 'convention';
-          break;
-        case DocumentType.ATTESTATION:
-          docType = 'attestation';
-          break;
-        case DocumentType.ATTENDANCE_SHEET:
-          docType = 'emargement';
-          break;
-        case DocumentType.CERTIFICATE:
-          docType = 'attestation';
-          break;
-        default:
-          docType = 'convention';
-      }
-      
-      query = query.eq('type', docType);
-      
-      // Ajouter les filtres optionnels
-      if (trainingId) {
-        query = query.eq('training_id', trainingId);
-      }
-      
-      // Pour les signatures de formateur, on peut se passer de l'ID utilisateur
-      // Pour les tampons de l'organisme, on peut se passer de l'ID utilisateur
-      if (userId && 
-          signatureType !== SignatureType.TRAINER && 
-          signatureType !== SignatureType.ORGANIZATION_SEAL) {
-        query = query.eq('user_id', userId);
-      }
-      
-      const { data: documents, error } = await query;
-      
-      if (error || !documents || documents.length === 0) {
-          return {
-          url: '',
-          filename: '',
-          signatureType,
-          documentType,
-          found: false
-        };
-      }
-      
-      // Prendre le document le plus récent
       const document = documents[0];
       
-          return {
-        url: document.url,
-        filename: document.url.split('/').pop() || '',
+      return {
+        url: document.file_url,
+        filename: document.file_url.split('/').pop() || '',
         signatureType,
         documentType,
         userId: document.user_id,
@@ -318,9 +197,9 @@ export class SignatureService {
         found: true,
         source: 'documents'
       };
-  } catch (error) {
+    } catch (error) {
       console.error(`❌ [SIGNATURE] Erreur lors de la recherche dans documents:`, error);
-    return {
+      return {
         url: '',
         filename: '',
         signatureType,
@@ -434,116 +313,76 @@ export class SignatureService {
   /**
    * Enregistre une signature
    */
-  static async saveSignature(
-    signatureData: string | File,
-    options: SignatureSaveOptions
-  ): Promise<SignatureResult> {
-    console.log(`🔍 [SIGNATURE] Enregistrement d'une signature de type ${options.signatureType}`);
-    
+  static async saveSignature(options: DocumentSaveOptions): Promise<SignatureResult> {
     try {
-      // Normaliser les types
-      const signatureType = typeof options.signatureType === 'string' 
-        ? getSignatureTypeFromString(options.signatureType)
-        : options.signatureType;
-        
-      const documentType = typeof options.documentType === 'string'
-        ? getDocumentTypeFromString(options.documentType)
-        : options.documentType;
-      
-      if (!options.trainingId) {
-        throw new Error('trainingId est obligatoire pour enregistrer une signature');
+      // Vérifier que la signature est valide
+      if (!options.signature_type || !options.document_type || !options.file_url) {
+        throw new Error('Type de signature, type de document et URL du fichier requis');
       }
-      
-      // Pour certains types de signatures, userId est obligatoire
-      if (!options.userId && 
-          signatureType !== SignatureType.TRAINER && 
-          signatureType !== SignatureType.ORGANIZATION_SEAL) {
-        throw new Error('userId est obligatoire pour ce type de signature');
+
+      // Déterminer le titre en fonction du type de signature
+      let title = '';
+      switch (options.signature_type) {
+        case SignatureType.PARTICIPANT:
+          title = "Signature de l'apprenant";
+          break;
+        case SignatureType.REPRESENTATIVE:
+          title = "Signature du représentant";
+          break;
+        case SignatureType.TRAINER:
+          title = "Signature du formateur";
+          break;
+        case SignatureType.COMPANY_SEAL:
+          title = "Tampon de l'entreprise";
+          break;
+        case SignatureType.ORGANIZATION_SEAL:
+          title = "Tampon de l'organisme de formation";
+          break;
       }
-      
-      // Générer un nom de fichier standardisé
-      const filename = generateStandardSignatureFilename(
-        signatureType,
-        documentType,
-        options.trainingId,
-        options.userId
-      );
-      
-      // Uploader le fichier
-      let fileData: File | Blob;
-      
-      if (typeof signatureData === 'string' && signatureData.startsWith('data:image')) {
-        // Convertir la data URL en Blob
-        const res = await fetch(signatureData);
-        fileData = await res.blob();
-      } else if (signatureData instanceof File) {
-        fileData = signatureData;
-          } else {
-        throw new Error('Format de signature non supporté');
-      }
-      
-      // Uploader dans le bucket
-      const { error: uploadError } = await supabase.storage
-        .from('signatures')
-        .upload(filename, fileData, {
-          contentType: 'image/png',
-          upsert: true
-        });
-      
-      if (uploadError) {
-        throw new Error(`Erreur lors de l'upload: ${uploadError.message}`);
-      }
-      
-      // Obtenir l'URL publique
-      const { data: publicUrlData } = await supabase.storage
-        .from('signatures')
-        .getPublicUrl(filename);
-      
-      if (!publicUrlData) {
-        throw new Error('Impossible d\'obtenir l\'URL publique');
-      }
-      
-      const signatureUrl = publicUrlData.publicUrl;
-      
-      // Enregistrer dans la table document_signatures
-      const newSignature = {
-        training_id: options.trainingId,
-        user_id: options.userId || null,
-        signature_type: signatureType.toLowerCase(),
-        document_type: documentType.toLowerCase(),
-        signature_url: signatureUrl,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        metadata: options.metadata || {}
+
+      // Préparer les données à insérer
+      const documentData = {
+        title,
+        type: options.document_type.toLowerCase(),
+        file_url: options.file_url,
+        training_id: options.training_id,
+        user_id: options.user_id,
+        metadata: options.metadata
       };
-      
-      const { data: insertData, error: insertError } = await supabase
-        .from('document_signatures')
-        .insert(newSignature)
-        .select();
-      
-      if (insertError) {
-        throw new Error(`Erreur lors de l'insertion dans document_signatures: ${insertError.message}`);
+
+      // Insérer dans la table documents
+      const { data: document, error } = await supabase
+        .from('documents')
+        .insert(documentData)
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
       }
-      
-      console.log(`✅ [SIGNATURE] Signature enregistrée avec succès: ${filename}`);
-      
+
       return {
-        url: signatureUrl,
-        filename,
-        signatureType,
-        documentType,
-        metadata: options.metadata,
-        userId: options.userId,
-        trainingId: options.trainingId,
-        createdAt: new Date().toISOString(),
-        id: insertData && insertData.length > 0 ? insertData[0].id : undefined,
+        url: document.file_url,
+        filename: document.file_url.split('/').pop() || '',
+        signatureType: options.signature_type,
+        documentType: options.document_type,
+        metadata: document.metadata,
+        userId: document.user_id,
+        trainingId: document.training_id,
+        createdAt: document.created_at,
+        id: document.id,
         found: true,
-        source: 'document_signatures'
+        source: 'documents'
       };
-        } catch (error) {
-      console.error(`❌ [SIGNATURE] Erreur lors de l'enregistrement:`, error);
-      throw error;
+    } catch (error) {
+      console.error(`❌ [SIGNATURE] Erreur lors de la sauvegarde de la signature:`, error);
+      return {
+        url: '',
+        filename: '',
+        signatureType: options.signature_type,
+        documentType: options.document_type,
+        found: false
+      };
     }
   }
   
@@ -551,114 +390,53 @@ export class SignatureService {
    * Supprime une signature
    */
   static async deleteSignature(
-    signatureType: SignatureType | string,
-    documentType: DocumentType | string,
+    signatureType: SignatureType,
+    documentType: DocumentType,
     trainingId: string,
     userId?: string
   ): Promise<boolean> {
-    console.log(`🗑️ [SIGNATURE] Suppression d'une signature de type ${signatureType}`);
-    
     try {
-      // Normaliser les types
-      const normalizedSignatureType = typeof signatureType === 'string' 
-        ? getSignatureTypeFromString(signatureType)
-        : signatureType;
-        
-      const normalizedDocumentType = typeof documentType === 'string'
-        ? getDocumentTypeFromString(documentType)
-        : documentType;
-      
-      // 1. Trouver la signature
-      const signature = await this.findSignature({
-        signatureType: normalizedSignatureType,
-        documentType: normalizedDocumentType,
-        trainingId,
-        userId
-      });
-      
-      if (!signature.found) {
-        console.log(`⚠️ [SIGNATURE] Aucune signature trouvée à supprimer`);
-        return false;
+      // Déterminer le titre en fonction du type de signature
+      let title = '';
+      switch (signatureType) {
+        case SignatureType.PARTICIPANT:
+          title = "Signature de l'apprenant";
+          break;
+        case SignatureType.REPRESENTATIVE:
+          title = "Signature du représentant";
+          break;
+        case SignatureType.TRAINER:
+          title = "Signature du formateur";
+          break;
+        case SignatureType.COMPANY_SEAL:
+          title = "Tampon de l'entreprise";
+          break;
+        case SignatureType.ORGANIZATION_SEAL:
+          title = "Tampon de l'organisme de formation";
+          break;
       }
-      
-      // 2. Supprimer l'entrée de la base de données
-      if (signature.source === 'document_signatures') {
-        // Construire la requête
-        let query = supabase
-          .from('document_signatures')
-          .delete()
-          .eq('signature_type', normalizedSignatureType.toLowerCase())
-          .eq('document_type', normalizedDocumentType.toLowerCase())
-          .eq('training_id', trainingId);
-        
-        if (userId && 
-            normalizedSignatureType !== SignatureType.TRAINER && 
-            normalizedSignatureType !== SignatureType.ORGANIZATION_SEAL) {
-          query = query.eq('user_id', userId);
-        }
-        
-        const { error } = await query;
-        
-        if (error) {
-          console.error(`❌ [SIGNATURE] Erreur lors de la suppression dans document_signatures:`, error);
-        }
-      } else if (signature.source === 'documents') {
-        // Déterminer le titre en fonction du type de signature
-        let title: string;
-        
-        switch (normalizedSignatureType) {
-          case SignatureType.TRAINER:
-            title = 'Signature du formateur';
-            break;
-          case SignatureType.PARTICIPANT:
-            title = 'Signature de l\'apprenant';
-            break;
-          case SignatureType.REPRESENTATIVE:
-            title = 'Signature du représentant légal';
-            break;
-          case SignatureType.COMPANY_SEAL:
-            title = 'Tampon de l\'entreprise';
-            break;
-          case SignatureType.ORGANIZATION_SEAL:
-            title = 'Tampon de l\'organisme';
-            break;
-        }
-        
-        // Construire la requête
-        let query = supabase
-          .from('documents')
-          .delete()
-          .eq('title', title)
-          .eq('training_id', trainingId);
-        
-        if (userId && 
-            normalizedSignatureType !== SignatureType.TRAINER && 
-            normalizedSignatureType !== SignatureType.ORGANIZATION_SEAL) {
-          query = query.eq('user_id', userId);
-        }
-        
-        const { error } = await query;
-        
-        if (error) {
-          console.error(`❌ [SIGNATURE] Erreur lors de la suppression dans documents:`, error);
-        }
+
+      // Construire la requête de suppression
+      let query = supabase
+        .from('documents')
+        .delete()
+        .eq('type', documentType.toLowerCase())
+        .eq('title', title)
+        .eq('training_id', trainingId);
+
+      if (userId) {
+        query = query.eq('user_id', userId);
       }
-      
-      // 3. Supprimer le fichier du stockage si nécessaire
-      if (signature.filename) {
-        const { error: deleteError } = await supabase.storage
-              .from('signatures')
-          .remove([signature.filename]);
-        
-        if (deleteError) {
-          console.error(`❌ [SIGNATURE] Erreur lors de la suppression du fichier:`, deleteError);
-        }
+
+      const { error } = await query;
+
+      if (error) {
+        throw error;
       }
-      
-      console.log(`✅ [SIGNATURE] Signature supprimée avec succès`);
+
       return true;
-      } catch (error) {
-      console.error(`❌ [SIGNATURE] Erreur lors de la suppression:`, error);
+    } catch (error) {
+      console.error(`❌ [SIGNATURE] Erreur lors de la suppression de la signature:`, error);
       return false;
     }
   }
@@ -671,23 +449,28 @@ export class SignatureService {
     userId: string,
     companyId: string
   ): Promise<boolean> {
-    console.log(`🔄 [SIGNATURE] Partage de la signature du représentant pour l'entreprise ${companyId}`);
-    
     try {
       // 1. Trouver la signature du représentant
-      const signature = await this.findSignature({
-        signatureType: SignatureType.REPRESENTATIVE,
-        documentType: DocumentType.CONVENTION,
+      const signature = await this.findSignature(
+        SignatureType.REPRESENTATIVE,
+        DocumentType.CONVENTION,
         trainingId,
         userId,
-        metadata: { companyId }
-      });
+        {
+          training_id: trainingId,
+          user_id: userId,
+          company_id: companyId,
+          type: DocumentType.CONVENTION,
+          signature_type: SignatureType.REPRESENTATIVE,
+          metadata: { companyId }
+        }
+      );
       
       if (!signature.found) {
         console.log(`⚠️ [SIGNATURE] Aucune signature de représentant trouvée à partager`);
         return false;
       }
-      
+
       // 2. Trouver tous les participants de la même entreprise pour cette formation
       const { data: participants, error: participantsError } = await supabase
         .from('training_participants')
@@ -700,9 +483,7 @@ export class SignatureService {
         return false;
       }
       
-      console.log(`✅ [SIGNATURE] ${participants.length} participants trouvés pour l'entreprise ${companyId}`);
-      
-      // 3. Pour chaque participant, créer une entrée avec la même signature
+      // 3. Pour chaque participant, créer une entrée dans la table documents
       let successCount = 0;
       
       for (const participant of participants) {
@@ -712,28 +493,27 @@ export class SignatureService {
         }
         
         // Vérifier si une entrée existe déjà
-        const { data: existingSignatures } = await supabase
-          .from('document_signatures')
+        const { data: existingDocuments } = await supabase
+          .from('documents')
           .select('*')
           .eq('training_id', trainingId)
           .eq('user_id', participant.user_id)
-          .eq('signature_type', SignatureType.REPRESENTATIVE.toLowerCase())
-          .eq('document_type', DocumentType.CONVENTION.toLowerCase());
+          .eq('type', DocumentType.CONVENTION.toLowerCase())
+          .eq('title', "Signature du représentant");
         
-        if (existingSignatures && existingSignatures.length > 0) {
+        if (existingDocuments && existingDocuments.length > 0) {
           console.log(`ℹ️ [SIGNATURE] Le participant ${participant.user_id} a déjà une signature de représentant`);
           continue;
         }
         
         // Créer une nouvelle entrée
-        const newSignature = {
+        const newDocument = {
+          title: "Signature du représentant",
+          type: DocumentType.CONVENTION.toLowerCase(),
           training_id: trainingId,
           user_id: participant.user_id,
-          signature_type: SignatureType.REPRESENTATIVE.toLowerCase(),
-          document_type: DocumentType.CONVENTION.toLowerCase(),
-          signature_url: signature.url,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          file_url: signature.url,
+          signature_type: SignatureType.REPRESENTATIVE,
           metadata: {
             companyId,
             sharedFrom: userId,
@@ -742,21 +522,164 @@ export class SignatureService {
         };
         
         const { error: insertError } = await supabase
-          .from('document_signatures')
-          .insert(newSignature);
+          .from('documents')
+          .insert(newDocument);
         
         if (insertError) {
           console.error(`❌ [SIGNATURE] Erreur lors du partage avec ${participant.user_id}:`, insertError);
-          } else {
+        } else {
           successCount++;
         }
       }
       
-      console.log(`✅ [SIGNATURE] Signature partagée avec ${successCount} participants`);
       return successCount > 0;
     } catch (error) {
       console.error(`❌ [SIGNATURE] Erreur lors du partage:`, error);
       return false;
+    }
+  }
+
+  /**
+   * Recherche une signature en base de données
+   */
+  private static async findSignatureInDatabase(
+    signatureType: SignatureType,
+    documentType: DocumentType,
+    trainingId?: string,
+    userId?: string,
+    additionalFilters?: Record<string, any>
+  ): Promise<SignatureResult> {
+    try {
+      if (!trainingId) {
+        return {
+          url: '',
+          filename: '',
+          signatureType,
+          documentType,
+          found: false
+        };
+      }
+      
+      // Déterminer le titre à chercher
+      let title = '';
+      switch (signatureType) {
+        case SignatureType.PARTICIPANT:
+          title = "Signature de l'apprenant";
+          break;
+        case SignatureType.REPRESENTATIVE:
+          title = "Signature du représentant";
+          break;
+        case SignatureType.TRAINER:
+          title = "Signature du formateur";
+          break;
+        case SignatureType.COMPANY_SEAL:
+          title = "Tampon de l'entreprise";
+          break;
+        case SignatureType.ORGANIZATION_SEAL:
+          title = "Tampon de l'organisme de formation";
+          break;
+      }
+      
+      // Construire la requête de base
+      let query = supabase.from('documents')
+        .select('*')
+        .eq('training_id', trainingId)
+        .eq('type', documentType.toLowerCase());
+      
+      // Ajouter des filtres selon le type de signature
+      switch (signatureType) {
+        case SignatureType.PARTICIPANT:
+        case SignatureType.REPRESENTATIVE:
+          if (userId) {
+            query = query.eq('user_id', userId);
+          }
+          break;
+        case SignatureType.ORGANIZATION_SEAL:
+          // Pas de filtre user_id pour les tampons d'organisation
+          break;
+        case SignatureType.COMPANY_SEAL:
+          if (userId) {
+            // Pour les tampons d'entreprise, on préfère ceux liés à l'utilisateur spécifique,
+            // mais on accepte aussi ceux qui ne sont pas liés à un utilisateur spécifique
+            // Cette logique pourrait être affinée selon les besoins
+          }
+          break;
+        case SignatureType.TRAINER:
+          // Pas de filtre user_id pour les signatures de formateur
+          break;
+      }
+
+      // Appliquer des filtres supplémentaires si fournis
+      if (additionalFilters) {
+        Object.entries(additionalFilters).forEach(([key, value]) => {
+          if (key !== 'metadata' && value !== undefined) {
+            query = query.eq(key, value);
+          }
+        });
+      }
+
+      // Chercher par signature_type ET par titre pour plus de robustesse
+      const { data: documentsByType, error: typeError } = await query
+        .eq('signature_type', signatureType)
+        .order('created_at', { ascending: false })
+        .limit(1);
+        
+      // Si on trouve par signature_type, retourner ce résultat
+      if (!typeError && documentsByType && documentsByType.length > 0) {
+        const document = documentsByType[0];
+        return {
+          url: document.file_url,
+          filename: document.file_url.split('/').pop() || '',
+          signatureType,
+          documentType,
+          userId: document.user_id,
+          trainingId: document.training_id,
+          createdAt: document.created_at,
+          id: document.id,
+          found: true,
+          source: 'documents'
+        };
+      }
+      
+      // Sinon, chercher par titre (méthode historique)
+      const { data: documentsByTitle, error: titleError } = await query
+        .eq('title', title)
+        .order('created_at', { ascending: false })
+        .limit(1);
+        
+      if (titleError || !documentsByTitle || documentsByTitle.length === 0) {
+        return {
+          url: '',
+          filename: '',
+          signatureType,
+          documentType,
+          found: false
+        };
+      }
+      
+      const document = documentsByTitle[0];
+      
+      return {
+        url: document.file_url,
+        filename: document.file_url.split('/').pop() || '',
+        signatureType,
+        documentType,
+        userId: document.user_id,
+        trainingId: document.training_id,
+        createdAt: document.created_at,
+        id: document.id,
+        found: true,
+        source: 'documents'
+      };
+    } catch (error) {
+      console.error(`❌ [SIGNATURE] Erreur lors de la recherche dans documents:`, error);
+      return {
+        url: '',
+        filename: '',
+        signatureType,
+        documentType,
+        found: false
+      };
     }
   }
 }
@@ -856,11 +779,17 @@ export const optimizeOrganizationSealUrl = async (url: string | null): Promise<s
     const isValid = await validateSealUrl(url);
     if (!isValid) {
       // Si l'URL n'est pas valide, essayer de récupérer le tampon via le service
-      const sealResult = await SignatureService.findSignature({
-        training_id: 'default',
-        signature_type: SignatureType.ORGANIZATION_SEAL,
-        type: DocumentType.CONVENTION
-      });
+      const sealResult = await SignatureService.findSignature(
+        SignatureType.ORGANIZATION_SEAL,
+        DocumentType.CONVENTION,
+        'default',
+        undefined,
+        {
+          training_id: 'default',
+          type: DocumentType.CONVENTION,
+          signature_type: SignatureType.ORGANIZATION_SEAL
+        }
+      );
       
       if (sealResult.found) {
         return addCacheBuster(sealResult.url);
@@ -1108,51 +1037,25 @@ export const checkSealAccess = async (seals: {
   organizationSeal: string | null;
   diagnosticMessage: string;
 }> => {
+  let optimizedCompanySeal: string | null = null;
+  let optimizedOrganizationSeal: string | null = null;
+  let diagnosticMessage = '';
+
   try {
-    console.log('🔍 [SEAL_CHECK] Vérification de l\'accessibilité des tampons:', {
-      companySeal: seals.companySeal ? `${seals.companySeal.substring(0, 50)}...` : null,
-      organizationSeal: seals.organizationSeal ? `${seals.organizationSeal.substring(0, 50)}...` : null
-    });
-    
-    let diagnosticMessage = 'Vérification des tampons terminée.';
-    let optimizedCompanySeal = seals.companySeal;
-    let optimizedOrganizationSeal = seals.organizationSeal;
-    
     // Vérifier le tampon d'entreprise
     if (seals.companySeal) {
       const companySealValid = await validateSealUrl(seals.companySeal);
-      
       if (companySealValid) {
-        console.log('✅ [SEAL_CHECK] Tampon d\'entreprise accessible');
         optimizedCompanySeal = addCacheBuster(seals.companySeal);
-      } else {
-        console.log('❌ [SEAL_CHECK] Tampon d\'entreprise inaccessible, optimisation...');
-        optimizedCompanySeal = await optimizeSealUrl(seals.companySeal);
-        
-        // Vérifier si l'optimisation a résolu le problème
-        if (optimizedCompanySeal && optimizedCompanySeal !== seals.companySeal) {
-          const recheck = await validateSealUrl(optimizedCompanySeal);
-          if (recheck) {
-            console.log('✅ [SEAL_CHECK] Tampon d\'entreprise optimisé accessible');
-            diagnosticMessage += ' Tampon d\'entreprise optimisé.';
-          } else {
-            console.log('❌ [SEAL_CHECK] Tampon d\'entreprise optimisé inaccessible');
-            diagnosticMessage += ' Échec d\'accès au tampon d\'entreprise.';
-          }
-        }
       }
     }
-    
+
     // Vérifier le tampon d'organisation
     if (seals.organizationSeal) {
       const organizationSealValid = await validateSealUrl(seals.organizationSeal);
-      
       if (organizationSealValid) {
-        console.log('✅ [SEAL_CHECK] Tampon d\'organisation accessible');
         optimizedOrganizationSeal = addCacheBuster(seals.organizationSeal);
       } else {
-        console.log('❌ [SEAL_CHECK] Tampon d\'organisation inaccessible, tentative de récupération...');
-        
         // Récupérer le tampon d'organisation depuis les settings
         const { data: settings } = await supabase
           .from('settings')
@@ -1160,42 +1063,31 @@ export const checkSealAccess = async (seals: {
           .single();
         
         if (settings?.organization_seal_url) {
-          console.log('🔍 [SEAL_CHECK] Essai avec l\'URL depuis settings:', settings.organization_seal_url);
           const settingsSealValid = await validateSealUrl(settings.organization_seal_url);
           
           if (settingsSealValid) {
-            console.log('✅ [SEAL_CHECK] Tampon depuis settings accessible');
             optimizedOrganizationSeal = addCacheBuster(settings.organization_seal_url);
             diagnosticMessage += ' Tampon d\'organisation récupéré depuis settings.';
-          } else {
-            console.log('❌ [SEAL_CHECK] Tampon depuis settings inaccessible');
-            
-            // Essayer de générer l'URL à partir du chemin stocké
-            if (settings?.organization_seal_path) {
-              try {
-                const { data: urlData } = await supabase.storage
-                  .from('signatures')
-                  .getPublicUrl(settings.organization_seal_path);
+          } else if (settings?.organization_seal_path) {
+            try {
+              const { data: urlData } = await supabase.storage
+                .from('signatures')
+                .getPublicUrl(settings.organization_seal_path);
+              
+              if (urlData && urlData.publicUrl) {
+                const pathSealValid = await validateSealUrl(urlData.publicUrl);
                 
-                if (urlData && urlData.publicUrl) {
-                  const pathSealValid = await validateSealUrl(urlData.publicUrl);
-                  
-                  if (pathSealValid) {
-                    console.log('✅ [SEAL_CHECK] Tampon généré depuis le chemin accessible');
-                    optimizedOrganizationSeal = addCacheBuster(urlData.publicUrl);
-                    diagnosticMessage += ' Tampon d\'organisation généré depuis le chemin.';
-                  } else {
-                    console.log('❌ [SEAL_CHECK] Tampon généré depuis le chemin inaccessible');
-                    diagnosticMessage += ' Échec d\'accès au tampon d\'organisation.';
-                  }
+                if (pathSealValid) {
+                  optimizedOrganizationSeal = addCacheBuster(urlData.publicUrl);
+                  diagnosticMessage += ' Tampon d\'organisation généré depuis le chemin.';
+                } else {
+                  diagnosticMessage += ' Échec d\'accès au tampon d\'organisation.';
                 }
-              } catch (error) {
-                console.error('❌ [SEAL_CHECK] Erreur lors de la génération de l\'URL:', error);
               }
+            } catch (error) {
+              console.error('❌ [SEAL_CHECK] Erreur lors de la génération de l\'URL:', error);
             }
           }
-        } else {
-          console.log('⚠️ [SEAL_CHECK] Pas d\'URL de tampon disponible dans settings');
         }
       }
     }
@@ -1203,13 +1095,13 @@ export const checkSealAccess = async (seals: {
     return {
       companySeal: optimizedCompanySeal,
       organizationSeal: optimizedOrganizationSeal,
-      diagnosticMessage
+      diagnosticMessage: diagnosticMessage || 'Vérification des tampons terminée.'
     };
   } catch (error) {
     console.error('❌ [SEAL_CHECK] Erreur lors de la vérification des tampons:', error);
     return {
-      companySeal: seals.companySeal,
-      organizationSeal: seals.organizationSeal,
+      companySeal: null,
+      organizationSeal: null,
       diagnosticMessage: 'Erreur lors de la vérification des tampons.'
     };
   }
