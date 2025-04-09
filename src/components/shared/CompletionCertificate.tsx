@@ -7,6 +7,7 @@ import { CompletionCertificateTemplate } from './templates/CompletionCertificate
 import { DocumentManager } from './DocumentManager';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
+import { DocumentType } from '../../types/SignatureTypes';
 
 interface CompletionCertificateProps {
   training: Training;
@@ -251,7 +252,7 @@ export const CompletionCertificate: React.FC<CompletionCertificateProps> = ({
                   training_id: training.id,
                   user_id: participant.id,
                   created_by: session.user.id,
-                  type: 'attestation',
+                  type: DocumentType.COMPLETION_CERTIFICATE,
                   participant_name: `${participant.first_name} ${participant.last_name}`
                 }
               );

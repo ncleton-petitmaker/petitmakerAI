@@ -12,6 +12,7 @@ import {
   getMaterialElements,
   getTrainingDates 
 } from '../DocumentUtils';
+import { DocumentType } from '../../../types/SignatureTypes';
 
 interface CompletionCertificateTemplateProps {
   training: Training;
@@ -101,7 +102,7 @@ export const CompletionCertificateTemplate: React.FC<CompletionCertificateTempla
   };
 
   return (
-    <div className="bg-white p-8 shadow-sm border border-gray-200 mx-auto">
+    <div className="bg-white p-8 shadow-sm border border-gray-200 mx-auto" data-document-type={DocumentType.COMPLETION_CERTIFICATE}>
       <div className="text-center mb-8">
         <h1 className="text-2xl font-bold mb-2">ATTESTATION DE FIN DE FORMATION</h1>
         <p className="text-sm text-gray-600">(Article L.6353-1 du Code du travail)</p>

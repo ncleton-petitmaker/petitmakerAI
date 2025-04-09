@@ -578,22 +578,17 @@ export const UnifiedTrainingAgreementTemplate: React.FC<UnifiedTrainingAgreement
       );
   };
 
-  // Zone de signature du représentant ou de l'apprenant
-  const renderParticipantSignature = () => {
-    // Utiliser la signature du représentant en priorité si elle existe
-    const effectiveSignature = stableRepresentativeSigUrl || stableParticipantSigUrl;
-    const signatureType = stableRepresentativeSigUrl ? "representative" : "participant";
-    const signatureLabel = stableRepresentativeSigUrl ? "Signature du dirigeant" : "Signature de l'apprenant";
-    
+  // Zone de signature du représentant
+  const renderRepresentativeSignature = () => {
     return (
       <div className="h-28 border border-gray-300 relative">
-        {effectiveSignature ? (
+        {stableRepresentativeSigUrl ? (
           <div className="w-full h-full flex flex-col items-center justify-center overflow-hidden">
             <SafeImage 
-              src={effectiveSignature} 
-              alt={signatureLabel} 
+              src={stableRepresentativeSigUrl} 
+              alt="Signature du représentant" 
               className="max-h-20 max-w-[95%] object-contain"
-              onLoad={() => markSignatureAsLoaded(signatureType === 'representative' ? 'representativeSig' : 'participantSig')}
+              onLoad={() => markSignatureAsLoaded('representativeSig')}
               isSignature={true}
               pdfMode={pdfMode}
             />
@@ -638,7 +633,8 @@ export const UnifiedTrainingAgreementTemplate: React.FC<UnifiedTrainingAgreement
 
   return (
     <div ref={documentRef} className="bg-white p-8 shadow-sm border border-gray-200 mx-auto" 
-      style={{ maxWidth: '800px' }}>
+      style={{ maxWidth: '800px' }}
+      data-document-type="convention">
       <div className="text-center mb-8">
         <h1 className="text-2xl font-bold mb-2">CONVENTION DE FORMATION PROFESSIONNELLE</h1>
         <p className="text-sm text-gray-600">(Articles L.6353-1 du Code du travail)</p>
@@ -816,8 +812,8 @@ export const UnifiedTrainingAgreementTemplate: React.FC<UnifiedTrainingAgreement
           <p>(Signature et cachet)</p>
           
           <div className="mt-2 flex flex-col space-y-2">
-            {/* Zone de signature du représentant */}
-            {renderParticipantSignature()}
+            {/* Zone de signature du représentant - CORRIGÉ */}
+            {renderRepresentativeSignature()} 
             
             {/* Zone de tampon entreprise */}
             {renderCompanySeal()}

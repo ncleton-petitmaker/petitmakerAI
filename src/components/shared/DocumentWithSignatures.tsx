@@ -4,13 +4,16 @@ import { supabase } from '../../lib/supabase';
 import SignatureCanvas from '../SignatureCanvas';
 import { generateDocumentPDF } from './DocumentUtils';
 import { DocumentManager } from './DocumentManager';
-import { DocumentSignatureManager, DocumentType, SignatureType } from './DocumentSignatureManager';
+import { DocumentSignatureManager } from './DocumentSignatureManager';
+// Import enums directly from SignatureTypes
+import { DocumentType, SignatureType } from '../../types/SignatureTypes';
 // import { Button, Modal, ModalHeader, ModalFooter, ModalBody } from '../ui/Modal'; // Commenté: Composants non exportés depuis ce fichier
 import { UnifiedTrainingAgreementTemplate } from './templates/unified/TrainingAgreementTemplate';
 import { LoadingSpinner } from '../LoadingSpinner'; 
 // import { toast } from 'react-toastify'; // Commenté: Dépendance manquante ou chemin incorrect
 // import { useTrainingContext } from '../../contexts/TrainingContext'; // Commenté: Fichier non trouvé
 import { diagnoseAndFixOrganizationSeal, forceOrganizationSealInDOM } from '../../utils/SignatureUtils';
+import { PdfViewerModal } from './PdfViewerModal'; // Import the PdfViewerModal component
 
 export interface DocumentWithSignaturesProps {
   documentType: DocumentType;
@@ -33,9 +36,7 @@ export interface DocumentWithSignaturesProps {
   allowCompanySeal?: boolean;
   allowOrganizationSeal?: boolean;
   onSignatureCreated?: (signatureUrl: string) => void;
-  // Nouvelles propriétés pour contrôler l'affichage des boutons
   hideSignButton?: boolean;
-  alwaysShowDownloadButton?: boolean;
 }
 
 // Ajuster le type pour inclure 'representative'
@@ -79,13 +80,16 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
   allowOrganizationSeal = true,
   onSignatureCreated,
   hideSignButton,
-  alwaysShowDownloadButton
 }) => {
   const documentRef = useRef<HTMLDivElement>(null);
   const [showSignatureForm, setShowSignatureForm] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [existingDocumentUrl, setExistingDocumentUrl] = useState<string | null>(null);
+  
+  // Add state for PDF viewer modal
+  const [showPdfPreview, setShowPdfPreview] = useState(false);
+  const [pdfBlob, setPdfBlob] = useState<Blob | null>(null);
   
   // États pour les signatures - toujours initialisés à null
   const [participantSignature, setParticipantSignature] = useState<string | null>(null);
@@ -189,10 +193,14 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
       setIsLoading(false);
       console.log('🏁 [INIT_MANAGER] Initialisation terminée.');
     }
-  }, [documentType, trainingId, participantId, participantName, viewContext]); // Garder les dépendances originales
+  }, []); // <--- Supprimer les dépendances pour exécution unique au montage
 
-  // Événements pour empêcher les rechargements de page
+  // UseEffect pour initialiser le gestionnaire et charger les données
   useEffect(() => {
+    console.log("🔄 [EFFECT_INIT] Déclenchement de initializeManagerAndLoadData au montage...");
+    initializeManagerAndLoadData();
+    
+    // Événements pour empêcher les rechargements de page (déplacé ici pour clarté)
     const preventReload = (e: Event) => {
       console.log(`🛑 [DEBUG] Intercepté événement pouvant causer rechargement: ${e.type}`, e);
       e.preventDefault();
@@ -229,14 +237,22 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
       subtree: true 
     });
 
+    // Diagnostic au montage
+    console.log("🔍 [MOUNT_DIAG] Props au montage:", { documentType, trainingId, participantId, viewContext });
+
+    // Nettoyage des listeners au démontage
     return () => {
+      console.log("🧹 [UNMOUNT] Nettoyage des listeners preventReload...");
       reloadEvents.forEach(eventType => {
         document.removeEventListener(eventType, preventReload, true);
       });
       observer.disconnect();
+      // Optionnel: Réinitialiser le manager ou autre nettoyage si nécessaire
+      // signatureManagerRef.current = null;
     };
-  }, []);
-  
+    
+  }, [initializeManagerAndLoadData]); // Dépend UNIQUEMENT de la fonction useCallback elle-même
+
   // Fonction pour charger les informations du document
   const loadDocumentInfo = async () => {
     try {
@@ -401,19 +417,19 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
     });
     
     // Mettre à jour l'état correspondant
-    if (type === 'participant') {
+    if (type === SignatureType.PARTICIPANT) {
         setParticipantSignature(signature);
       console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état participantSignature:', !!signature);
-    } else if (type === 'representative') {
+    } else if (type === SignatureType.REPRESENTATIVE) {
         setRepresentativeSignature(signature);
       console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état representativeSignature:', !!signature);
-    } else if (type === 'trainer') {
+    } else if (type === SignatureType.TRAINER) {
         setTrainerSignature(signature);
       console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état trainerSignature:', !!signature);
-    } else if (type === 'companySeal') {
+    } else if (type === SignatureType.COMPANY_SEAL) {
         setCompanySeal(signature);
       console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état companySeal:', !!signature);
-    } else if (type === 'organizationSeal') {
+    } else if (type === SignatureType.ORGANIZATION_SEAL) {
         setOrganizationSeal(signature);
       console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état organizationSeal:', !!signature);
     }
@@ -429,19 +445,10 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
       // Générer le PDF à partir du contenu actuel
       const pdfBlob = await generateDocumentPDF(documentRef.current);
       
-      // Créer une URL pour le blob
-      const url = URL.createObjectURL(pdfBlob);
-      
-      // Créer un lien pour le téléchargement
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${documentTitle}_${participantName?.replace(/\s+/g, '_') || ''}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      
-      // Nettoyer
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Stocker le blob et afficher le modal de prévisualisation
+      setPdfBlob(pdfBlob);
+      setShowPdfPreview(true);
+
     } catch (error) {
       console.error('Erreur lors de la génération du PDF:', error);
       alert('Une erreur est survenue lors de la génération du PDF.');
@@ -479,7 +486,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
     if (!signatureManagerRef.current || isLoading) return false;
     
     // Vérifier si l'utilisateur peut signer
-    const signatureType = viewContext === 'crm' ? 'trainer' : 'participant';
+    const signatureType = viewContext === 'crm' ? SignatureType.TRAINER : SignatureType.PARTICIPANT;
     const signButtonState = signatureManagerRef.current.canSign(signatureType);
     
     return signButtonState.canSign;
@@ -488,7 +495,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
   // Nouveau: Vérifie si toutes les signatures requises sont présentes, y compris le tampon si activé
   const isDocumentComplete = (): boolean => {
     // Pour la feuille d'émargement, permettre le téléchargement même si incomplet
-    if (documentType === DocumentType.EMARGEMENT) {
+    if (documentType === DocumentType.ATTENDANCE_SHEET) {
       return true;
     }
     
@@ -519,20 +526,6 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
     
     console.log('🔍 [DEBUG] DocumentWithSignatures - État du bouton de signature:', viewContext, documentType);
     
-    // Si on est en mode CRM et qu'il s'agit d'une convention, toujours afficher le bouton
-    if (viewContext === 'crm' && documentType === DocumentType.CONVENTION) {
-      return (
-        <button
-          onClick={handleSignClick}
-          disabled={isSaving}
-          className="mt-4 px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 flex items-center"
-        >
-          <Pen className="mr-2 h-4 w-4" />
-          {isSaving && currentAction === 'signature' ? 'Enregistrement...' : 'Signer le document'}
-        </button>
-      );
-    }
-    
     // Vérifier si l'utilisateur peut signer
     if (canSign()) {
     const buttonState = signatureManagerRef.current.getSignatureButtonState();
@@ -556,25 +549,6 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
           <FileText className="mr-2 h-4 w-4" />
           {signatureManagerRef.current.getSignatureStatusMessage()}
         </div>
-      );
-    }
-    
-    return null;
-  };
-  
-  // Affichage du bouton de téléchargement
-  const renderDownloadButton = () => {
-    // Afficher le bouton de téléchargement si le document est entièrement signé ou si alwaysShowDownloadButton est true
-    if (alwaysShowDownloadButton || isDocumentComplete()) {
-      return (
-        <button
-          onClick={handleDownload}
-          disabled={isGeneratingPDF}
-          className="mt-4 ml-2 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 flex items-center"
-        >
-          <Download className="mr-2 h-4 w-4" />
-          {isGeneratingPDF ? 'Génération...' : 'Télécharger'}
-        </button>
       );
     }
     
@@ -864,7 +838,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
               // Si un gestionnaire de signatures existe, sauvegarder le tampon
               if (signatureManagerRef.current) {
                 console.log('🔍 [DEBUG] Enregistrement du tampon dans le gestionnaire de signatures');
-                await signatureManagerRef.current.saveSignature(settings.organization_seal_url, 'organizationSeal');
+                await signatureManagerRef.current.saveSignature(settings.organization_seal_url, SignatureType.ORGANIZATION_SEAL);
               }
             } 
             else if (settings?.organization_seal_path) {
@@ -880,7 +854,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                 // Si un gestionnaire de signatures existe, sauvegarder le tampon
                 if (signatureManagerRef.current) {
                   console.log('🔍 [DEBUG] Enregistrement du tampon dans le gestionnaire de signatures');
-                  await signatureManagerRef.current.saveSignature(urlData.publicUrl, 'organizationSeal');
+                  await signatureManagerRef.current.saveSignature(urlData.publicUrl, SignatureType.ORGANIZATION_SEAL);
                 }
               }
             }
@@ -977,7 +951,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
         console.log('🔍 [DEBUG] Tampon d\'organisation trouvé après rafraîchissement:', signatures.organizationSeal);
         
         // Sauvegarder le tampon
-        const savedSeal = await signatureManagerRef.current.saveSignature(signatures.organizationSeal, 'organizationSeal');
+        const savedSeal = await signatureManagerRef.current.saveSignature(signatures.organizationSeal, SignatureType.ORGANIZATION_SEAL);
         
         // Mettre à jour l'état
         setOrganizationSeal(savedSeal);
@@ -997,7 +971,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
             console.log('🔍 [DEBUG] Tampon d\'organisation trouvé dans les settings:', settings.organization_seal_url);
             
             // Sauvegarder le tampon
-            const savedSeal = await signatureManagerRef.current.saveSignature(settings.organization_seal_url, 'organizationSeal');
+            const savedSeal = await signatureManagerRef.current.saveSignature(settings.organization_seal_url, SignatureType.ORGANIZATION_SEAL);
             
             // Mettre à jour l'état
             setOrganizationSeal(savedSeal);
@@ -1095,20 +1069,20 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
             }
             
             // Mettre à jour localement l'état correspondant à la signature ajoutée
-            if (signatureType === 'participant' && !participantSignature) {
+            if (signatureType === SignatureType.PARTICIPANT && !participantSignature) {
               setParticipantSignature(result);
-            } else if (signatureType === 'representative' && !representativeSignature) {
+            } else if (signatureType === SignatureType.REPRESENTATIVE && !representativeSignature) {
               setRepresentativeSignature(result);
-            } else if (signatureType === 'trainer' && !trainerSignature) {
+            } else if (signatureType === SignatureType.TRAINER && !trainerSignature) {
               setTrainerSignature(result);
-            } else if (signatureType === 'companySeal' && !companySeal) {
+            } else if (signatureType === SignatureType.COMPANY_SEAL && !companySeal) {
               setCompanySeal(result);
-            } else if (signatureType === 'organizationSeal' && !organizationSeal) {
+            } else if (signatureType === SignatureType.ORGANIZATION_SEAL && !organizationSeal) {
               setOrganizationSeal(result);
             }
             
             // Si c'est un tampon d'organisation et qu'il y a un problème, essayer de le diagnostiquer
-            if (signatureType === 'organizationSeal' && !result) {
+            if (signatureType === SignatureType.ORGANIZATION_SEAL && !result) {
               console.log('🖊️ [SIGNATURE] Problème détecté avec le tampon d\'organisation, tentative de diagnostic');
               // Passer l'URL actuelle (qui est null ou undefined ici, représentée par 'result') et trainingId
               const fixedSealUrl = await diagnoseAndFixOrganizationSeal(result, trainingId); 
@@ -1123,7 +1097,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
             }
             
             // Forcer l'affichage du tampon d'organisation après une signature formateur
-            if (signatureType === 'trainer' && !organizationSeal && documentType === DocumentType.CONVENTION) {
+            if (signatureType === SignatureType.TRAINER && !organizationSeal && documentType === DocumentType.CONVENTION) {
               console.log('🖊️ [SIGNATURE] Signature du formateur détectée, forçage du tampon d\'organisation');
               // Passer l'URL du tampon (organizationSeal) et l'ID du conteneur
               forceOrganizationSealInDOM(organizationSeal, 'document-container');
@@ -1186,7 +1160,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
           </button>
         </div>
         
-        <div className="p-4 md:p-6">
+        <div className="p-0">
           {isLoading ? (
             <div className="flex justify-center items-center h-64">
               <div className="text-center">
@@ -1196,24 +1170,23 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
             </div>
           ) : (
             <div className="flex flex-col">
-              <div className="flex-grow overflow-y-auto border border-gray-200 rounded-md bg-white">
-                {/* Log pour identifier les valeurs transmises au template */}
-                {(() => {
-                  console.log('🧪 [DIAGNOSTIC_TEMPLATE] Valeurs transmises au template:', {
-                    participantSignature: participantSignature ? 'présent' : 'absent',
-                    representativeSignature: representativeSignature ? 'présent' : 'absent',
-                    trainerSignature: trainerSignature ? 'présent' : 'absent',
-                    companySeal: companySeal ? 'présent' : 'absent',
-                    organizationSeal: organizationSeal ? 'présent' : 'absent'
-                  });
-                  return null;
-                })()}
-                <div ref={documentRef} id="document-container">
+              {/* Container du document SANS STYLES VISUELS (ni bg, ni border, etc.) */}
+              <div ref={documentContainerRef} id="document-container" className="relative"> 
+                {/* Loading overlay (ne sera pas dans le PDF) */}
+                {isLoading && (
+                  <div className="absolute inset-0 bg-gray-50 bg-opacity-70 flex items-center justify-center z-10">
+                    <LoadingSpinner />
+                  </div>
+                )}
+                
+                {/* DIV CAPTURÉ POUR PDF: uniquement fond blanc et contenu */}
+                <div ref={documentRef} className={`document-template bg-white w-full ${isLoading ? 'opacity-40' : 'opacity-100'}`}> 
                   {renderSignatures()}
                 </div>
               </div>
               
-              <div className="flex flex-wrap justify-center gap-2 mt-6 sticky bottom-0 bg-white py-3 border-t border-gray-100">
+              {/* Boutons d'action (avec padding) */}
+              <div className="p-4 mt-6 flex flex-wrap justify-center gap-2 sticky bottom-0 bg-white py-3 border-t border-gray-100">
                 {/* Diagnostic pour vérifier les conditions d'affichage du bouton */}
                 {(() => {
                   console.log('DIAGNOSTIC BOUTON MODIFIER SIGNATURE:', {
@@ -1221,13 +1194,13 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                     documentType,
                     viewContext,
                     participantSignatureExists: !!participantSignature,
-                    shouldShowButton: !isLoading && documentType === DocumentType.EMARGEMENT && viewContext === 'student' && !!participantSignature
+                    shouldShowButton: !isLoading && documentType === DocumentType.ATTENDANCE_SHEET && viewContext === 'student' && !!participantSignature
                   });
                   return null;
                 })()}
                 
                 {/* Bouton pour modifier la signature globale pour les feuilles d'émargement */}
-                {!isLoading && documentType === DocumentType.EMARGEMENT && viewContext === 'student' && participantSignature && (
+                {!isLoading && documentType === DocumentType.ATTENDANCE_SHEET && viewContext === 'student' && participantSignature && (
                   <button 
                     onClick={handleSignClick}
                     disabled={isSaving}
@@ -1244,7 +1217,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                 {!isLoading && signatureManagerRef.current && !hideSignButton && (
                   <>
                     {/* Cas du formateur (CRM) pour une convention */}
-                    {viewContext === 'crm' && documentType === DocumentType.CONVENTION && (
+                    {viewContext === 'crm' && documentType === DocumentType.CONVENTION && canSign() && (
                       <button 
                         onClick={handleSignClick}
                         disabled={isSaving}
@@ -1255,8 +1228,8 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                       </button>
                     )}
                     
-                    {/* Cas où l'utilisateur peut signer */}
-                    {canSign() && (
+                    {/* Cas où l'utilisateur peut signer - pour tous les types sauf émargement déjà traité au-dessus */}
+                    {canSign() && documentType !== DocumentType.ATTENDANCE_SHEET && viewContext !== 'crm' && (
                       <button 
                         onClick={handleSignClick}
                         disabled={isSaving}
@@ -1279,10 +1252,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                   </>
                 )}
                 
-                {/* Bouton de téléchargement */}
-                {renderDownloadButton()}
-                
-                {/* Bouton pour voir le document existant */}
+                {/* Bouton pour voir le document existant (si applicable) */}
                 {existingDocumentUrl && (
                   <a
                     href={existingDocumentUrl}
@@ -1290,13 +1260,33 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                     rel="noopener noreferrer" 
                     className="mt-4 ml-2 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 inline-flex items-center"
                   >
-                    Voir le document signé
+                    Voir le document (sauvegardé)
                   </a>
                 )}
-                      </div>
-                    </div>
+                
+                {/* Bouton Visualiser / Télécharger (TOUJOURS VISIBLE) */}
+                <button
+                  onClick={handleDownload} // Réutilise la fonction existante pour générer et télécharger
+                  disabled={isGeneratingPDF}
+                  className="mt-4 ml-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center"
+                  title="Génère un aperçu PDF du document dans son état actuel et le télécharge"
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  {isGeneratingPDF ? 'Génération...' : 'Visualiser / Télécharger'}
+                </button>
+              </div>
+            </div>
           )}
-                  </div>
+        </div>
+        
+        {/* Modal pour la prévisualisation du PDF */}
+        <PdfViewerModal
+          isOpen={showPdfPreview}
+          onClose={() => setShowPdfPreview(false)}
+          pdfBlob={pdfBlob}
+          title={`${documentTitle || 'Document'} - Aperçu`}
+          fileName={`${documentTitle || 'document'}_${participantName?.replace(/\s+/g, '_') || ''}.pdf`}
+        />
         
         {/* Modal de signature ou tampon */}
         {showSignatureForm && (

@@ -1,18 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import { DocumentWithSignatures } from './DocumentWithSignatures';
-import { UnifiedTrainingAgreementTemplate } from './templates/unified/TrainingAgreementTemplate';
-import { DocumentType } from './DocumentSignatureManager';
+import { DocumentType } from '../../types/SignatureTypes';
+import { UnifiedTrainingAgreementTemplate, OrganizationSettings as TemplateOrganizationSettings } from './templates/unified/TrainingAgreementTemplate';
 import { supabase } from '../../lib/supabase';
 import { Training, Participant, OrganizationSettings } from './DocumentUtils';
 
 interface GenericTrainingAgreementProps {
   training: Training;
   participant: Participant;
-  participants?: Participant[];
+  participants: Participant[];
+  companyData?: {
+    id?: string;
+    name: string;
+    address?: string;
+    postal_code?: string;
+    city?: string;
+    country?: string;
+    siret?: string;
+    contact_name?: string;
+    contact_email?: string;
+    contact_phone?: string;
+    isIndependent?: boolean;
+  };
   onCancel: () => void;
+  viewContext?: 'crm' | 'student';
   onDocumentOpen?: () => void;
   onDocumentClose?: () => void;
-  viewContext: 'crm' | 'student';
 }
 
 /**
@@ -27,21 +40,20 @@ interface GenericTrainingAgreementProps {
 export const GenericTrainingAgreement: React.FC<GenericTrainingAgreementProps> = ({
   training,
   participant,
-  participants = [],
+  participants,
+  companyData = { name: 'Entreprise à compléter' },
   onCancel,
+  viewContext = 'crm',
   onDocumentOpen,
-  onDocumentClose,
-  viewContext
+  onDocumentClose
 }) => {
   const [organizationSettings, setOrganizationSettings] = useState<OrganizationSettings | null>(null);
-  const [company, setCompany] = useState<any>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // Utilisez le tableau de participants s'il est fourni, sinon utilisez uniquement le participant individuel
-  const allParticipants = participants.length > 0 ? participants : [participant];
-
-  // Charger les paramètres de l'organisation
+  // Chargement des paramètres de l'organisme de formation
   useEffect(() => {
-    const fetchOrganizationSettings = async () => {
+    const loadOrganizationSettings = async () => {
+      setIsLoading(true);
       try {
         const { data, error } = await supabase
           .from('settings')
@@ -49,119 +61,88 @@ export const GenericTrainingAgreement: React.FC<GenericTrainingAgreementProps> =
           .single();
 
         if (error) {
-          console.error('Erreur lors de la récupération des paramètres:', error);
-          return;
-        }
-
-        // Transformer les données pour correspondre à l'interface OrganizationSettings
-        setOrganizationSettings({
-          organization_name: data.company_name || '',
-          address: data.address || '',
-          postal_code: data.postal_code || '',
-          city: data.city || '',
-          country: data.country || 'France',
-          siret: data.siret || '',
-          activity_declaration_number: data.training_number || '',
-          representative_name: data.representative_name || '',
-          representative_title: data.representative_title || 'Directeur'
-        });
-      } catch (error) {
-        console.error('Exception lors de la récupération des paramètres:', error);
-      }
-    };
-
-    // Si le participant a une entreprise associée, charger ses informations
-    const fetchCompanyData = async () => {
-      console.log('🔍 [DEBUG] GenericTrainingAgreement - fetchCompanyData - Participant:', participant);
-      console.log('🔍 [DEBUG] GenericTrainingAgreement - fetchCompanyData - Company name:', participant.company);
-      
-      if (!participant.company) {
-        console.log('⚠️ [WARNING] GenericTrainingAgreement - Pas d\'entreprise associée au participant');
-        return;
-      }
-
-      try {
-        console.log('🔍 [DEBUG] GenericTrainingAgreement - Recherche de l\'entreprise:', participant.company);
-        
-        const { data, error } = await supabase
-          .from('companies')
-          .select('*')
-          .eq('name', participant.company)
-          .maybeSingle();
-
-        if (error) {
-          console.error('❌ [ERROR] GenericTrainingAgreement - Erreur lors de la récupération de l\'entreprise:', error);
+          console.error('Erreur lors du chargement des paramètres:', error);
           return;
         }
 
         if (data) {
-          console.log('✅ [SUCCESS] GenericTrainingAgreement - Entreprise trouvée:', data);
-          setCompany(data);
-        } else {
-          console.log('⚠️ [WARNING] GenericTrainingAgreement - Entreprise non trouvée dans la base, création d\'une structure minimale');
-          // Créer une structure minimale
-          const minimalCompany = {
-            name: participant.company,
-            address: '',
-            postal_code: '',
-            city: '',
-            country: 'France'
+          // Vérifier et formater les données reçues selon l'interface attendue
+          const formattedSettings: OrganizationSettings = {
+            organization_name: data.organization_name || 'PetitMaker',
+            address: data.organization_address || '',
+            postal_code: data.organization_postal_code || '',
+            city: data.organization_city || '',
+            country: data.organization_country || 'France',
+            siret: data.organization_siret || '',
+            activity_declaration_number: data.organization_declaration_number || '',
+            representative_name: data.organization_representative_name || '',
+            representative_title: data.organization_representative_title || '',
+            organization_seal_url: data.organization_seal_url || ''
           };
-          console.log('🔍 [DEBUG] GenericTrainingAgreement - Structure minimale créée:', minimalCompany);
-          setCompany(minimalCompany);
+          
+          setOrganizationSettings(formattedSettings);
         }
       } catch (error) {
-        console.error('❌ [ERROR] GenericTrainingAgreement - Exception lors de la récupération de l\'entreprise:', error);
+        console.error('Erreur inattendue lors du chargement des paramètres:', error);
+      } finally {
+        setIsLoading(false);
       }
     };
 
-    fetchOrganizationSettings();
-    fetchCompanyData();
-  }, [participant.company]);
+    loadOrganizationSettings();
+  }, []);
 
-  // Nom complet du participant
-  const participantName = `${participant.first_name} ${participant.last_name}`;
-
-  // Fonction de rendu du template
+  // Fonction pour formater et rendre le document
   const renderTemplate = ({ 
     participantSignature, 
     representativeSignature, 
     trainerSignature,
     companySeal,
-    organizationSeal
+    organizationSeal 
   }: { 
     participantSignature: string | null; 
     representativeSignature: string | null; 
-    trainerSignature: string | null; 
+    trainerSignature: string | null;
     companySeal: string | null;
     organizationSeal: string | null;
   }) => {
-    console.log('🔍 [DEBUG] GenericTrainingAgreement - renderTemplate avec signatures et tampons:', {
-      participantSignature,
-      representativeSignature,
-      trainerSignature,
-      companySeal,
-      organizationSeal,
-      viewContext
-    });
-    
-    // Convertir la propriété "location" en chaîne si c'est un objet
-    const formattedTraining = {
-      ...training,
-      location: typeof training.location === 'string' 
-        ? training.location 
-        : training.location?.name || ''
+    // Formater les données de l'entreprise pour correspondre au format attendu
+    const company = {
+      name: companyData.name || 'À compléter',
+      address: companyData.address || 'À compléter',
+      postal_code: companyData.postal_code || '',
+      city: companyData.city || '',
+      country: companyData.country || 'France',
+      siret: companyData.siret || 'À compléter',
+      contact_name: companyData.contact_name,
+      contact_email: companyData.contact_email,
+      contact_phone: companyData.contact_phone,
+      isIndependent: companyData.isIndependent
     };
-    
+
+    // Créer les données minimales requises pour le template
+    const settings: TemplateOrganizationSettings = {
+      organization_name: organizationSettings?.organization_name || 'PetitMaker',
+      address: organizationSettings?.address || 'Adresse à compléter',
+      siret: organizationSettings?.siret || 'SIRET à compléter',
+      activity_declaration_number: organizationSettings?.activity_declaration_number || 'Numéro à compléter',
+      representative_name: organizationSettings?.representative_name || 'Représentant à compléter',
+      representative_title: organizationSettings?.representative_title || 'Titre à compléter',
+      city: organizationSettings?.city || 'Villeneuve d\'Ascq',
+      postal_code: organizationSettings?.postal_code || '59650',
+      country: organizationSettings?.country || 'France'
+    };
+
+    // Utiliser la liste complète des participants
+    const participantsArray = participants;
+
     return (
       <UnifiedTrainingAgreementTemplate
-        training={formattedTraining}
+        participants={participantsArray}
         participant={participant}
-        participants={allParticipants}
+        training={training}
         company={company}
-        organizationSettings={organizationSettings || {
-          organization_name: 'PETITMAKER'
-        }}
+        organizationSettings={settings}
         participantSignature={participantSignature}
         representativeSignature={representativeSignature}
         trainerSignature={trainerSignature}
@@ -177,15 +158,13 @@ export const GenericTrainingAgreement: React.FC<GenericTrainingAgreementProps> =
       documentType={DocumentType.CONVENTION}
       trainingId={training.id}
       participantId={participant.id}
-      participantName={participantName}
+      participantName={`${participant.first_name} ${participant.last_name}`}
       viewContext={viewContext}
       onCancel={onCancel}
       onDocumentOpen={onDocumentOpen}
       onDocumentClose={onDocumentClose}
       renderTemplate={renderTemplate}
       documentTitle="Convention de formation"
-      allowCompanySeal={true}
-      allowOrganizationSeal={true}
     />
   );
 }; 

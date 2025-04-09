@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { FileText } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { DocumentWithSignatures } from '../shared/DocumentWithSignatures';
-import { DocumentType, SignatureType } from '../shared/DocumentSignatureManager';
+import { DocumentType, SignatureType } from '../../types/SignatureTypes';
 import { UnifiedTrainingAgreementTemplate, OrganizationSettings as TemplateOrganizationSettings } from '../shared/templates/unified/TrainingAgreementTemplate';
 import { Training, Participant } from '../shared/DocumentUtils';
 
@@ -40,6 +40,7 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
   const [company, setCompany] = useState<any>({ name: '', address: 'À compléter', siret: 'À compléter' });
   const [searchTerm, setSearchTerm] = useState('');
   const [filteredParticipants, setFilteredParticipants] = useState<any[]>([]);
+  const [readyToOpenModal, setReadyToOpenModal] = useState(false);
   
   // Use effect pour filtrer les participants en fonction du terme de recherche
   useEffect(() => {
@@ -59,14 +60,6 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
     setFilteredParticipants(filtered);
   }, [searchTerm, participants]);
   
-  // Avec le modèle unifié, nous chargeons les données de tous les participants
-  // par défaut pour la convention commune
-  useEffect(() => {
-    if (participants.length > 0) {
-      loadAllParticipantsData();
-    }
-  }, [participants]);
-
   // Charger les données formatées lorsqu'un participant est sélectionné
   useEffect(() => {
     if (selectedParticipant) {
@@ -79,6 +72,7 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
     console.log('🔍 [DEBUG] TrainingAgreementButton - Chargement des données pour tous les participants:', participants.length);
     setIsLoading(true);
     setHasError(false);
+    let shouldOpen = false;
 
     try {
       // V2: Charger tous les participants associés à ce training_id depuis la DB
@@ -91,7 +85,7 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
       console.log(`🔄 [DEBUG] Récupération de TOUS les participants pour training_id: ${training.id}`);
       const { data: allDbParticipants, error: dbParticipantsError } = await supabase
         .from('user_profiles')
-        .select('id, first_name, last_name, email, job_position, status, company_name')
+        .select('id, first_name, last_name, email, job_position, status, company')
         .eq('training_id', training.id);
 
       if (dbParticipantsError) {
@@ -104,7 +98,7 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
           email: p.email || '',
           job_position: p.job_position || '',
           status: p.status || '',
-          company: p.company || p.company_name || ''
+          company: p.company || '' // Utiliser p.company comme fallback
         }));
         setFormattedParticipants(allFormattedParticipantsFallback);
       } else if (allDbParticipants) {
@@ -115,7 +109,7 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
           email: p.email || '',
           job_position: p.job_position || '',
           status: p.status || 'registered', // Statut par défaut si manquant
-          company: p.company_name || '' // Utiliser company_name de user_profiles
+          company: p.company || '' // Utiliser p.company
         }));
         setFormattedParticipants(allFormattedParticipantsDb);
         console.log('✅ [DEBUG] TrainingAgreementButton - Participants chargés depuis la DB:', allFormattedParticipantsDb);
@@ -123,25 +117,43 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
          setFormattedParticipants([]); // Vider si rien trouvé en DB
       }
 
+      // Vérifier si des participants existent APRÈS la mise à jour potentielle de l'état
+      // Utiliser allDbParticipants ou la longueur du fallback comme indicateur plus direct
+      const participantsExist = dbParticipantsError 
+          ? (participants?.length || 0) > 0 
+          : (allDbParticipants?.length || 0) > 0;
+
       // Exécuter ces opérations en parallèle pour un chargement plus rapide
-      await Promise.all([
-        // Récupérer l'entreprise associée à la formation
+      const results = await Promise.allSettled([
         loadCompanyData(),
-        
-        // Charger les données de formation
         loadTrainingData(),
-        
-        // Charger les paramètres de l'organisation
         loadOrganizationSettings()
       ]);
       
-      console.log('🔍 [DEBUG] TrainingAgreementButton - Toutes les données chargées avec succès');
+      const allSucceeded = results.every(result => result.status === 'fulfilled');
+      
+      // La vérification finale se fait ici
+      if (allSucceeded && participantsExist) {
+         console.log('✅ [LOAD_COMPLETE] Chargement terminé avec succès et participants présents.');
+         shouldOpen = true;
+      } else {
+         console.warn('⚠️ [LOAD_WARN] Échec chargement parallèle OU aucun participant trouvé.', { allSucceeded, participantsExist });
+         setHasError(!allSucceeded);
+         shouldOpen = false;
+      }
+      
     } catch (error) {
-      console.error('❌ [ERROR] Erreur lors du chargement des données:', error);
+      console.error('❌ [ERROR] Erreur majeure lors du chargement des données:', error);
       setHasError(true);
-      throw error; // Propager l'erreur pour permettre le catch dans handleOpenAgreement
+      shouldOpen = false;
     } finally {
-      setIsLoading(false);
+      // Mettre à jour l'état qui déclenchera useEffect UNIQUEMENT si on doit ouvrir
+      if (shouldOpen) {
+          setReadyToOpenModal(true);
+      } else {
+          // Si on ne doit pas ouvrir, s'assurer que isLoading est bien false
+          setIsLoading(false);
+      }
     }
   };
 
@@ -362,34 +374,21 @@ export const TrainingAgreementButton: React.FC<TrainingAgreementButtonProps> = (
   };
 
   const handleOpenConvention = async () => {
-    console.log("🔍 [DEBUG] TrainingAgreementButton - Ouverture de la convention");
+    console.log("🔍 [DEBUG] TrainingAgreementButton - Demande d'ouverture...");
     setIsLoading(true);
     setHasError(false);
-    try {
-      // Recharger TOUTES les données nécessaires (participants, formation, entreprise, org settings)
-      // JUSTE AVANT d'ouvrir
-      await loadAllParticipantsData();
-
-      // Vérifier si toutes les données essentielles sont présentes après le rechargement
-      // Note: company peut avoir des valeurs par défaut, mais devrait exister
-      if (!formattedTraining || !company || !formattedParticipants) {
-         console.error("❌ [ERROR] Données essentielles manquantes après rechargement avant ouverture modale.");
-         // Gérer l'erreur, peut-être afficher un message
-         setHasError(true);
-         setIsLoading(false);
-         return;
-      }
-
-      setShowAgreement(true); // Ouvrir la modale
-    } catch (error) {
-       console.error("❌ [ERROR] Erreur lors de la préparation de l'ouverture de la convention:", error);
-       setHasError(true);
-       // Afficher un message d'erreur à l'utilisateur, par exemple via un état ou une alerte
-       // alert("Une erreur est survenue lors du chargement des données pour la convention.");
-    } finally {
-      setIsLoading(false);
-    }
+    setReadyToOpenModal(false);
+    await loadAllParticipantsData();
   };
+
+  useEffect(() => {
+    if (readyToOpenModal) {
+      console.log("🚀 [EFFECT] Ouverture de la modal déclenchée par useEffect.");
+      setShowAgreement(true);
+      setIsLoading(false);
+      setReadyToOpenModal(false);
+    }
+  }, [readyToOpenModal]);
 
   const handleCloseConvention = () => {
     console.log('🔍 [DEBUG] TrainingAgreementButton - Fermeture de la convention');

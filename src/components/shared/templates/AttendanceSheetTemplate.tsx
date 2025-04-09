@@ -176,7 +176,8 @@ export const AttendanceSheetTemplate: React.FC<AttendanceSheetTemplateProps> = (
   };
 
   return (
-    <div className="bg-white p-8 border border-gray-200 mx-auto relative">
+    <div className="bg-white p-8 border border-gray-200 mx-auto relative"
+      data-document-type="attendance_sheet">
       <div className="text-center mb-6 border border-blue-900">
         <h1 className="text-xl font-bold py-2">FEUILLE D'ÉMARGEMENT</h1>
       </div>

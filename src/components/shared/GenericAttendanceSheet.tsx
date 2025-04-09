@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { DocumentWithSignatures } from './DocumentWithSignatures';
 import { Training, Participant, OrganizationSettings } from './DocumentUtils';
 import { AttendanceSheetTemplate } from './templates/AttendanceSheetTemplate';
-import { DocumentType, SignatureType } from './DocumentSignatureManager';
+import { DocumentType, SignatureType } from '../../types/SignatureTypes';
 import { supabase } from '../../lib/supabase';
 import SignatureCanvas from '../SignatureCanvas';
 
@@ -603,7 +603,7 @@ export const GenericAttendanceSheet: React.FC<GenericAttendanceSheetProps> = ({
       })()}
       
       <DocumentWithSignatures
-        documentType={DocumentType.EMARGEMENT}
+        documentType={DocumentType.ATTENDANCE_SHEET}
         trainingId={training.id}
         participantId={participant.id}
         participantName={participantName}
@@ -613,11 +613,7 @@ export const GenericAttendanceSheet: React.FC<GenericAttendanceSheetProps> = ({
         onDocumentClose={onDocumentClose}
         renderTemplate={renderTemplate}
         documentTitle="Feuille d'émargement"
-        allowCompanySeal={false}
-        allowOrganizationSeal={false}
-        onSignatureCreated={handleSignatureCreated}
         hideSignButton={true}
-        alwaysShowDownloadButton={true}
       />
       
       {/* Modale de signature */}

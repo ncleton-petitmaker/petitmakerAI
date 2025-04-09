@@ -1,5 +1,5 @@
 import { supabase } from '../../lib/supabase';
-import { isValidImageUrl, addCacheBuster, analyzeDataUrl, dataURLtoBlob } from '../../utils/SignatureUtils';
+import { isValidImageUrl, addCacheBuster, analyzeDataUrl, dataURLtoBlob, optimizeSealUrl } from '../../utils/SignatureUtils';
 
 // Cache pour éviter de vérifier plusieurs fois les mêmes colonnes
 const columnExistenceCache: Record<string, boolean> = {
@@ -296,7 +296,7 @@ export class DocumentManager {
       training_id: string;
     user_id?: string;
     signature: string;
-    type: 'convention' | 'attestation' | 'emargement';
+    type: 'convention' | 'attestation' | 'emargement' | 'completion_certificate';
     signature_type: 'participant' | 'representative' | 'trainer' | 'companySeal' | 'organizationSeal';
     created_by?: string;
   }): Promise<string> {
@@ -506,263 +506,124 @@ export class DocumentManager {
   }
   
   /**
-   * Récupère la dernière signature pour un document
-   * 
-   * @param params Paramètres de recherche
-   * @returns URL de la signature ou null si non trouvée
+   * Récupère l'URL publique optimisée pour un tampon d'organisation
+   * @param sealPath Chemin du fichier dans le bucket
+   * @returns Promise<string | null> URL publique ou null
+   */
+  static async getOrganizationSealUrl(sealPath: string): Promise<string | null> {
+    if (!sealPath) return null;
+    
+    console.log(`🔍 [SEAL_URL] Tentative de récupération de l'URL publique pour: ${sealPath}`);
+    try {
+      const { data } = supabase.storage
+        .from('organization-seals') // Assurez-vous que le nom du bucket est correct
+        .getPublicUrl(sealPath);
+        
+      if (data && data.publicUrl) {
+        const optimizedUrl = optimizeSealUrl(data.publicUrl);
+        console.log(`✅ [SEAL_URL] URL publique récupérée et optimisée: ${optimizedUrl}`);
+        return optimizedUrl;
+      } else {
+        console.warn('⚠️ [SEAL_URL] Aucune URL publique retournée par Supabase.');
+        return null;
+      }
+    } catch (fetchError) {
+      console.error('❌ [SEAL_URL] Exception lors de getPublicUrl:', fetchError);
+      return null;
+    }
+  }
+  
+  /**
+   * Récupère la dernière signature pour un utilisateur et un type de document
+   * V3: Logique améliorée pour gérer tous les types, y compris tampons
    */
   static async getLastSignature(params: {
     training_id: string;
     user_id?: string;
-    type: 'convention' | 'attestation' | 'emargement';
+    company_id?: string; // Ajout pour tampon entreprise
+    type: 'convention' | 'attestation' | 'emargement' | 'completion_certificate';
     signature_type: 'participant' | 'representative' | 'trainer' | 'companySeal' | 'organizationSeal';
   }): Promise<string | null> {
-    try {
-      console.log('🔍 [DEBUG] Récupération de la dernière signature pour', params);
-      
-      // Déterminer un titre approprié selon le type
-      let title;
-      if (params.signature_type === 'participant') {
-        title = "Signature de l'apprenant";
-      } else if (params.signature_type === 'representative') {
-        title = "Signature du représentant";
-      } else if (params.signature_type === 'trainer') {
-        title = "Signature du formateur";
-      } else if (params.signature_type === 'companySeal') {
-        title = "Tampon de l'entreprise";
-      } else if (params.signature_type === 'organizationSeal') {
-        title = "Tampon de l'organisme de formation";
-      } else {
-        title = "Signature";
-      }
-      
-      // Convertir le type en utilisant les mêmes valeurs que dans saveSignature
-      // pour être cohérent avec la contrainte de la base de données
-      const dbDocumentType = params.type;
-      
-      console.log('🔍 [DEBUG] Type de document pour la recherche:', { original: params.type, db: dbDocumentType, title });
+    const { training_id, user_id, company_id, type, signature_type } = params;
+    console.log(`🔍 [GET_LAST_SIG] Recherche: ${signature_type} pour ${type} (Training: ${training_id}, User: ${user_id}, Company: ${company_id})`);
 
-      // DIAGNOSTIC SPÉCIAL POUR LE REPRÉSENTANT 
-      if (params.signature_type === 'representative') {
-        console.log('🔎 [DIAGNOSTIC_REPRÉSENTANT] Recherche signature représentant...');
-        
-        // D'abord, essayer de trouver exactement pour cette formation
-        const { data: exactData, error: exactError } = await supabase
+    try {
+      let query = supabase
           .from('documents')
-          .select('file_url, created_at, id, title')
-          .eq('training_id', params.training_id)
-          .eq('type', dbDocumentType)
-          .eq('title', title)
+        .select('file_url, created_at')
+        .eq('type', type)
           .order('created_at', { ascending: false })
           .limit(1);
           
-        console.log('🔎 [DIAGNOSTIC_REPRÉSENTANT] Résultat recherche exacte:', { 
-          training_id: params.training_id, 
-          error: exactError?.message,
-          found: (exactData && exactData.length > 0) || false,
-          data: exactData
-        });
-        
-        // Ensuite, chercher globalement
-        const { data: globalData, error: globalError } = await supabase
-          .from('documents')
-          .select('file_url, created_at, id, title')
-          .eq('type', dbDocumentType)
-          .eq('title', title)
-          .order('created_at', { ascending: false })
-          .limit(5);
-          
-        console.log('🔎 [DIAGNOSTIC_REPRÉSENTANT] Résultat recherche globale:', { 
-          error: globalError?.message,
-          found: (globalData && globalData.length > 0) || false,
-          count: globalData?.length || 0,
-          data: globalData
-        });
-      }
-      
-      // CORRECTION : S'assurer que le filtrage par user_id est toujours appliqué
-      let query = supabase
-        .from('documents')
-        .select('file_url, created_at, id, title')
-        .eq('training_id', params.training_id)
-        .eq('type', dbDocumentType);
-      
-      // Pour les tampons, la recherche est plus complexe car nous avons changé la convention de nommage
-      // Nous devons donc être plus flexibles dans la recherche
-      if (params.signature_type === 'companySeal' || params.signature_type === 'organizationSeal') {
-        // Pour les tampons, rechercher par titre plutôt que par structure de dossier
-        query = query.eq('title', title);
+      // Adapter le filtre en fonction du type de signature
+      switch (signature_type) {
+        case 'participant':
+          if (!user_id) {
+            console.warn('⚠️ [GET_LAST_SIG] User ID manquant pour signature participant.');
+            return null;
+          }
+          query = query.eq('user_id', user_id).eq('title', "Signature de l'apprenant");
+          break;
+        case 'representative':
+           if (!user_id) { // La signature du représentant est liée à l'utilisateur qui l'a ajoutée (souvent l'apprenant)
+             console.warn('⚠️ [GET_LAST_SIG] User ID manquant pour signature représentant.');
+             return null; // Ou rechercher par company_id si c'est pertinent ?
+           }
+           query = query.eq('user_id', user_id).eq('title', "Signature du représentant");
+          break;
+        case 'trainer':
+          if (!training_id) {
+             console.warn('⚠️ [GET_LAST_SIG] Training ID manquant pour signature formateur.');
+             return null;
+          }
+          // La signature du formateur est liée à la formation, pas à un utilisateur spécifique
+          query = query.eq('training_id', training_id).eq('title', "Signature du formateur");
+          break;
+        case 'companySeal':
+          // Le tampon entreprise peut être lié à la formation ou à l'entreprise
+           if (company_id) {
+             query = query.eq('company_id', company_id).eq('title', "Tampon de l\'entreprise");
+           } else if (training_id) {
+             // Fallback: chercher par training_id si company_id n'est pas fourni
+             query = query.eq('training_id', training_id).eq('title', "Tampon de l\'entreprise");
+             console.log('ℹ️ [GET_LAST_SIG] Recherche tampon entreprise par training_id (fallback)');
       } else {
-        // Pour les signatures normales, rechercher par titre également
-        query = query.eq('title', title);
+             console.warn('⚠️ [GET_LAST_SIG] IDs manquants pour tampon entreprise.');
+             return null;
+           }
+          break;
+        case 'organizationSeal':
+          // Le tampon organisme est global ou lié aux settings, pas stocké ici typiquement.
+          // Tentative de récupération via les settings comme fallback ?
+          console.log('ℹ️ [GET_LAST_SIG] Recherche tampon organisme. Normalement via Settings.');
+          // Cette recherche dans 'documents' échouera probablement.
+           query = query.eq('title', "Tampon de l\'organisme de formation");
+          break;
+        default:
+          console.error(`❌ [GET_LAST_SIG] Type de signature inconnu: ${signature_type}`);
+          return null;
       }
-      
-      // IMPORTANT : Toujours filtrer par user_id si fourni, sauf pour les tampons qui sont au niveau de la formation
-      if (params.user_id && params.signature_type !== 'companySeal' && params.signature_type !== 'organizationSeal') {
-        query = query.eq('user_id', params.user_id);
-      } else if (params.signature_type === 'companySeal' || params.signature_type === 'organizationSeal') {
-        console.log('🔍 [DEBUG] Recherche de tampon sans filtrage par user_id (niveau formation)');
-      } else {
-        console.warn('🔍 [DEBUG] Attention: Récupération de signature sans user_id spécifié');
-      }
-      
-      // Trier par date de création décroissante et limiter à 5 résultats
-      // pour avoir des alternatives si la première URL ne fonctionne pas
-      query = query.order('created_at', { ascending: false }).limit(5);
       
       const { data, error } = await query;
       
       if (error) {
-        console.error('🔍 [DEBUG] Erreur lors de la récupération de la signature:', error);
+        console.error(`❌ [GET_LAST_SIG] Erreur recherche ${signature_type}:`, error);
         return null;
       }
       
-      if (!data || data.length === 0) {
-        console.log('🔍 [DEBUG] Aucune signature trouvée par requête directe. Paramètres de recherche:', { 
-          training_id: params.training_id,
-          user_id: params.user_id,
-          type: dbDocumentType,
-          title: title
-        });
-        
-        // !!!!!!!!!!!!!!!!!! SECTION DANGEREUSE !!!!!!!!!!!!!!!!!!!!
-        // SUPPRIMER / COMMENTER la recherche globale ici pour éviter les fuites de données
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        
-        // // AMÉLIORATION: Essayer de trouver la signature même si elle n'est pas liée à la formation
-        // // Cela permet de réutiliser une signature du formateur ou du représentant à travers les formations
-        // if (params.signature_type === 'representative' || params.signature_type === 'trainer') {
-        //   console.log('🔍 [DEBUG] Recherche globale pour une signature de type:', params.signature_type);
-        //   
-        //   try {
-        //     // Rechercher globalement sans training_id (toutes formations confondues)
-        //     const { data: globalData, error: globalError } = await supabase
-        //       .from('documents')
-        //       .select('file_url, created_at')
-        //       .eq('title', title)
-        //       .eq('type', dbDocumentType)
-        //       .order('created_at', { ascending: false })
-        //       .limit(1);
-        //       
-        //     if (!globalError && globalData && globalData.length > 0) {
-        //       const fileUrl = globalData[0].file_url;
-        //       console.log(`🔍 [DEBUG] Signature de ${params.signature_type} trouvée globalement:`, fileUrl);
-        //       return fileUrl;
-        //     }
-        //     
-        //     // Si toujours rien, essayer en cherchant dans les fichiers du bucket signatures
-        //     const typePrefix = params.signature_type === 'representative' ? 'representative' : 'trainer';
-        //     
-        //     const { data: files, error: storageError } = await supabase.storage
-        //       .from('signatures')
-        //       .list('', { 
-        //         limit: 10,
-        //         search: `${typePrefix}_${params.type}`
-        //       });
-        //       
-        //     if (!storageError && files && files.length > 0) {
-        //       // Trier par date (nom contient timestamp)
-        //       const sortedFiles = files
-        //         .filter(file => file.name.includes(`${typePrefix}_${params.type}`))
-        //         .sort((a, b) => b.name.localeCompare(a.name));
-        //         
-        //       if (sortedFiles.length > 0) {
-        //         const { data: urlData } = await supabase.storage
-        //           .from('signatures')
-        //           .getPublicUrl(sortedFiles[0].name);
-        //           
-        //         if (urlData && urlData.publicUrl) {
-        //           console.log(`🔍 [DEBUG] Signature de ${params.signature_type} trouvée dans le stockage:`, urlData.publicUrl);
-        //           return urlData.publicUrl;
-        //         }
-        //       }
-        //     }
-        //   } catch (globalSearchError) {
-        //     console.error('🔍 [DEBUG] Erreur lors de la recherche globale:', globalSearchError);
-        //   }
-        // }
-        
-        // // Si nous cherchons un tampon et que nous n'avons rien trouvé, essayons de rechercher
-        // // directement dans le bucket de stockage avec le nouveau format de nom de fichier
-        // if (params.signature_type === 'companySeal' || params.signature_type === 'organizationSeal') {
-        //   console.log('🔍 [DEBUG] Tentative de récupération directe dans le stockage pour le tampon...');
-        //   
-        //   try {
-        //     // Déterminer le préfixe de recherche en fonction du type de tampon
-        //     const searchPrefix = params.signature_type === 'companySeal' ? 'seal_company' : 'seal_organization';
-        //     
-        //     // Lister tous les fichiers dans le bucket
-        //     const { data: files, error: listError } = await supabase.storage
-        //       .from('signatures')
-        //       .list('', {
-        //         limit: 100,
-        //         sortBy: { column: 'created_at', order: 'desc' }
-        //       });
-        //     
-        //     if (listError) {
-        //       console.error('🔍 [DEBUG] Erreur lors de la récupération des fichiers:', listError);
-        //     } else if (files && files.length > 0) {
-        //       console.log(`🔍 [DEBUG] ${files.length} fichiers trouvés dans le bucket signatures`);
-        //       
-        //       // Filtrer les fichiers qui correspondent au préfixe et au type de document
-        //       const matchingFiles = files
-        //         .filter(file => file.name.startsWith(searchPrefix) && file.name.includes(params.type))
-        //         .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-        //       
-        //       if (matchingFiles.length > 0) {
-        //         console.log('🔍 [DEBUG] Tampons trouvés par recherche dans le stockage:', matchingFiles.length);
-        //         
-        //         // Générer l'URL publique du fichier le plus récent
-        //         const { data: urlData } = await supabase.storage
-        //           .from('signatures')
-        //           .getPublicUrl(matchingFiles[0].name);
-        //         
-        //         if (urlData && urlData.publicUrl) {
-        //           console.log('🔍 [DEBUG] URL de tampon trouvée dans le stockage:', urlData.publicUrl);
-        //           return urlData.publicUrl;
-        //         }
-        //       }
-        //     }
-        //   } catch (storageError) {
-        //     console.error('🔍 [DEBUG] Erreur lors de la recherche dans le stockage:', storageError);
-        //   }
-        // }
-        
-        // Si aucune signature n'est trouvée par la requête directe ET que la recherche globale est désactivée,
-        // retourner null.
+      if (data && data.length > 0 && data[0].file_url) {
+        const url = data[0].file_url;
+        console.log(`✅ [GET_LAST_SIG] ${signature_type} trouvé: ${url.substring(0, 60)}...`);
+        // Appliquer un cache-buster pour forcer le rechargement si nécessaire
+        const finalUrl = addCacheBuster(url);
+        return finalUrl;
+      } else {
+        console.log(`ℹ️ [GET_LAST_SIG] Aucune signature ${signature_type} trouvée dans documents.`);
+        // Ne pas chercher dans le storage ici, le DocumentSignatureManager s'en chargera si besoin.
         return null;
       }
-      
-      console.log('🔍 [DEBUG] Signatures trouvées par la requête directe:', data.length, 'résultats');
-      
-      // Essayer chaque URL jusqu'à en trouver une valide
-      for (const item of data) {
-        if (!item.file_url) continue;
-        
-        // Ajouter un paramètre de cache-busting à l'URL
-        const urlWithCacheBuster = addCacheBuster(item.file_url);
-        console.log('🔍 [DEBUG] Vérification de l\'URL avec cache-busting:', urlWithCacheBuster);
-        
-        // Vérifier que l'URL est valide avant de la retourner
-        try {
-          const isValid = await isValidImageUrl(urlWithCacheBuster);
-          if (isValid) {
-            console.log('🔍 [DEBUG] Signature trouvée et validée:', urlWithCacheBuster);
-            return item.file_url; // Retourner l'URL originale sans cache-busting
-          } else {
-            console.log('🔍 [DEBUG] URL invalide, essai suivant:', item.file_url);
-          }
-        } catch (validationError) {
-          console.error('🔍 [DEBUG] Erreur lors de la validation de l\'URL:', validationError);
-        }
-      }
-      
-      // Si on arrive ici, aucune URL n'est valide, mais on retourne quand même la plus récente
-      // car il est possible que l'image soit en cours de propagation dans le CDN
-      console.log('🔍 [DEBUG] Aucune URL valide trouvée, retour de la plus récente par défaut:', data[0].file_url);
-      return data[0].file_url;
     } catch (error) {
-      console.error('🔍 [DEBUG] Exception lors de la récupération de la signature:', error);
+      console.error(`❌ [GET_LAST_SIG] Exception recherche ${signature_type}:`, error);
       return null;
     }
   }
@@ -780,7 +641,7 @@ export class DocumentManager {
       training_id: string;
       user_id: string;
       created_by: string;
-      type: 'convention' | 'attestation' | 'emargement';
+      type: 'convention' | 'attestation' | 'emargement' | 'completion_certificate';
       participant_name: string;
     }
   ): Promise<string> {
@@ -883,7 +744,7 @@ export class DocumentManager {
   static async getLastDocument(params: {
     training_id: string;
     user_id: string;
-    type: 'convention' | 'attestation' | 'emargement';
+    type: 'convention' | 'attestation' | 'emargement' | 'completion_certificate';
   }): Promise<string | null> {
     try {
       console.log('🚨 [DEBUG] Récupération du dernier document', params.type, '- Training ID:', params.training_id, '- User ID:', params.user_id);
@@ -1086,7 +947,7 @@ export class DocumentManager {
   static async updateDocument(params: {
     training_id: string;
     user_id: string;
-    type: 'convention' | 'attestation' | 'emargement';
+    type: 'convention' | 'attestation' | 'emargement' | 'completion_certificate';
     trainer_signed?: boolean;
     participant_signed?: boolean;
     representative_signed?: boolean;

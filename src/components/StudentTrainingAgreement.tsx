@@ -374,6 +374,11 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
   // Ajouter les états pour la signature du formateur (vers ligne 270-280 avec les autres états)
   const [hasTrainerSignature, setHasTrainerSignature] = useState<boolean>(false);
 
+  // --- États pour la prévisualisation PDF ---
+  const [isPreviewingPdf, setIsPreviewingPdf] = useState(false);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
+  // --- Fin États prévisualisation ---
+
   // Effet séparé pour récupérer tous les participants de la formation
   useEffect(() => {
     const fetchAllParticipants = async () => {
@@ -1196,21 +1201,60 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
   };
 
   const generatePDF = async () => {
-    if (!pdfContentRef.current) return;
-    
+    if (!pdfContentRef.current) {
+        console.error("❌ [PDF_GEN] Référence pdfContentRef non trouvée.");
+        toast.error('Erreur : impossible de trouver le contenu du document.');
+        return;
+    }
+    if (isGeneratingPDF) {
+        console.log("⏳ [PDF_GEN] Génération déjà en cours.");
+        return;
+    }
+
+    console.log("🚀 [PDF_GEN] Déclenchement de la génération PDF...");
+    setIsGeneratingPDF(true);
+    toast.loading('Génération du PDF en cours...', { id: 'pdf-gen-toast' });
+
     try {
-      // Générer un nom de fichier basé sur le nom du participant et le titre de la formation
-      const fileName = `Convention_${participant.first_name}_${participant.last_name}_${training.title.replace(/\s+/g, '_')}.pdf`;
-      
-      // Utiliser html2pdf pour générer et afficher le PDF
-      const pdfBlob = await html2pdf().from(pdfContentRef.current).outputPdf('blob');
-      
-      // Créer une URL du blob et l'ouvrir dans une nouvelle fenêtre
-      const blobUrl = URL.createObjectURL(pdfBlob);
-      window.open(blobUrl, '_blank');
+        const elementToRender = pdfContentRef.current;
+        
+        const pdfOptions = {
+            margin: 10,
+            filename: `Convention_${participant.first_name}_${participant.last_name}_${training.title.replace(/\\s+/g, '_')}.pdf`,
+            image: { type: 'jpeg', quality: 0.95 },
+            html2canvas: { 
+                scale: 2, 
+                logging: true, 
+                useCORS: true,
+            },
+            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+            pagebreak: { mode: ['avoid-all', 'css', 'legacy'] } 
+        };
+        
+        console.log("📄 [PDF_GEN] Options html2pdf:", JSON.stringify(pdfOptions, null, 2));
+
+        console.log("⏳ [PDF_GEN] Appel de html2pdf...");
+        const pdfBlob: Blob = await html2pdf().set(pdfOptions).from(elementToRender).outputPdf('blob');
+        console.log("✅ [PDF_GEN] Blob PDF généré, taille:", pdfBlob.size);
+
+        // --- Activer la prévisualisation ---
+        console.log("👁️ [PDF_PREVIEW] Création de l'URL Blob pour la prévisualisation...");
+        const url = URL.createObjectURL(pdfBlob);
+        setPdfPreviewUrl(url); // Stocker l'URL pour l'iframe
+        setIsPreviewingPdf(true); // Activer le mode prévisualisation
+        console.log("👁️ [PDF_PREVIEW] Mode prévisualisation activé.");
+
+        toast.success('PDF prêt pour prévisualisation !', { id: 'pdf-gen-toast' });
+        console.log("✅ [PDF_GEN] Processus terminé avec succès (prévisualisation).");
+
     } catch (error) {
-      // console.error('Erreur lors de la génération du PDF:', error); // Log supprimé
-      alert('Une erreur est survenue lors de la génération du PDF. Veuillez réessayer.');
+        console.error("❌ [PDF_GEN] Erreur lors de la génération pour prévisualisation:", error);
+        toast.error('Erreur lors de la génération du PDF.', { id: 'pdf-gen-toast' });
+        console.log("❌ [PDF_GEN] Processus terminé avec erreur.");
+        setPdfPreviewUrl(null);
+        setIsPreviewingPdf(false);
+    } finally {
+        setIsGeneratingPDF(false);
     }
   };
 
@@ -1828,137 +1872,165 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
   return (
     <div className="fixed inset-0 bg-gray-900 bg-opacity-80 backdrop-blur-lg flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl shadow-lg max-w-4xl w-full max-h-[90vh] flex flex-col">
+        {/* En-tête de la modale */}
         <div className="p-6 flex items-center justify-between border-b border-gray-200">
           <h2 className="text-xl font-semibold text-gray-900">
-            {participantSignature ? "Convention de formation signée" : "Convention de formation"}
-            {participantSignature && <span className="ml-2 text-sm bg-green-600 text-white px-2 py-0.5 rounded-full">Signée</span>}
+            {isPreviewingPdf ? "Prévisualisation PDF" : (participantSignature ? "Convention de formation signée" : "Convention de formation")}
+            {/* ... (badge "Signée" reste pareil) ... */} 
+            {participantSignature && !isPreviewingPdf && <span className="ml-2 text-sm bg-green-600 text-white px-2 py-0.5 rounded-full">Signée</span>}
           </h2>
           <button
-            onClick={onCancel}
+            onClick={() => {
+              if (isPreviewingPdf && pdfPreviewUrl) {
+                console.log("🧹 [PREVIEW_CLOSE] Révocation de l'URL Blob:", pdfPreviewUrl.substring(0,50)+"...");
+                URL.revokeObjectURL(pdfPreviewUrl);
+              }
+              setIsPreviewingPdf(false);
+              setPdfPreviewUrl(null);
+              onCancel();
+            }}
             className="text-gray-500 hover:text-gray-700 transition-colors"
           >
             <X className="w-6 h-6" />
           </button>
         </div>
-        
+
+        {/* Contenu principal (conditionnel) */}
         <div className="p-6 overflow-y-auto flex-grow">
-          {/* PDF Content */}
-          <div 
-            ref={pdfContentRef} 
-            className="bg-white text-black p-8 rounded-lg"
-            style={{ fontFamily: 'Arial, Helvetica, sans-serif', fontSize: '14px' }}
-          >
-            {/* Affichage des détails de l'entreprise avant rendu */}
-            <div style={{ display: 'none' }}>
-              {company ? <div>{`Debug: Entreprise ${company.name}`}</div> : null}
-            </div>
-            <div id="training-agreement-template">
-              <UnifiedTrainingAgreementTemplate
-                training={training}
-                company={company || { name: '' }}
-                participant={participant ? {
-                  id: participant.id,
-                  first_name: participant.first_name,
-                  last_name: participant.last_name,
-                  job_position: participant.job_position || '',
-                  email: '',
-                  company: participant.company
-                } : undefined}
-                participants={allTrainingParticipants}
-                participantSignature={participantSignature}
-                // AJOUT: Passer la signature du représentant
-                representativeSignature={representativeSignature}
-                companySeal={companySeal}
-                organizationSeal={organizationSeal}
-                viewContext="student"
-                pdfMode={false}
-                organizationSettings={{
-                  organization_name: organizationSettings?.organization_name || DEFAULT_ORGANIZATION_SETTINGS.organization_name,
-                  address: organizationSettings?.address || DEFAULT_ORGANIZATION_SETTINGS.address,
-                  siret: organizationSettings?.siret || DEFAULT_ORGANIZATION_SETTINGS.siret,
-                  activity_declaration_number: organizationSettings?.activity_declaration_number || DEFAULT_ORGANIZATION_SETTINGS.activity_declaration_number,
-                  representative_name: organizationSettings?.representative_name || DEFAULT_ORGANIZATION_SETTINGS.representative_name,
-                  representative_title: organizationSettings?.representative_title || DEFAULT_ORGANIZATION_SETTINGS.representative_title,
-                  city: organizationSettings?.city || DEFAULT_ORGANIZATION_SETTINGS.city,
-                  postal_code: organizationSettings?.postal_code || DEFAULT_ORGANIZATION_SETTINGS.postal_code,
-                  country: organizationSettings?.country || DEFAULT_ORGANIZATION_SETTINGS.country,
-                }}
-                trainerId={training.trainer_id}
-                trainerSignature={trainerSignature}
-                onRenderComplete={() => {
-                  // SUPPRIMÉ: Log détaillé ici
-                  // SUPPRIMÉ: Forçage du DOM du tampon organisme ici
-                  console.log('✅ [RENDER_COMPLETE] Template rendu.');
-                }}
-              />
-            </div>
-          </div>
-        </div>
-        
-        <div className="p-6 border-t border-gray-700 flex flex-wrap gap-3 justify-between">
-          {!participantSignature ? (
-            <div className="flex flex-wrap gap-3">
-              <button
-                onClick={() => setShowSignatureCanvas(true)}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex-grow md:flex-grow-0"
-              >
-                Signer la convention
-              </button>
-                
-              {/* Ajout du bouton pour le tampon d'entreprise */}
-              <button
-                onClick={() => setShowSealCanvas(true)}
-                className="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10"></circle>
-                  <path d="M12 8v8"></path>
-                  <path d="M8 12h8"></path>
-                </svg>
-                Ajouter un tampon
-              </button>
-            </div>
+          {isPreviewingPdf && pdfPreviewUrl ? (
+            // --- Mode Prévisualisation PDF ---
+            <iframe
+              src={pdfPreviewUrl}
+              title="Prévisualisation Convention"
+              className="w-full h-full min-h-[65vh] rounded-lg border border-gray-300"
+              style={{ backgroundColor: 'lightgrey' }}
+            />
           ) : (
+            // --- Mode Affichage Template ---
+            <div
+              ref={pdfContentRef}
+              className="bg-white text-black p-8 rounded-lg"
+              style={{ fontFamily: 'Arial, Helvetica, sans-serif', fontSize: '14px' }}
+            >
+              <div id="training-agreement-template">
+                <UnifiedTrainingAgreementTemplate
+                   // ... (props du template restent les mêmes) ...
+                   training={training}
+                   company={company || { name: '' }}
+                   participant={participant ? {
+                     id: participant.id,
+                     first_name: participant.first_name,
+                     last_name: participant.last_name,
+                     job_position: participant.job_position || '',
+                     email: '',
+                     company: participant.company
+                   } : undefined}
+                   participants={allTrainingParticipants}
+                   participantSignature={participantSignature}
+                   representativeSignature={representativeSignature}
+                   companySeal={companySeal}
+                   organizationSeal={organizationSeal}
+                   viewContext="student"
+                   pdfMode={false}
+                   organizationSettings={{
+                     organization_name: organizationSettings?.organization_name || DEFAULT_ORGANIZATION_SETTINGS.organization_name,
+                     address: organizationSettings?.address || DEFAULT_ORGANIZATION_SETTINGS.address,
+                     siret: organizationSettings?.siret || DEFAULT_ORGANIZATION_SETTINGS.siret,
+                     activity_declaration_number: organizationSettings?.activity_declaration_number || DEFAULT_ORGANIZATION_SETTINGS.activity_declaration_number,
+                     representative_name: organizationSettings?.representative_name || DEFAULT_ORGANIZATION_SETTINGS.representative_name,
+                     representative_title: organizationSettings?.representative_title || DEFAULT_ORGANIZATION_SETTINGS.representative_title,
+                     city: organizationSettings?.city || DEFAULT_ORGANIZATION_SETTINGS.city,
+                     postal_code: organizationSettings?.postal_code || DEFAULT_ORGANIZATION_SETTINGS.postal_code,
+                     country: organizationSettings?.country || DEFAULT_ORGANIZATION_SETTINGS.country,
+                   }}
+                   trainerId={training.trainer_id}
+                   trainerSignature={trainerSignature}
+                   onRenderComplete={() => {
+                     console.log('✅ [RENDER_COMPLETE] Template rendu.');
+                   }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Pied de page (adapter les boutons) */}
+        <div className="p-6 border-t border-gray-200 flex flex-wrap gap-3 justify-between items-center">
+          {isPreviewingPdf ? (
+            // --- Boutons en mode Prévisualisation ---
             <>
-              {/* N'afficher le message de succès que si has_signed_agreement est TRUE */}
-              {participant.has_signed_agreement && (
-                <div className="flex items-center text-green-400">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                  Convention signée avec succès
-                </div>
-              )}
-              
-              {/* Toujours afficher les boutons de signature et tampon même si déjà signé */}
+              <button
+                 onClick={() => {
+                   if (pdfPreviewUrl) {
+                    console.log("🧹 [PREVIEW_BACK] Révocation de l'URL Blob:", pdfPreviewUrl.substring(0,50)+"...");
+                     URL.revokeObjectURL(pdfPreviewUrl);
+                   }
+                   setIsPreviewingPdf(false);
+                   setPdfPreviewUrl(null);
+                 }}
+                 className="bg-gray-600 hover:bg-gray-700 text-white font-medium py-2 px-6 rounded-lg"
+              >
+                Retour à la convention
+              </button>
+               <a
+                 href={pdfPreviewUrl || '#'}
+                 download={`Convention_${participant.first_name}_${participant.last_name}_${training.title.replace(/\\s+/g, '_')}.pdf`}
+                 className={`bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2 ${!pdfPreviewUrl ? 'opacity-50 cursor-not-allowed' : ''}`}
+                 aria-disabled={!pdfPreviewUrl}
+                 onClick={(e) => !pdfPreviewUrl && e.preventDefault()}
+               >
+                 <Download className="w-5 h-5" /> Télécharger PDF
+               </a>
+            </>
+          ) : (
+            // --- Boutons en mode Normal ---
+            <>
+              {!participantSignature ? (
+                 <div className="flex flex-wrap gap-3">
+                    <button
+                       onClick={() => setShowSignatureCanvas(true)}
+                       className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex-grow md:flex-grow-0"
+                     >
+                       Signer la convention
+                     </button>
+                     <button
+                       onClick={() => setShowSealCanvas(true)}
+                       className="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
+                     >
+                       <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                         <circle cx="12" cy="12" r="10"></circle>
+                         <path d="M12 8v8"></path>
+                         <path d="M8 12h8"></path>
+                       </svg>
+                       Ajouter un tampon
+                     </button>
+                 </div>
+               ) : (
+                 <div className="flex flex-wrap gap-3">
+                    <button
+                       onClick={() => setShowSignatureCanvas(true)}
+                       className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex-grow md:flex-grow-0"
+                     >
+                       Signer (Modifier)
+                     </button>
+                     <button
+                       onClick={() => setShowSealCanvas(true)}
+                       className="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
+                     >
+                       <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                         <circle cx="12" cy="12" r="10"></circle>
+                         <path d="M12 8v8"></path>
+                         <path d="M8 12h8"></path>
+                       </svg>
+                       Ajouter/Modifier Tampon
+                     </button>
+                 </div>
+               )}
+
               <div className="flex flex-wrap gap-3">
                 <button
-                  onClick={() => setShowSignatureCanvas(true)}
-                  className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex-grow md:flex-grow-0"
-                >
-                  Signer la convention
-                </button>
-                <button
-                  onClick={() => setShowSealCanvas(true)}
-                  className="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <path d="M12 8v8"></path>
-                    <path d="M8 12h8"></path>
-                  </svg>
-                  Ajouter un tampon
-                </button>
-              </div>
-            </>
-          )}
-          
-          <div className="flex flex-wrap gap-3">
-            {participantSignature ? (
-              // Si la convention est signée, afficher un seul bouton pour télécharger/visualiser le PDF signé
-                <button
-                  onClick={generatePDF}
-                  className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
+                  onClick={generatePDF} // Ce bouton active maintenant la prévisualisation
+                  className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
                   disabled={isGeneratingPDF}
                 >
                   {isGeneratingPDF ? (
@@ -1968,20 +2040,13 @@ export const StudentTrainingAgreement: React.FC<StudentTrainingAgreementProps> =
                     </>
                   ) : (
                     <>
-                    <Download className="w-5 h-5" /> Télécharger PDF
+                      <Download className="w-5 h-5" /> Prévisualiser PDF
                     </>
                   )}
                 </button>
-            ) : (
-              // Si la convention n'est pas encore signée, afficher un bouton pour visualiser le PDF
-            <button
-              onClick={generatePDF}
-                className="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-6 rounded-lg flex items-center justify-center gap-2"
-            >
-              <Download className="w-5 h-5" /> Visualiser PDF
-            </button>
-            )}
-          </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -50,6 +50,16 @@ export interface SignatureResult {
 }
 
 /**
+ * Interface pour la position d'une signature
+ */
+export interface SignaturePosition {
+  position_x: number;
+  position_y: number;
+  document_type: string;
+  signature_type: string;
+}
+
+/**
  * Service de gestion des signatures
  */
 export class SignatureService {
@@ -1161,4 +1171,109 @@ export const forceOrganizationSealInDOM = async (
     console.error(`❌ [SIGNATURE] Erreur lors de l'injection forcée du tampon:`, error);
     return false;
   }
+};
+
+/**
+ * Récupère les positions des signatures depuis la base de données
+ */
+export const getSignaturePositions = async (
+  documentType: DocumentType
+): Promise<Record<string, SignaturePosition>> => {
+  try {
+    const { data, error } = await supabase
+      .from('signature_positions')
+      .select('*')
+      .eq('document_type', documentType.toLowerCase());
+
+    if (error) {
+      console.error('❌ [POSITIONS] Erreur lors de la récupération des positions de signatures:', error);
+      return {};
+    }
+
+    if (!data || data.length === 0) {
+      console.warn('⚠️ [POSITIONS] Aucune position de signature trouvée pour', documentType);
+      return {};
+    }
+
+    // Convertir les résultats en un objet avec signature_type comme clé
+    const positions: Record<string, SignaturePosition> = {};
+    data.forEach((pos) => {
+      positions[pos.signature_type] = pos;
+    });
+
+    console.log('✅ [POSITIONS] Positions de signatures récupérées:', positions);
+    return positions;
+  } catch (error) {
+    console.error('❌ [POSITIONS] Exception lors de la récupération des positions de signatures:', error);
+    return {};
+  }
+};
+
+/**
+ * Applique les positions des signatures aux éléments d'image correspondants
+ */
+export const applySignaturePositions = (
+  container: HTMLElement,
+  positions: Record<string, SignaturePosition>
+): void => {
+  console.log('📄 [POS_APPLY_START] Début de l\'application des positions de signature.');
+  if (!container || !positions || Object.keys(positions).length === 0) {
+    console.log('📄 [POS_APPLY_SKIP] Aucune position à appliquer ou conteneur invalide.');
+    return;
+  }
+
+  // Itérer sur chaque type de signature pour lequel une position est définie
+  Object.entries(positions).forEach(([signatureType, pos]) => {
+    console.log(`📄 [POS_APPLY_TRY] Tentative pour le type: ${signatureType}`);
+    if (pos && pos.position_x !== undefined && pos.position_y !== undefined) {
+      // Trouver l'élément image correspondant à ce type de signature dans le conteneur
+      // On suppose que l'image a un attribut data-signature-type ou une classe spécifique
+      const signatureImage = container.querySelector(
+        `img[data-signature-type="${signatureType}"]`
+      ) as HTMLElement | null;
+
+      if (signatureImage) {
+        console.log(`  -> [POS_APPLY_FOUND] Image trouvée pour ${signatureType}. Application position: X=${pos.position_x}%, Y=${pos.position_y}%`);
+
+        // Créer un wrapper si nécessaire pour appliquer le positionnement absolu
+        let wrapper = signatureImage.parentElement;
+        let wrapperCreated = false;
+        if (wrapper && getComputedStyle(wrapper).position !== 'relative' && getComputedStyle(wrapper).position !== 'absolute') {
+          const newWrapper = document.createElement('div');
+          newWrapper.style.position = 'relative'; // Le parent doit être relatif pour que l'absolu fonctionne
+          newWrapper.style.display = 'inline-block'; // Pour éviter que le div prenne toute la largeur
+          wrapper.insertBefore(newWrapper, signatureImage);
+          newWrapper.appendChild(signatureImage);
+          wrapper = newWrapper; // Utiliser le nouveau wrapper comme référence
+          wrapperCreated = true;
+          console.log(`      [POS_APPLY_WRAPPER] Wrapper relatif créé pour ${signatureType}.`);
+        } else if (!wrapper) {
+            console.warn(`      [POS_APPLY_NO_PARENT] Impossible de trouver un parent pour ${signatureType}. Positionnement impossible.`);
+            return; // Ne peut pas appliquer la position sans parent
+        }
+
+        // Appliquer les styles pour le positionnement absolu
+        console.log(`      [POS_APPLY_STYLE] Application des styles (position, left, top, transform...).`);
+        signatureImage.style.position = 'absolute';
+        signatureImage.style.left = `${pos.position_x}%`;
+        signatureImage.style.top = `${pos.position_y}%`;
+        signatureImage.style.transform = 'translate(-50%, -50%)'; // Centrer l'image sur le point
+
+        // Optionnel : Ajuster la taille de l'image si nécessaire (à récupérer depuis la DB ?)
+        // signatureImage.style.width = `${pos.width || 100}px`;
+        // signatureImage.style.height = `${pos.height || 50}px`;
+        // Assurer que l'image est visible
+        signatureImage.style.zIndex = '10'; // Mettre la signature au-dessus du contenu
+        signatureImage.style.visibility = 'visible';
+        signatureImage.style.opacity = '1';
+
+        console.log(`      [POS_APPLY_STYLE_SUCCESS] Styles appliqués pour ${signatureType}.`);
+      } else {
+        console.log(`  -> [POS_APPLY_NOT_FOUND] Image pour ${signatureType} non trouvée dans le conteneur.`);
+      }
+    } else {
+        console.warn(`  -> [POS_APPLY_INVALID_POS] Position invalide ou manquante pour le type: ${signatureType}`, pos);
+    }
+  });
+  console.log('📄 [POS_APPLY_END] Fin de l\'application des positions de signature.');
 };

@@ -20,7 +20,12 @@ export enum DocumentType {
   CONVENTION = 'convention',         // Convention de formation
   ATTESTATION = 'attestation',       // Attestation de présence
   ATTENDANCE_SHEET = 'emargement',   // Feuille d'émargement
-  CERTIFICATE = 'certificate'        // Certificat de fin de formation
+  CERTIFICATE = 'certificate',       // Certificat de fin de formation
+  COMPLETION_CERTIFICATE = 'completion_certificate', // Attestation de fin de formation
+  DEVIS = 'devis',                   // Devis de formation
+  FACTURE = 'facture',               // Facture de formation
+  PROGRAMME = 'programme',           // Programme de formation
+  AUTRE = 'autre'                    // Autre type de document
 }
 
 /**
@@ -103,6 +108,12 @@ export interface DocumentRecord {
 }
 
 /**
+ * Type représentant un ensemble de signatures pour un document,
+ * où chaque clé est un type de signature et la valeur est l'URL de la signature (si présente).
+ */
+export type SignatureSet = Partial<Record<SignatureType, string>>;
+
+/**
  * Interface pour la sauvegarde d'un document
  */
 export interface DocumentSaveOptions {
@@ -137,6 +148,16 @@ export const getDocumentTypeFromString = (type: string): DocumentType => {
     case 'certificate':
     case 'certificat':
       return DocumentType.CERTIFICATE;
+    case 'completion_certificate':
+      return DocumentType.COMPLETION_CERTIFICATE;
+    case 'devis':
+      return DocumentType.DEVIS;
+    case 'facture':
+      return DocumentType.FACTURE;
+    case 'programme':
+      return DocumentType.PROGRAMME;
+    case 'autre':
+      return DocumentType.AUTRE;
     default:
       console.warn(`Type de document inconnu: ${type}, utilisation du type convention par défaut`);
       return DocumentType.CONVENTION;
