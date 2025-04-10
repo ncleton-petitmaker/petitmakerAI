@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Download, RefreshCw, Pen, Stamp, FileText } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import SignatureCanvas from '../SignatureCanvas';
-import { generateDocumentPDF } from './DocumentUtils';
+import { generateDocumentPDF, getTrainingDates } from './DocumentUtils';
 import { DocumentManager } from './DocumentManager';
 import { DocumentSignatureManager } from './DocumentSignatureManager';
 // Import enums directly from SignatureTypes
@@ -10,10 +10,12 @@ import { DocumentType, SignatureType } from '../../types/SignatureTypes';
 // import { Button, Modal, ModalHeader, ModalFooter, ModalBody } from '../ui/Modal'; // Commenté: Composants non exportés depuis ce fichier
 import { UnifiedTrainingAgreementTemplate } from './templates/unified/TrainingAgreementTemplate';
 import { LoadingSpinner } from '../LoadingSpinner'; 
-// import { toast } from 'react-toastify'; // Commenté: Dépendance manquante ou chemin incorrect
+import { toast } from 'react-toastify'; // Ajout de l'import pour toast
+import 'react-toastify/dist/ReactToastify.css'; // Import du CSS pour les notifications toast
 // import { useTrainingContext } from '../../contexts/TrainingContext'; // Commenté: Fichier non trouvé
 import { diagnoseAndFixOrganizationSeal, forceOrganizationSealInDOM } from '../../utils/SignatureUtils';
 import { PdfViewerModal } from './PdfViewerModal'; // Import the PdfViewerModal component
+import ReactDOMServer from 'react-dom/server';
 
 export interface DocumentWithSignaturesProps {
   documentType: DocumentType;
@@ -31,12 +33,14 @@ export interface DocumentWithSignaturesProps {
     trainerSignature: string | null;
     companySeal: string | null;
     organizationSeal: string | null;
+    isPdfGeneration: boolean;
   }) => React.ReactNode;
   documentTitle?: string;
   allowCompanySeal?: boolean;
   allowOrganizationSeal?: boolean;
   onSignatureCreated?: (signatureUrl: string) => void;
   hideSignButton?: boolean;
+  isPdfGeneration?: boolean;
 }
 
 // Ajuster le type pour inclure 'representative'
@@ -80,12 +84,15 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
   allowOrganizationSeal = true,
   onSignatureCreated,
   hideSignButton,
+  isPdfGeneration = false,
 }) => {
   const documentRef = useRef<HTMLDivElement>(null);
   const [showSignatureForm, setShowSignatureForm] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [existingDocumentUrl, setExistingDocumentUrl] = useState<string | null>(null);
+  // Ajout de l'état downloading
+  const [downloading, setDownloading] = useState(false);
   
   // Add state for PDF viewer modal
   const [showPdfPreview, setShowPdfPreview] = useState(false);
@@ -122,11 +129,20 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
   // Référence au container de document pour forcer le rendu des signatures
   const documentContainerRef = useRef<HTMLDivElement>(null);
   
+  // Ajout d'un ID unique pour le gestionnaire de signature
+  const [managerId] = useState(() => `dsm-${Math.random().toString(36).substring(2, 9)}`); 
+  
   // État pour stocker les infos du document
   const [documentInfo, setDocumentInfo] = useState<{ id: string; need_stamp: boolean } | null>(null);
   
   // État pour gérer la génération du PDF
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  
+  // État pour suivre l'existence de la signature du participant
+  const [participantSignatureExists, setParticipantSignatureExists] = useState<boolean>(false);
+  
+  // État pour stocker l'instance du gestionnaire de signature
+  const [managerInstance, setManagerInstance] = useState<DocumentSignatureManager | null>(null);
   
   // Fonction pour créer/initialiser le gestionnaire et charger les données initiales
   const initializeManagerAndLoadData = useCallback(async () => {
@@ -175,16 +191,27 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
         await signatureManagerRef.current.loadExistingSignatures();
         
         // Mettre à jour les états locaux avec les signatures chargées
-        const loadedSigs = signatureManagerRef.current.getSignatures();
-        setParticipantSignature(loadedSigs.participant);
-        setRepresentativeSignature(loadedSigs.representative);
-        setTrainerSignature(loadedSigs.trainer);
-        setCompanySeal(loadedSigs.companySeal);
-        // Ne pas écraser le tampon d'organisme si déjà chargé depuis settings
-        if (!organizationSeal && loadedSigs.organizationSeal) {
-           setOrganizationSeal(loadedSigs.organizationSeal);
+        // Ajouter une vérification de sécurité supplémentaire
+        if (signatureManagerRef.current && typeof signatureManagerRef.current.getSignatures === 'function') {
+          const loadedSigs = signatureManagerRef.current.getSignatures();
+          if (loadedSigs) {
+            setParticipantSignature(loadedSigs.participant);
+            setRepresentativeSignature(loadedSigs.representative);
+            setTrainerSignature(loadedSigs.trainer);
+            setCompanySeal(loadedSigs.companySeal);
+            // Ne pas écraser le tampon d'organisme si déjà chargé depuis settings
+            if (!organizationSeal && loadedSigs.organizationSeal) {
+               setOrganizationSeal(loadedSigs.organizationSeal);
+            }
+            console.log('✅ [INIT_MANAGER] États locaux mis à jour avec signatures chargées.');
+          } else {
+            console.warn('⚠️ [INIT_MANAGER] getSignatures() a retourné null ou undefined');
+          }
+        } else {
+          console.warn('⚠️ [INIT_MANAGER] Le manager existe mais getSignatures() n\'est pas disponible');
         }
-        console.log('✅ [INIT_MANAGER] États locaux mis à jour avec signatures chargées.');
+      } else {
+        console.warn('⚠️ [INIT_MANAGER] Le manager n\'est pas initialisé, impossible de charger les signatures');
       }
       
     } catch (error) {
@@ -247,8 +274,12 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
         document.removeEventListener(eventType, preventReload, true);
       });
       observer.disconnect();
-      // Optionnel: Réinitialiser le manager ou autre nettoyage si nécessaire
-      // signatureManagerRef.current = null;
+      // Appeler destroy sur le manager s'il existe
+      if (signatureManagerRef.current) {
+        console.log(`🧹 [UNMOUNT] Appel de destroy sur le manager`);
+        signatureManagerRef.current.destroy();
+        signatureManagerRef.current = null; // Optionnel: nullifier la ref
+      }
     };
     
   }, [initializeManagerAndLoadData]); // Dépend UNIQUEMENT de la fonction useCallback elle-même
@@ -339,24 +370,16 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
     }
   };
   
-  // Optimisation du rendu des signatures
+  // Fonction pour le rendu des signatures
   const renderSignatures = () => {
-    // Vérifier que les signatures sont bien définies
-    const signatureProps = {
+    return renderTemplate({
       participantSignature: participantSignature || null,
       representativeSignature: representativeSignature || null,
       trainerSignature: trainerSignature || null,
       companySeal: companySeal || null,
-      organizationSeal: organizationSeal || null
-    };
-    
-    // Appeler le template avec les signatures
-    try {
-      return renderTemplate(signatureProps);
-    } catch (error) {
-      console.error('❌ [ERROR] Erreur lors du rendu du template:', error);
-      return null;
-    }
+      organizationSeal: organizationSeal || null,
+      isPdfGeneration: isPdfGeneration
+    });
   };
   
   // À l'initialisation et lors des changements de contexte clés (sauf le premier rendu)
@@ -408,52 +431,158 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
     fetchTrainerName();
   }, [trainingId, viewContext]);
   
-  // Gestionnaire pour le changement de signature
-  const handleSignatureChange = (type: SignatureType, signature: string | null) => {
-    console.log('🧪 [DIAGNOSTIC_SIGNATURE] Changement de signature détecté:', { 
-      type, 
-      signaturePresent: !!signature,
-      url: signature?.substring(0, 50)
-    });
-    
-    // Mettre à jour l'état correspondant
+  // Callback pour gérer les changements de signature depuis le manager
+  const handleSignatureChange = useCallback((type: SignatureType, url: string | null) => {
+    console.log(`🔔 [DWS_CALLBACK] Notification reçue: Type=${type}, URL=${url ? url.substring(0,30)+'...' : 'null'}`);
     if (type === SignatureType.PARTICIPANT) {
-        setParticipantSignature(signature);
-      console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état participantSignature:', !!signature);
-    } else if (type === SignatureType.REPRESENTATIVE) {
-        setRepresentativeSignature(signature);
-      console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état representativeSignature:', !!signature);
-    } else if (type === SignatureType.TRAINER) {
-        setTrainerSignature(signature);
-      console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état trainerSignature:', !!signature);
-    } else if (type === SignatureType.COMPANY_SEAL) {
-        setCompanySeal(signature);
-      console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état companySeal:', !!signature);
-    } else if (type === SignatureType.ORGANIZATION_SEAL) {
-        setOrganizationSeal(signature);
-      console.log('🧪 [DIAGNOSTIC_SIGNATURE] Mise à jour état organizationSeal:', !!signature);
+        const exists = !!url;
+        console.log(`🔔➡️ [DWS_CALLBACK] Mise à jour état participantSignatureExists: ${exists}`);
+        setParticipantSignatureExists(prevExists => {
+            console.log(`🔄 [DWS_STATE_UPDATE] MàJ participantSignatureExists de ${prevExists} vers ${exists}`);
+            if (exists && (!url || !url.startsWith('https://'))) {
+                console.error(`💥 [DWS_STATE_UPDATE_ERROR] URL invalide reçue pour participant: ${url}`);
+                return false;
+            }
+            return exists;
+        });
     }
-  };
-  
+    // ... (gérer d'autres types si nécessaire)
+  }, []);
+
+  useEffect(() => {
+    // ... (logique existante pour initialiser le manager) ...
+    console.log('[DWS_EFFECT] Création instance DocumentSignatureManager');
+    const manager = new DocumentSignatureManager(
+      documentType,
+      trainingId,
+      participantId,
+      participantName,
+      viewContext,
+      handleSignatureChange // <-- Passer le callback ici
+    );
+    setManagerInstance(manager);
+
+    // ... (logique existante pour charger les données et cleanup) ...
+
+    return () => {
+      console.log('[DWS_EFFECT] Cleanup: Destruction instance DocumentSignatureManager');
+      manager.destroy(); // Assurez-vous que la méthode destroy existe et retire l'écouteur
+    };
+  }, [documentType, trainingId, participantId, participantName, viewContext, handleSignatureChange]);
+
   // Fonction pour télécharger le document
   const handleDownload = async () => {
-    if (!documentRef.current) return;
-    
-    setIsGeneratingPDF(true);
+    setDownloading(true);
     
     try {
-      // Générer le PDF à partir du contenu actuel
-      const pdfBlob = await generateDocumentPDF(documentRef.current);
+      // Sauvegarder le contenu HTML original
+      const originalContent = document.getElementById('document-container')?.innerHTML;
+      if (!originalContent) {
+        throw new Error("Le contenu du document n'a pas été trouvé.");
+      }
       
-      // Stocker le blob et afficher le modal de prévisualisation
-      setPdfBlob(pdfBlob);
-      setShowPdfPreview(true);
-
+      // Créer un élément temporaire avec les mêmes propriétés
+      const signatureProps = {
+        participantSignature,
+        representativeSignature,
+        trainerSignature,
+        companySeal,
+        organizationSeal,
+        isPdfGeneration: false
+      };
+      
+      const tempSignatureProps = {
+        ...signatureProps,
+        isPdfGeneration: true  // Activer l'optimisation pour PDF
+      };
+      
+      console.log('🖨️ [PDF] Préparation du document pour l\'export PDF');
+      
+      // Mettre à jour temporairement le contenu avec le rendu optimisé pour PDF
+      const documentContainer = document.getElementById('document-container');
+      if (documentContainer) {
+        // Sauvegarder la position de défilement actuelle
+        const scrollPosition = window.scrollY;
+        
+        // Remplacer temporairement le contenu pour le rendu PDF
+        // Convertir ReactNode en string HTML
+        const renderedContent = ReactDOMServer.renderToString(renderTemplate(tempSignatureProps) as React.ReactElement);
+        documentContainer.innerHTML = renderedContent;
+        
+        console.log('🖨️ [PDF] Rendu optimisé pour PDF appliqué');
+        
+        // Pour les feuilles d'émargement : s'assurer que les dates sont correctement affichées
+        if (documentType === DocumentType.ATTENDANCE_SHEET) {
+          console.log('🖨️ [PDF] Traitement spécial pour feuille d\'émargement');
+          
+          // Récupérer les infos de formation pour les dates
+          let trainingInfo = null;
+          try {
+            // Récupérer les dates de formation depuis la base de données
+            const { data } = await supabase
+              .from('trainings')
+              .select('start_date, end_date')
+              .eq('id', trainingId)
+              .single();
+            
+            trainingInfo = data;
+            console.log('🖨️ [PDF] Données de formation récupérées:', trainingInfo);
+          } catch (err) {
+            console.error('🖨️ [PDF] Erreur lors de la récupération des dates de formation:', err);
+          }
+          
+          // Rechercher tous les éléments qui contiennent des dates potentiellement remplacées par des points
+          const dateCells = documentContainer.querySelectorAll('td[rowspan="2"]');
+          
+          dateCells.forEach(cell => {
+            // Vérifier si la cellule contient des points à la place d'une date
+            const cellContent = cell.textContent?.trim();
+            if (cellContent === '. .' || cellContent === '.  .' || cellContent === '..') {
+              console.log('🖨️ [PDF] Correction d\'une date remplacée par des points:', cellContent);
+              
+              // Récupérer l'index de cette cellule pour déterminer la date
+              const rowIndex = Array.from(dateCells).indexOf(cell);
+              
+              if (rowIndex >= 0 && trainingInfo) {
+                // Récupérer la date depuis les données de formation
+                const trainingDates = getTrainingDates(trainingInfo.start_date, trainingInfo.end_date);
+                if (trainingDates && trainingDates[rowIndex]) {
+                  // Remplacer les points par la date formatée
+                  cell.textContent = trainingDates[rowIndex];
+                  console.log('🖨️ [PDF] Date corrigée:', trainingDates[rowIndex]);
+                }
+              }
+            }
+          });
+        }
+        
+        // Générer le PDF avec le contenu optimisé
+        try {
+          // Appel avec seulement l'élément HTML comme argument
+          const pdfBlob = await generateDocumentPDF(documentContainer);
+          console.log('🖨️ [PDF] Génération du PDF réussie');
+          
+          // Définir le blob et ouvrir la prévisualisation au lieu de télécharger directement
+          setPdfBlob(pdfBlob);
+          setShowPdfPreview(true);
+        } catch (pdfError) {
+          console.error('🖨️ [PDF] Erreur lors de la génération du PDF:', pdfError);
+          toast.error("Une erreur est survenue lors de la génération du PDF.");
+        }
+        
+        // Restaurer le contenu original
+        documentContainer.innerHTML = originalContent;
+        
+        // Restaurer la position de défilement
+        window.scrollTo(0, scrollPosition);
+        
+        console.log('🖨️ [PDF] Contenu original restauré');
+      }
     } catch (error) {
-      console.error('Erreur lors de la génération du PDF:', error);
-      alert('Une erreur est survenue lors de la génération du PDF.');
+      console.error('Erreur lors de la prévisualisation du document:', error);
+      toast.error("Une erreur est survenue lors de la génération du PDF.");
     } finally {
-      setIsGeneratingPDF(false);
+      setDownloading(false);
     }
   };
   
@@ -576,76 +705,50 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
   /**
    * Rafraîchit les signatures après des changements
    */
-  const refreshSignatures = async (force = false) => {
-    console.log('🚨 [URGENT] Rafraîchissement des signatures...');
-    
+  const refreshSignatures = useCallback(async () => {
     try {
-      if (signatureManagerRef.current) {
-        // Forcer le rafraîchissement des signatures depuis la base de données
-        const sigs = await signatureManagerRef.current.forceRefreshSignatures();
-        
-        // Mettre à jour les états locaux des signatures, uniquement si elles sont absentes ou si force=true
-        if (!participantSignature || force) {
-          setParticipantSignature(sigs.participant);
-          console.log('🚨 [URGENT] Mise à jour participantSignature:', {
-            exists: !!sigs.participant,
-            url: sigs.participant?.substring(0, 50) + '...',
-            viewContext
-          });
-        }
-        
-        if (!representativeSignature || force) {
-          setRepresentativeSignature(sigs.representative);
-          console.log('🚨 [URGENT] Mise à jour representativeSignature:', {
-            exists: !!sigs.representative,
-            url: sigs.representative?.substring(0, 50) + '...',
-            viewContext
-          });
-        }
-        
-        if (!trainerSignature || force) {
-          setTrainerSignature(sigs.trainer);
-          console.log('🚨 [URGENT] Mise à jour trainerSignature:', {
-            exists: !!sigs.trainer,
-            url: sigs.trainer?.substring(0, 50) + '...',
-            viewContext
-          });
-        }
-        
-        if (!companySeal || force) {
-          setCompanySeal(sigs.companySeal);
-          console.log('🚨 [URGENT] Mise à jour companySeal:', !!sigs.companySeal);
-        }
-        
-        if (!organizationSeal || force) {
-          setOrganizationSeal(sigs.organizationSeal || null);
-          console.log('🚨 [URGENT] Mise à jour organizationSeal:', !!sigs.organizationSeal);
-        }
-        
-        // RÉSOLUTION AUTOMATIQUE: Si signature du représentant manquante mais formateur présente
-        if ((!representativeSignature && sigs.trainer && viewContext === 'student') || force) {
-          console.log('🚨 [URGENT] Signature du représentant manquante mais formateur présent. Création auto...');
-          const representativeUrl = await signatureManagerRef.current.createRepresentativeSignature();
-          
-          if (representativeUrl) {
-            console.log('🚨 [URGENT] Signature représentant créée avec succès:', representativeUrl);
-            setRepresentativeSignature(representativeUrl);
-          } else {
-            console.error('🚨 [URGENT] Échec de création auto de la signature représentant');
-          }
-        } else if (!sigs.representative) {
-          console.warn('🚨 [URGENT] Signature du représentant manquante');
-        }
-        
-        // NOUVELLE FONCTIONNALITÉ: Garantir que les signatures sont visibles dans tous les contextes
-        if (force) {
-          await forceSignatureDisplay();
-        }
-      }
+      if (!signatureManagerRef.current) return;
+
+      console.log("🚨 [URGENT] Rafraîchissement des signatures...");
+      await signatureManagerRef.current.refreshSignatures();
+
+      // Récupérer les signatures depuis le gestionnaire
+      const signaturesFromManager = signatureManagerRef.current.getSignatures();
+
+      // >>> LOGS AJOUTÉS ICI <<<
+      console.log("📊 [REFRESH_SIGNATURES] Signatures depuis le gestionnaire:", {
+        participant: signaturesFromManager.participant ? "définie" : "undefined",
+        trainer: signaturesFromManager.trainer ? "définie" : "undefined",
+        representative: signaturesFromManager.representative ? "définie" : "undefined"
+      });
+      
+      console.log("🧪 [REFRESH_DEBUG] État interne participantSignatureExists:", participantSignatureExists);
+
+      // Mise à jour des états
+      console.log("🚨 [URGENT] Mise à jour participantSignature:", {
+        exists: !!signaturesFromManager.participant,
+        url: signaturesFromManager.participant?.substring(0, 10) + "..." || "undefined...",
+        viewContext
+      });
+      setParticipantSignature(signaturesFromManager.participant);
+      setParticipantSignatureExists(!!signaturesFromManager.participant);
+
+      console.log("🚨 [URGENT] Mise à jour representativeSignature:", {
+        exists: !!signaturesFromManager.representative,
+        url: signaturesFromManager.representative?.substring(0, 10) + "..." || "undefined...",
+        viewContext
+      });
+      setRepresentativeSignature(signaturesFromManager.representative);
+
+      // ... code existant pour d'autres signatures ...
+      
+      // >>> LOG AJOUTÉ ICI <<<
+      console.log("🧪 [REFRESH_DEBUG] Nouvel état participantSignatureExists:", !!signaturesFromManager.participant);
+      
     } catch (error) {
-      console.error('Erreur lors du rafraîchissement des signatures:', error);
+      console.error("❌ [ERROR] Erreur lors du rafraîchissement des signatures:", error);
     }
-  };
+  }, [signatureManagerRef.current, viewContext]);
 
   /**
    * Force l'affichage de toutes les signatures indépendamment du contexte
@@ -1146,6 +1249,10 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
     }
   };
 
+  // Affichage du bouton Modifier
+  const shouldShowModifyButton = viewContext === 'student' && participantSignatureExists && !isLoading;
+  console.log(`🔘 [DWS_RENDER_BTN] Calcul shouldShowModifyButton: viewContext=${viewContext}, participantSignatureExists=${participantSignatureExists}, isLoading=${isLoading} => ${shouldShowModifyButton}`);
+
   // Render du composant
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center z-50 overflow-y-auto p-4">
@@ -1170,8 +1277,13 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
             </div>
           ) : (
             <div className="flex flex-col">
-              {/* Container du document SANS STYLES VISUELS (ni bg, ni border, etc.) */}
-              <div ref={documentContainerRef} id="document-container" className="relative"> 
+              {/* Container du document AVEC les attributs nécessaires */}
+              <div 
+                 ref={documentContainerRef} 
+                 id="document-container" // Ajout de l'ID standard
+                 data-signature-manager-id={managerId} // Ajout de l'ID unique
+                 className="relative"
+               > 
                 {/* Loading overlay (ne sera pas dans le PDF) */}
                 {isLoading && (
                   <div className="absolute inset-0 bg-gray-50 bg-opacity-70 flex items-center justify-center z-10">
@@ -1199,8 +1311,8 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                   return null;
                 })()}
                 
-                {/* Bouton pour modifier la signature globale pour les feuilles d'émargement */}
-                {!isLoading && documentType === DocumentType.ATTENDANCE_SHEET && viewContext === 'student' && participantSignature && (
+                {/* Bouton pour modifier la signature globale pour les feuilles d'émargement -- SUPPRESSION */}
+                {/* {!isLoading && documentType === DocumentType.ATTENDANCE_SHEET && viewContext === 'student' && participantSignature && (
                   <button 
                     onClick={handleSignClick}
                     disabled={isSaving}
@@ -1211,7 +1323,7 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                       ? 'Enregistrement...' 
                       : 'Modifier ma signature'}
                   </button>
-                )}
+                )} */}
                 
                 {/* Bouton de signature pour les autres types de documents */}
                 {!isLoading && signatureManagerRef.current && !hideSignButton && (
@@ -1266,13 +1378,13 @@ export const DocumentWithSignatures: React.FC<DocumentWithSignaturesProps> = ({
                 
                 {/* Bouton Visualiser / Télécharger (TOUJOURS VISIBLE) */}
                 <button
-                  onClick={handleDownload} // Réutilise la fonction existante pour générer et télécharger
-                  disabled={isGeneratingPDF}
+                  onClick={handleDownload} 
+                  disabled={downloading}
                   className="mt-4 ml-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center"
-                  title="Génère un aperçu PDF du document dans son état actuel et le télécharge"
+                  title="Génère un aperçu PDF du document dans son état actuel"
                 >
                   <Download className="mr-2 h-4 w-4" />
-                  {isGeneratingPDF ? 'Génération...' : 'Visualiser / Télécharger'}
+                  {downloading ? 'Génération...' : 'Visualiser / Télécharger'}
                 </button>
               </div>
             </div>
