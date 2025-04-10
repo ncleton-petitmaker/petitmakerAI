@@ -108,17 +108,76 @@ export const getCurrentDate = (): string => {
 };
 
 export const getTrainingDates = (startDate: string | null, endDate: string | null): string[] => {
-  if (!startDate || !endDate) return [];
+  console.log('🔍 [DEBUG_DATES] Début getTrainingDates avec startDate:', startDate, 'endDate:', endDate);
+  
+  if (!startDate || !endDate) {
+    console.log('🔍 [DEBUG_DATES] Dates manquantes, retour tableau vide');
+    return [];
+  }
 
   try {
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+    // Normalize dates to ensure consistent handling
+    const parseDate = (dateStr: string): Date => {
+      // Handle ISO format (YYYY-MM-DD)
+      if (/^\d{4}-\d{2}-\d{2}/.test(dateStr)) {
+        return new Date(dateStr);
+      }
+      
+      // Handle French format (DD/MM/YYYY)
+      if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr)) {
+        const parts = dateStr.split('/');
+        return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+      }
+      
+      // Default parsing
+      return new Date(dateStr);
+    };
+    
+    const start = parseDate(startDate);
+    const end = parseDate(endDate);
+    
+    // Verify the dates are valid
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      console.error('🔍 [DEBUG_DATES] Dates invalides:', startDate, endDate);
+      return [];
+    }
+    
+    console.log('🔍 [DEBUG_DATES] Dates converties - start:', start, 'end:', end);
+    
     const dates: string[] = [];
-
-    for (let date = new Date(start); date <= end; date.setDate(date.getDate() + 1)) {
-      dates.push(formatDate(date));
+    const dayMilliseconds = 24 * 60 * 60 * 1000;
+    const totalDays = Math.ceil((end.getTime() - start.getTime()) / dayMilliseconds) + 1;
+    
+    // Safety check to avoid infinite loops
+    if (totalDays > 100) {
+      console.error('🔍 [DEBUG_DATES] Trop de jours entre les dates:', totalDays);
+      return [];
     }
 
+    for (let date = new Date(start); date <= end; date.setDate(date.getDate() + 1)) {
+      // Create a new date object to avoid reference issues
+      const currentDate = new Date(date);
+      let formattedDate = formatDate(currentDate);
+      
+      // Ensure we have a properly formatted date - if not, format it manually
+      if (!formattedDate || !/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(formattedDate)) {
+        console.warn('🔍 [DEBUG_DATES] Reformatage manuel de la date:', currentDate);
+        // Manual formatting to ensure DD/MM/YYYY
+        const day = currentDate.getDate().toString().padStart(2, '0');
+        const month = (currentDate.getMonth() + 1).toString().padStart(2, '0');
+        const year = currentDate.getFullYear();
+        formattedDate = `${day}/${month}/${year}`;
+      }
+      
+      // Final verification that we have a valid date string
+      if (formattedDate && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(formattedDate)) {
+        dates.push(formattedDate);
+      } else {
+        console.error('🔍 [DEBUG_DATES] Format de date invalide après correction:', formattedDate, 'pour', currentDate);
+      }
+    }
+
+    console.log('🔍 [DEBUG_DATES] Dates générées:', dates);
     return dates;
   } catch (e) {
     console.error('Erreur lors du calcul des dates de formation:', e);
@@ -268,6 +327,108 @@ export const generateDocumentPDF = async (element: HTMLElement): Promise<Blob> =
   
   // Créer une copie profonde de l'élément pour ne pas modifier l'original
   const clonedElement = element.cloneNode(true) as HTMLElement;
+  
+  // Traitement spécial pour les feuilles d'émargement
+  if (documentType === DocumentType.ATTENDANCE_SHEET || documentTypeValue === 'attendance_sheet') {
+    console.log('📄 [PDF_GEN_ATTENDANCE] Traitement spécial pour feuille d\'émargement');
+    
+    // 1. Corriger spécifiquement les cellules rowSpan en ajoutant des attributs HTML et CSS explicites
+    const dateCells = clonedElement.querySelectorAll('td[data-date]');
+    
+    dateCells.forEach(cell => {
+      const date = cell.getAttribute('data-date');
+      
+      // Vérifier si l'attribut rowSpan existe, sinon l'ajouter
+      if (!cell.hasAttribute('rowspan')) {
+        cell.setAttribute('rowspan', '2');
+      }
+      
+      // Appliquer des styles consistants pour toutes les cellules de date
+      (cell as HTMLElement).style.verticalAlign = 'middle';
+      (cell as HTMLElement).style.fontWeight = 'normal';
+      (cell as HTMLElement).style.border = '1px solid #ccc';
+      (cell as HTMLElement).style.textAlign = 'center';
+      (cell as HTMLElement).style.padding = '8px';
+      
+      // IMPORTANT: Force le contenu texte des cellules date
+      // Remplacer tout contenu avec des points par "Date invalide"
+      const currentContent = cell.textContent?.trim() || '';
+      if (currentContent.includes('.') || currentContent === '. .' || currentContent === '• •' || currentContent === '· ·') {
+        cell.innerHTML = '<span style="font-style: italic; color: #666;">Date invalide</span>';
+      } else {
+        // Vérifier si la cellule contient un span avec la classe date-display
+        const dateSpan = cell.querySelector('.date-display');
+        if (dateSpan) {
+          // S'assurer que le contenu du span est correct
+          const spanContent = dateSpan.textContent?.trim() || '';
+          if (spanContent.includes('.') || spanContent === '') {
+            dateSpan.textContent = 'Date invalide';
+          }
+        } else if (date && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(date)) {
+          // Si nous avons une date valide mais pas de span, forcer l'affichage de la date
+          cell.innerHTML = `<span>${date}</span>`;
+        } else if (!currentContent || currentContent === '') {
+          // Si la cellule est vide, mettre "Date invalide"
+          cell.innerHTML = '<span style="font-style: italic; color: #666;">Date invalide</span>';
+        }
+      }
+    });
+    
+    // 2. Marquer toutes les lignes avec des attributs data pour s'assurer qu'elles sont correctement reliées
+    // Trouver toutes les lignes qui contiennent des cellules de date
+    const dateRows = clonedElement.querySelectorAll('tr');
+    let currentDate: string | null = null;
+    
+    dateRows.forEach((row, index) => {
+      // Chercher une cellule de date dans cette ligne
+      const dateCell = row.querySelector('td[data-date]');
+      if (dateCell) {
+        currentDate = dateCell.getAttribute('data-date');
+        row.setAttribute('data-date-row', currentDate || '');
+        row.setAttribute('data-row-type', 'morning');
+      } else if (currentDate && index > 0) {
+        // Si ligne suivante sans cellule de date, c'est probablement l'après-midi
+        const prevRow = dateRows[index - 1];
+        if (prevRow && prevRow.getAttribute('data-date-row') === currentDate) {
+          row.setAttribute('data-date-row', currentDate);
+          row.setAttribute('data-row-type', 'afternoon');
+        }
+      }
+    });
+    
+    // 3. Rechercher toutes les cellules de signature et s'assurer qu'elles sont correctement formatées
+    const signatureCells = clonedElement.querySelectorAll('td[data-signature-cell="true"]');
+    
+    signatureCells.forEach(cell => {
+      // Ajouter un style de base pour s'assurer que la cellule est bien visible
+      (cell as HTMLElement).style.border = '1px solid #ccc';
+      (cell as HTMLElement).style.minHeight = '60px';
+      (cell as HTMLElement).style.height = '60px';
+      
+      // Vérifier si c'est une cellule de la date 24/04/2025
+      const parentRow = cell.closest('tr');
+      if (parentRow) {
+        const dateRowAttr = parentRow.getAttribute('data-date-row');
+        if (dateRowAttr === '24/04/2025') {
+          console.log('📄 [PDF_GEN_ATTENDANCE] Correction de cellule de signature pour 24/04/2025');
+          // Forcer styles pour la cellule de signature problématique
+          (cell as HTMLElement).style.border = '2px solid #aaa';
+          (cell as HTMLElement).style.background = '#fafafa';
+        }
+      }
+    });
+    
+    // 4. Forcer le style de la table pour garantir un rendu cohérent
+    const tables = clonedElement.querySelectorAll('table');
+    tables.forEach(table => {
+      table.setAttribute('cellspacing', '0');
+      table.setAttribute('cellpadding', '0');
+      table.setAttribute('border', '1');
+      (table as HTMLElement).style.borderCollapse = 'collapse';
+      (table as HTMLElement).style.width = '100%';
+      (table as HTMLElement).style.tableLayout = 'fixed';
+    });
+  }
   
   // Configuration optimisée pour les PDFs
   const pdfOptions = {

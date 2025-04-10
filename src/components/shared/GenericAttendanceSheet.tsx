@@ -630,57 +630,51 @@ export const GenericAttendanceSheet: React.FC<GenericAttendanceSheetProps> = ({
   
   // Fonction helper pour l'upsert dans la table documents
   const upsertDocumentSignature = async (title: string, userId: string | null, fileUrl: string) => {
-      console.log(`💾 [UPSERT_DOC] Tentative Upsert pour title='${title}', userId='${userId}', fileUrl='${fileUrl?.substring(0,50)}...'`);
-      
-      let query = supabase
-          .from('documents')
-          .select('id')
-          .eq('training_id', training.id)
-          .eq('title', title);
-          
-      // Ajouter le filtre user_id seulement s'il est fourni (pour le cas formateur)
-      if (userId) {
-          query = query.eq('user_id', userId);
-      }
-      // Pour le formateur, on pourrait aussi avoir besoin de type='attestation' si plusieurs docs formateur existent
-      if (!userId) { // Supposons que si userId est null, c'est le formateur
-         query = query.eq('type', 'attestation'); 
-      }
-          
-      const { data: existing, error: queryError } = await query.limit(1);
+    try {
+        console.log(`💾 [UPSERT_DOC] Tentative Upsert pour title='${title}', userId='${userId}', fileUrl='${fileUrl?.substring(0,50)}...'`);
+        
+        let query = supabase
+            .from('documents')
+            .select('id')
+            .eq('training_id', training.id)
+            .eq('title', title);
+            
+        // Ajouter le filtre user_id seulement s'il est fourni (pour le cas formateur)
+        if (userId) {
+            query = query.eq('user_id', userId);
+        }
+        // Pour le formateur, on pourrait aussi avoir besoin de type='attestation' si plusieurs docs formateur existent
+        if (!userId) { // Supposons que si userId est null, c'est le formateur
+           query = query.eq('type', 'attestation'); 
+        }
+            
+        const { data: existing, error: queryError } = await query.limit(1);
 
-      if (queryError) {
-          console.error(`❌ [UPSERT_DOC] Erreur recherche existant pour '${title}':`, queryError);
-          return; 
-      }
+        if (queryError) {
+            console.error(`❌ [UPSERT_DOC] Erreur recherche existant pour '${title}':`, queryError);
+            return; 
+        }
 
-      if (existing && existing.length > 0) {
-          console.log(`🔄 [UPSERT_DOC] Document existant trouvé (ID: ${existing[0].id}) pour '${title}', mise à jour avec URL: ${fileUrl?.substring(0,50)}...`);
-          const { error: updateError } = await supabase
-              .from('documents')
-              .update({ file_url: fileUrl, updated_at: new Date().toISOString() })
-              .eq('id', existing[0].id);
-          if (updateError) console.error(`❌ [UPSERT_DOC] Erreur update pour '${title}':`, updateError);
-          else console.log(`✅ [UPSERT_DOC] Update succès pour '${title}'.`);
-      } else {
-          console.log(`➕ [UPSERT_DOC] Document non trouvé pour '${title}', création avec URL: ${fileUrl?.substring(0,50)}...`);
-          const insertData: any = {
-              title: title,
-              type: 'attestation', // Ou adapter si nécessaire
-              training_id: training.id,
-              file_url: fileUrl,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-          };
-          // Ajouter user_id et created_by seulement si userId est fourni
-          if (userId) {
-              insertData.user_id = userId;
-              insertData.created_by = userId; 
-          }
-          const { error: insertError } = await supabase.from('documents').insert(insertData);
-          if (insertError) console.error(`❌ [UPSERT_DOC] Erreur insert pour '${title}':`, insertError);
-          else console.log(`✅ [UPSERT_DOC] Insert succès pour '${title}'.`);
-      }
+        if (existing && existing.length > 0) {
+            console.log(`🔄 [UPSERT_DOC] Document existant trouvé (ID: ${existing[0].id}) pour '${title}', mise à jour avec URL: ${fileUrl?.substring(0,50)}...`);
+            const { error: updateError } = await supabase
+                .from('documents')
+                .update({ file_url: fileUrl, updated_at: new Date().toISOString() })
+                .eq('id', existing[0].id);
+            if (updateError) console.error(`❌ [UPSERT_DOC] Erreur update pour '${title}':`, updateError);
+            else console.log(`✅ [UPSERT_DOC] Update succès pour '${title}'.`);
+        } else {
+            console.log(`➕ [UPSERT_DOC] Document non trouvé pour '${title}', création avec URL: ${fileUrl?.substring(0,50)}...`);
+            const insertData: any = { title, type: 'attestation', training_id: training.id, file_url: fileUrl, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...(userId ? { user_id: userId, created_by: userId } : {}) };
+            console.log("Insert data:", insertData);
+            console.log("Insert data:", insertData);
+            const { error: insertError } = await supabase.from('documents').insert(insertData);
+            if (insertError) console.error(`❌ [UPSERT_DOC] Erreur insert pour '${title}':`, insertError);
+            else console.log(`✅ [UPSERT_DOC] Insert succès pour '${title}'.`);
+        }
+    } catch (error) {
+        console.error("Error in upsertDocumentSignature:", error);
+    }
   };
   
   // Fonction helper pour l'upsert dans attendance_sheet_signatures
