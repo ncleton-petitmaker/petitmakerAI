@@ -1,33 +1,30 @@
 import React from 'react';
-import { X, Download } from 'lucide-react';
-import { PdfViewer } from './PdfViewer';
+import { Dialog, Transition } from '@headlessui/react';
+import { Fragment } from 'react';
+import { Download, X } from 'lucide-react';
 
-interface PdfViewerModalProps {
+export interface PdfViewerModalProps {
   isOpen: boolean;
   onClose: () => void;
   pdfBlob: Blob | null;
-  title?: string;
-  allowDownload?: boolean;
-  fileName?: string;
+  title: string;
+  fileName: string;
 }
 
 export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   isOpen,
   onClose,
   pdfBlob,
-  title = "Aperçu du document",
-  allowDownload = true,
-  fileName = "document.pdf"
+  title = 'Document',
+  fileName = 'document.pdf'
 }) => {
-  if (!isOpen || !pdfBlob) return null;
-
   const handleDownload = () => {
     if (!pdfBlob) return;
     
     // Créer une URL pour le blob
     const url = URL.createObjectURL(pdfBlob);
     
-    // Créer un lien pour le téléchargement
+    // Créer un élément a et déclencher le téléchargement
     const a = document.createElement('a');
     a.href = url;
     a.download = fileName;
@@ -35,44 +32,73 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     a.click();
     
     // Nettoyer
-    document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    document.body.removeChild(a);
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4 overflow-y-auto">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col">
-        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-          <h3 className="text-lg font-medium text-gray-900">{title}</h3>
-          <div className="flex items-center">
-            {allowDownload && (
-              <button
-                onClick={handleDownload}
-                className="ml-4 text-blue-600 hover:text-blue-800 flex items-center"
-                title="Télécharger le document"
-              >
-                <Download className="h-5 w-5" />
-              </button>
-            )}
-            <button
-              onClick={onClose}
-              className="ml-4 text-gray-400 hover:text-gray-500"
-              title="Fermer"
+    <Transition appear show={isOpen} as={Fragment}>
+      <Dialog as="div" className="relative z-50" onClose={onClose}>
+        <Transition.Child
+          as={Fragment}
+          enter="ease-out duration-300"
+          enterFrom="opacity-0"
+          enterTo="opacity-100"
+          leave="ease-in duration-200"
+          leaveFrom="opacity-100"
+          leaveTo="opacity-0"
+        >
+          <div className="fixed inset-0 bg-black/50" />
+        </Transition.Child>
+
+        <div className="fixed inset-0 overflow-y-auto">
+          <div className="flex min-h-full items-center justify-center p-2 sm:p-4">
+            <Transition.Child
+              as={Fragment}
+              enter="ease-out duration-300"
+              enterFrom="opacity-0 scale-95"
+              enterTo="opacity-100 scale-100"
+              leave="ease-in duration-200"
+              leaveFrom="opacity-100 scale-100"
+              leaveTo="opacity-0 scale-95"
             >
-              <X className="h-6 w-6" />
-            </button>
+              <Dialog.Panel className="w-full max-w-5xl transform overflow-hidden rounded-lg bg-white p-2 shadow-xl transition-all flex flex-col">
+                <div className="flex justify-between items-center p-2 mb-2">
+                  <Dialog.Title as="h3" className="text-lg font-medium text-gray-900">
+                    {title}
+                  </Dialog.Title>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDownload}
+                      className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                    >
+                      <Download className="mr-2 h-4 w-4" />
+                      Télécharger
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="inline-flex items-center justify-center rounded-md p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-500"
+                    >
+                      <X className="h-5 w-5" />
+                    </button>
+                  </div>
+                </div>
+                <div className="bg-gray-100 flex-grow rounded overflow-auto" style={{ height: 'calc(100vh - 150px)' }}>
+                  {pdfBlob && (
+                    <iframe
+                      src={URL.createObjectURL(pdfBlob)}
+                      className="w-full h-full"
+                      title={title}
+                    />
+                  )}
+                </div>
+              </Dialog.Panel>
+            </Transition.Child>
           </div>
         </div>
-        
-        <div className="flex-1 overflow-hidden p-4 bg-gray-50">
-          <PdfViewer 
-            url={pdfBlob} 
-            title={title}
-            className="w-full h-full"
-            height="calc(90vh - 120px)"
-          />
-        </div>
-      </div>
-    </div>
+      </Dialog>
+    </Transition>
   );
 }; 

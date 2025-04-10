@@ -63,6 +63,7 @@ export class DocumentSignatureManager {
   private disableAutoLoad: boolean = false;
   private needStamp: boolean = false;
   private onSignatureChange: (type: SignatureType, signature: string | null) => void;
+  private id: string;
 
   /**
    * Constructeur du gestionnaire de signatures
@@ -89,9 +90,50 @@ export class DocumentSignatureManager {
     this.viewContext = viewContext;
     this.onSignatureChange = onSignatureChange;
     this.disableAutoLoad = false;
+    this.signatures = { participant: undefined, representative: undefined, trainer: undefined, companySeal: undefined, organizationSeal: undefined };
+    this.id = `dsm-instance-${Math.random().toString(36).substring(2, 9)}`; // Donner un ID à l'instance
     
+    // Ajouter l'écouteur d'événement
+    document.addEventListener('save-signature', this.handleSaveEvent);
+    console.log(`[DSM Constructor ${this.id}] Écouteur d'événement 'save-signature' ajouté.`);
+
     // Initialiser needStamp à true si c'est une convention
     this.needStamp = documentType === DocumentType.CONVENTION;
+  }
+
+  // Ajouter une méthode pour retirer l'écouteur
+  public destroy(): void {
+    document.removeEventListener('save-signature', this.handleSaveEvent);
+    console.log(`[DSM Destroy ${this.id}] Écouteur d'événement 'save-signature' retiré.`);
+  }
+
+  // Ajouter la méthode pour gérer l'événement
+  private handleSaveEvent = (event: Event): void => {
+    // Vérifier si c'est bien un CustomEvent avec les bonnes données
+    if (event instanceof CustomEvent && event.detail) {
+      const { dataURL, signatureType } = event.detail;
+      
+      // Optionnel: Vérifier si l'événement est destiné à CETTE instance 
+      // (si on avait passé this.id dans l'event detail, on pourrait filtrer ici)
+      console.log(`[DSM Event Handler ${this.id}] Événement 'save-signature' reçu pour type: ${signatureType}`);
+
+      if (dataURL && signatureType && Object.values(SignatureType).includes(signatureType)) {
+        // Appeler la méthode de sauvegarde interne
+        this.saveSignature(dataURL, signatureType)
+          .then(url => {
+            console.log(`[DSM Event Handler ${this.id}] Sauvegarde via événement réussie pour ${signatureType}. URL: ${url?.substring(0,30)}...`);
+            // La mise à jour de l'état local se fait déjà dans saveSignature via onSignatureChange
+          })
+          .catch(err => {
+            console.error(`[DSM Event Handler ${this.id}] Erreur lors de la sauvegarde via événement pour ${signatureType}:`, err);
+            // Gérer l'erreur si nécessaire (ex: afficher un message)
+          });
+      } else {
+        console.warn(`[DSM Event Handler ${this.id}] Événement 'save-signature' reçu avec données invalides ou type inconnu:`, event.detail);
+      }
+    } else {
+       console.warn(`[DSM Event Handler ${this.id}] Événement reçu n'est pas un CustomEvent attendu:`, event);
+    }
   }
 
   /**
@@ -410,6 +452,9 @@ export class DocumentSignatureManager {
         companySeal: !!this.signatures.companySeal,
         organizationSeal: !!this.signatures.organizationSeal
       });
+      
+      // >>> LOG AJOUTÉ ICI <<<
+      console.log(`    🏁 [DSM_LOAD_FINAL_STATE] État signature participant après chargement: ${this.signatures.participant ? this.signatures.participant.substring(0,30)+'...' : 'undefined'}`);
       
       // Vérifier si needStamp doit être mis à jour après chargement
       await this.loadDocument(); // Assure que documentId et needStamp sont à jour
@@ -855,66 +900,73 @@ export class DocumentSignatureManager {
         participantId: this.participantId
       });
     
-      // Récupérer le document existant
+      // Récupérer le document existant - SUPPRIMER 'status' du select
       const { data: documents, error } = await supabase
         .from('documents')
-        .select('id, need_stamp, status')
+        .select('id') // <- Correction ici
         .eq('type', this.documentType)
         .eq('training_id', this.trainingId)
         .eq('user_id', this.participantId)
         .limit(1);
       
       if (error) {
-        console.error('❌ [ERROR] Erreur lors du chargement du document:', error);
-        throw error;
-      }
-      
-      // Si un document existe déjà, utiliser ses données
-      if (documents && documents.length > 0) {
-        this.documentId = documents[0].id;
-        
-        // CORRECTION: S'assurer que need_stamp est correctement défini à partir de la base de données
-        if (documents[0].need_stamp !== undefined && documents[0].need_stamp !== null) {
-          this.needStamp = documents[0].need_stamp;
-          
-          // Forcer needStamp à true pour les conventions, même si la valeur en BD est false
-          if (this.documentType === DocumentType.CONVENTION && !this.needStamp) {
-            console.log('🔧 [CORRECTION] Forcer need_stamp à true pour convention (était false en BD)');
-            this.needStamp = true;
-            
-            // Mettre à jour la BD également
-            this.updateDocumentConfig().catch(err => {
-              console.error('❌ [ERROR] Échec mise à jour automatique need_stamp:', err);
-            });
-          }
-      } else {
-          // Si non défini dans la base de données, utiliser la valeur par défaut pour les conventions
-          this.needStamp = this.documentType === DocumentType.CONVENTION;
-          console.log('🔧 [DIAGNOSTIC_TAMPON] needStamp non défini en BD, valeur par défaut:', this.needStamp);
+        // Vérifier si l'erreur est due à une colonne manquante comme 'status' ou 'need_stamp'
+        if (error.message.includes('column') && error.message.includes('does not exist')) {
+            console.warn('⚠️ [WARN] Erreur de colonne ignorée (colonne obsolète?):', error.message);
+            // Tenter de recharger sans la colonne problématique (ici on sélectionne juste 'id')
+             const { data: retryData, error: retryError } = await supabase
+                .from('documents')
+                .select('id') // <- Correction ici aussi
+                .eq('type', this.documentType)
+                .eq('training_id', this.trainingId)
+                .eq('user_id', this.participantId)
+                .limit(1);
+            if (retryError) {
+                 console.error('❌ [ERROR] Erreur lors de la nouvelle tentative de chargement du document (select id):', retryError);
+                throw retryError; // Relancer l'erreur de la nouvelle tentative
+            } 
+             if (retryData && retryData.length > 0) {
+                this.documentId = retryData[0].id;
+                console.log('✅ [RETRY_SUCCESS] Document existant chargé (select id):', { id: this.documentId });
+            } else {
+                 console.log('🔍 [DEBUG] Aucun document trouvé même après nouvelle tentative.');
+                // Continuer pour créer un nouveau document
+            }
+        } else {
+             console.error('❌ [ERROR] Erreur lors du chargement du document:', error);
+             throw error;
         }
-        
+      } else if (documents && documents.length > 0) {
+        this.documentId = documents[0].id;
         console.log('🔍 [DEBUG] Document existant chargé:', {
           id: this.documentId,
-          needStamp: this.needStamp,
-          status: documents[0].status
+          // status: documents[0].status // <- Commenté car status n'est plus sélectionné
         });
       }
-      else {
-        console.log('🔍 [DEBUG] Aucun document trouvé, création d\'un nouveau document');
-        
-        // CORRECTION: Par défaut, les conventions nécessitent TOUJOURS un tampon
+       // La logique pour définir this.needStamp ne dépend plus de la DB
+       this.needStamp = this.documentType === DocumentType.CONVENTION;
+      
+      // Si aucun document n'a été trouvé ou chargé après la nouvelle tentative
+      if (!this.documentId) {
+        console.log("🔍 [DEBUG] Aucun document trouvé, création d'un nouveau document.");
         this.needStamp = this.documentType === DocumentType.CONVENTION;
-        console.log('🔧 [DIAGNOSTIC_TAMPON] Nouveau document convention avec needStamp =', this.needStamp);
+        console.log('🔧 [DIAGNOSTIC_TAMPON] Nouveau document avec needStamp =', this.needStamp);
         
-        // Créer un nouveau document
+        // Créer un nouveau document - AJOUTER title
+        let documentTitle = `Document (${this.documentType})`;
+        if (this.participantName) {
+          documentTitle += ` - ${this.participantName}`;
+        } else if (this.participantId) {
+           documentTitle += ` - User ${this.participantId.substring(0, 8)}...`; // Fallback avec ID
+        }
+
         const { data: newDocument, error: insertError } = await supabase
           .from('documents')
           .insert({
             type: this.documentType,
             training_id: this.trainingId,
             user_id: this.participantId,
-            status: 'draft',
-            need_stamp: this.needStamp
+            title: documentTitle, // <-- Ajout du titre ici
           })
           .select('id');
         
@@ -928,7 +980,7 @@ export class DocumentSignatureManager {
         }
         
         this.documentId = newDocument[0].id;
-        console.log('🔍 [DEBUG] Nouveau document créé avec ID:', this.documentId, 'et need_stamp =', this.needStamp);
+        console.log('🔍 [DEBUG] Nouveau document créé avec ID:', this.documentId);
       }
     } catch (error) {
       console.error('❌ [ERROR] Exception lors du chargement du document:', error);
@@ -937,28 +989,34 @@ export class DocumentSignatureManager {
   }
 
   /**
-   * Vérifie si le document nécessite un tampon
+   * Vérifie si le document nécessite un tampon (basé uniquement sur le type)
    */
   needsStamp(): boolean {
+    // La nécessité du tampon dépend maintenant uniquement du type de document
+    this.needStamp = this.documentType === DocumentType.CONVENTION;
     return this.needStamp;
   }
 
   /**
-   * Définit si le document nécessite un tampon
+   * Définit si le document nécessite un tampon (fonction conservée mais potentiellement obsolète)
    */
   setNeedsStamp(value: boolean): void {
+    // Attention: cette valeur pourrait être écrasée par la logique de needsStamp()
+    console.warn("⚠️ [WARN] setNeedsStamp est appelé, mais la valeur pourrait être ignorée car elle dépend maintenant du type de document.")
     this.needStamp = value;
   }
 
   /**
-   * Met à jour la configuration du document (need_stamp)
+   * Met à jour la configuration du document (need_stamp) - Fonction désactivée
    */
   async updateDocumentConfig(): Promise<void> {
+    console.log("ℹ️ [INFO] La mise à jour de need_stamp via updateDocumentConfig est désactivée car elle dépend maintenant du type.");
+    return; // Ne rien faire, car need_stamp ne doit pas être en BD
+    /* Code original désactivé
     if (!this.documentId) {
       console.error('❌ [ERROR] Impossible de mettre à jour la configuration du document: ID manquant');
       return;
     }
-
     try {
       const { error } = await supabase
         .from('documents')
@@ -973,6 +1031,7 @@ export class DocumentSignatureManager {
     } catch (error) {
       console.error('❌ [ERROR] Exception lors de la mise à jour de la configuration du document:', error);
     }
+    */
   }
 
   /**
@@ -1008,7 +1067,7 @@ export class DocumentSignatureManager {
   }
 
   /**
-   * Charge une signature spécifique depuis Supabase
+   * Charge une signature globale spécifique depuis la table DOCUMENTS
    * 
    * @param type Type de signature à charger (participant, representative, trainer, companySeal, organizationSeal)
    * @returns URL de la signature ou null si non trouvée
@@ -1016,48 +1075,84 @@ export class DocumentSignatureManager {
   public async loadSignature(type: SignatureType): Promise<string | null> {
     console.log(`    🔎 [DSM_LOAD_SIG] Appel loadSignature pour type: ${type}`);
     try {
+      // Utiliser la table 'documents' au lieu de 'signatures'
       let query = supabase
-        .from('signatures')
-        .select('signature_url')
-        .eq('training_id', this.trainingId)
-        .eq('signature_type', type);
-        // .eq('document_type', this.documentType) // Temporairement enlevé pour voir si ça aide
+        .from('documents') // <- Changement de table ici
+        .select('file_url') // <- Utiliser file_url
+        .eq('training_id', this.trainingId);
 
-      // Log des paramètres de base de la requête
-      console.log(`      [DSM_LOAD_SIG] Paramètres requête: training_id=${this.trainingId}, signature_type=${type}`);
+      // Filtrage basé sur le type de signature:
+      let titleFilter = '';
+      let userIdFilter: string | null = null;
 
-      // Ajouter le filtre user_id SEULEMENT si nécessaire (participant)
-      if (type === SignatureType.PARTICIPANT) {
-        console.log(`      [DSM_LOAD_SIG] Ajout filtre: user_id=${this.participantId}`);
-        query = query.eq('user_id', this.participantId);
-      } 
-      // Pour le tampon entreprise, filtrer par companyId s'il est disponible
-      else if (type === SignatureType.COMPANY_SEAL && this.companyId) {
-         console.log(`      [DSM_LOAD_SIG] Ajout filtre: company_id=${this.companyId}`);
-         query = query.eq('company_id', this.companyId);
+      switch (type) {
+        case SignatureType.PARTICIPANT:
+          titleFilter = "Signature de l'apprenant";
+          userIdFilter = this.participantId;
+          query = query.eq('user_id', userIdFilter);
+          break;
+        case SignatureType.REPRESENTATIVE:
+          titleFilter = '%signature%representant%';
+          // La signature du représentant est liée à l'entreprise, pas à l'utilisateur direct?
+          // Si companyId existe, on pourrait chercher un document lié à la compagnie?
+           query = query.eq('type', DocumentType.CONVENTION); // Lié à la convention
+          // Comment identifier le bon document 'représentant' sans user_id ou company_id direct?
+          // Peut-être chercher le document de convention du participant et voir s'il a une signature?
+           console.warn("⚠️ [WARN] Chargement signature REPRESENTATIVE: Logique de filtrage à affiner.");
+          break;
+        case SignatureType.TRAINER:
+          titleFilter = '%signature%formateur%';
+           query = query.eq('type', DocumentType.ATTESTATION); // Souvent lié à l'attestation
+          // Pas de filtre user_id ici, signature globale pour la formation
+          break;
+        case SignatureType.COMPANY_SEAL:
+          titleFilter = '%tampon%entreprise%';
+           query = query.eq('type', DocumentType.CONVENTION); // Lié à la convention
+          // Ici aussi, comment lier au bon tampon sans companyId direct dans la requête?
+          // Si on a this.companyId, on pourrait chercher les users de cette company?
+           console.warn("⚠️ [WARN] Chargement signature COMPANY_SEAL: Logique de filtrage à affiner.");
+          break;
+        case SignatureType.ORGANIZATION_SEAL:
+           // Le tampon de l'OF est global, souvent stocké dans settings ou un doc dédié
+           console.log("ℹ️ [INFO] Chargement ORGANISATION_SEAL géré séparément par ensureOrganizationSealIsLoaded.");
+           return this.signatures.organizationSeal || null;
       }
-      // Ne PAS filtrer par user_id pour TRAINER ou REPRESENTATIVE (signatures globales à la formation/entreprise)
-      else if (type === SignatureType.TRAINER || type === SignatureType.REPRESENTATIVE) {
-         console.log(`      [DSM_LOAD_SIG] PAS de filtre user_id/company_id pour ${type}.`);
+
+      if (titleFilter) {
+        query = query.eq('title', titleFilter);
       }
+
+      // Log des paramètres de la requête
+      console.log(`      [DSM_LOAD_SIG] Paramètres requête DOCUMENTS: training_id=${this.trainingId}, type=${type}, title LIKE ${titleFilter}, user_id=${userIdFilter || 'N/A'}`);
 
       // Trier par date de création pour obtenir la plus récente
       query = query.order('created_at', { ascending: false }).limit(1);
 
-      console.log(`    ⏳ [DSM_LOAD_SIG] Exécution requête Supabase pour ${type}...`);
+      console.log(`    ⏳ [DSM_LOAD_SIG] Exécution requête Supabase (table documents) pour ${type}...`);
       const { data, error } = await query.maybeSingle();
-
-      if (error) {
-        console.error(`    ❌ [DSM_LOAD_SIG] Erreur Supabase pour ${type}:`, error);
-        return null;
+      
+      // >>> LOG AJOUTÉ ICI <<<
+      if (type === SignatureType.PARTICIPANT) {
+          console.log(`    📊 [DSM_LOAD_SIG_RESULT] Résultat requête PARTICIPANT: data=${JSON.stringify(data)}, error=${JSON.stringify(error)}`);
       }
 
-      if (data && data.signature_url) {
-        const url = addCacheBuster(data.signature_url);
-        console.log(`    ✅ [DSM_LOAD_SIG] Signature trouvée pour ${type}: ${url.substring(0, 60)}...`);
+      if (error) {
+        // Vérifier si l'erreur est due à la table 'signatures'
+         if (error.message.includes('relation \"public.signatures\" does not exist')) {
+             console.warn(`    ⚠️ [WARN] Erreur ignorée (table 'signatures' obsolète pour ${type}): ${error.message}`);
+             return null; // Continuer sans cette signature si la table n'existe pas
+         } else {
+            console.error(`    ❌ [DSM_LOAD_SIG] Erreur Supabase (table documents) pour ${type}:`, error);
+             return null;
+         }
+      }
+
+      if (data && data.file_url) {
+        const url = addCacheBuster(data.file_url);
+        console.log(`    ✅ [DSM_LOAD_SIG] Signature trouvée pour ${type} via table 'documents': ${url.substring(0, 60)}...`);
         return url;
       } else {
-        console.log(`    ℹ️ [DSM_LOAD_SIG] Aucune signature trouvée pour ${type} dans la table 'signatures'.`);
+        console.log(`    ℹ️ [DSM_LOAD_SIG] Aucune signature trouvée pour ${type} dans la table 'documents'.`);
         return null;
       }
     } catch (e) {
@@ -1071,17 +1166,23 @@ export class DocumentSignatureManager {
    * Utile pour forcer une mise à jour sans passer par la sauvegarde complète
    * 
    * @param type Type de signature
-   * @param url URL de la signature
+   * @param url URL de la signature (doit être une chaîne valide)
    */
   updateSignature(type: SignatureType, url: string): void {
-    console.log(`📝 [UPDATE_SIG] Mise à jour de la signature ${type}`);
-    // @ts-ignore
-    if (this.signatures.hasOwnProperty(type)) {
-      // @ts-ignore
-      this.signatures[type] = url;
-      this.onSignatureChange(type, url || null); // Pass null if url is empty string
+    // Assurer que l'URL est une chaîne valide avant de l'utiliser
+    const validUrl = url || null; // Convertir chaîne vide en null si nécessaire
+    console.log(`📝 [UPDATE_SIG] Mise à jour de la signature ${type} avec URL: ${validUrl ? validUrl.substring(0,30)+'...' : 'null'}`);
+    
+    // Vérifier si le type de signature est valide
+    if (Object.values(SignatureType).includes(type)) {
+      // Mettre à jour la signature dans l'objet this.signatures
+      // @ts-ignore - On sait que type est une clé valide de SignatureSet ici
+      this.signatures[type] = validUrl;
+      
+      // Notifier le changement
+      this.onSignatureChange(type, validUrl);
     } else {
-      console.warn(`⚠️ [UPDATE_SIG] Tentative de mise à jour d'un type de signature inconnu: ${type}`);
+      console.warn(`⚠️ [UPDATE_SIG] Tentative de mise à jour d'un type de signature inconnu ou invalide: ${type}`);
     }
   }
 

@@ -53,6 +53,19 @@ export interface Training {
     pedagogical_material?: boolean;
     digital_support_provided?: boolean;
   };
+  training_days?: Array<{
+    date: string;
+    morning: boolean;
+    afternoon: boolean;
+  }>;
+  periods?: Array<{
+    startDate?: string;
+    start_date?: string;
+    endDate?: string;
+    end_date?: string;
+    [key: string]: any;
+  }>;
+  metadata?: any;
 }
 
 export interface Participant {
@@ -246,83 +259,109 @@ export const getMaterialElements = (materialElements?: {
 
 // Générer un PDF multi-pages à partir d'un élément HTML
 export const generateDocumentPDF = async (element: HTMLElement): Promise<Blob> => {
-  console.log("📄 [PDF_GEN_START] Début de la génération PDF.");
-  try {
-    // Détecter le type de document à partir de l'attribut data-document-type
-    const documentType = element.getAttribute('data-document-type') as DocumentType | null;
-    console.log(`📄 [PDF_GEN_INFO] Type de document détecté: ${documentType || 'non trouvé/inconnu'}`);
-
-    // Configuration de html2pdf.js
-    const pdfOptions = {
-      margin: 40, // Revenir à une valeur unique (probablement en points)
-      filename: `${documentType || 'document'}_${Date.now()}.pdf`,
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: {
-        scale: 2, // Augmenter la résolution
-        logging: true, // Activer les logs html2canvas pour plus de détails
-        useCORS: true,
-        allowTaint: true, // Essayer d'autoriser les images cross-origin
-        onrendered: function(canvas: HTMLCanvasElement) {
-          // Tentative pour éviter les canvas vides
-          if (canvas.width === 0 || canvas.height === 0) {
-            console.error('❌ [PDF_GEN_H2C_ERROR] Erreur Html2Canvas: Canvas vide généré.');
-          } else {
-            console.log('📄 [PDF_GEN_H2C_SUCCESS] Html2Canvas a rendu le canvas avec succès.');
-          }
-        }
-      },
-      jsPDF: {
-        unit: 'pt', // Assurer la cohérence avec la marge
-        format: 'a4',
-        orientation: 'portrait'
-      },
-      pagebreak: { mode: ['avoid-all', 'css', 'legacy'] } // Modes de gestion des sauts de page
-    };
-
-    console.log('📄 [PDF_GEN_OPTIONS] Options html2pdf préparées:', JSON.stringify(pdfOptions, null, 2));
-
-    // Créer une copie clonée pour éviter les modifications directes
-    console.log('📄 [PDF_GEN_CLONE] Clonage de l\'élément HTML source.');
-    const clonedElement = element.cloneNode(true) as HTMLElement;
-    console.log('📄 [PDF_GEN_CLONE_SUCCESS] Élément HTML cloné.');
-
-    let positions: Record<string, SignaturePosition> | null = null;
-    // Appliquer le positionnement des signatures si nécessaire
-    if (documentType) {
-      try {
-        console.log(`📄 [PDF_GEN_POS_FETCH] Tentative de récupération des positions pour ${documentType}`);
-        positions = await getSignaturePositions(documentType);
-        if (positions && Object.keys(positions).length > 0) {
-          console.log(`📄 [PDF_GEN_POS_FOUND] Positions trouvées pour ${documentType}:`, JSON.stringify(positions, null, 2));
-          console.log(`📄 [PDF_GEN_POS_APPLY] Tentative d\'application des positions sur l\'élément cloné.`);
-          applySignaturePositions(clonedElement, positions);
-          console.log(`📄 [PDF_GEN_POS_APPLY_SUCCESS] Application des positions terminée.`);
-        } else {
-          console.log(`📄 [PDF_GEN_POS_NOT_FOUND] Aucune position de signature trouvée ou définie pour ${documentType}.`);
-        }
-      } catch (error) {
-        console.error(`❌ [PDF_GEN_POS_ERROR] Erreur lors de la récupération/application des positions pour ${documentType}:`, error);
-        // Continuer sans positionnement si erreur
-      }
-    } else {
-      console.log('📄 [PDF_GEN_POS_SKIP] Pas de type de document détecté, positionnement des signatures ignoré.');
+  console.log("📄 [PDF_GEN_START] Début de la génération PDF...");
+  
+  // Récupérer le type de document depuis l'attribut data-document-type
+  const documentTypeValue = element.querySelector('[data-document-type]')?.getAttribute('data-document-type');
+  const documentType = documentTypeValue as DocumentType | null;
+  console.log(`📄 [PDF_GEN_TYPE] Type de document détecté: ${documentType || 'inconnu'}`);
+  
+  // Créer une copie profonde de l'élément pour ne pas modifier l'original
+  const clonedElement = element.cloneNode(true) as HTMLElement;
+  
+  // Configuration optimisée pour les PDFs
+  const pdfOptions = {
+    margin: 10, // Marge uniforme en mm
+    filename: `document_${new Date().getTime()}.pdf`,
+    image: { type: 'jpeg', quality: 0.95 },
+    html2canvas: { 
+      scale: 2,  // Augmenter la résolution pour une meilleure qualité
+      useCORS: true, // Pour permettre le chargement d'images externes
+      logging: false, // Désactiver les logs de html2canvas
+      letterRendering: true, // Améliore le rendu du texte
+      allowTaint: true, // Permet de capturer des images cross-origin
+      scrollX: 0,
+      scrollY: 0,
+      windowWidth: document.documentElement.offsetWidth,
+      windowHeight: document.documentElement.offsetHeight
+    },
+    jsPDF: { 
+      unit: 'mm', 
+      format: 'a4', 
+      orientation: 'portrait',
+      compress: true, // Compresser le PDF
+      precision: 16 // Précision des calculs
     }
-
-    // Générer le PDF avec html2pdf
-    console.log('📄 [PDF_GEN_CORE_START] Appel de html2pdf().set(pdfOptions).from(clonedElement).outputPdf(\'blob\')...');
-    const pdfBlob = await html2pdf().set(pdfOptions).from(clonedElement).outputPdf('blob');
-
-    console.log('📄 [PDF_GEN_CORE_SUCCESS] PDF Blob généré avec succès. Taille:', pdfBlob.size);
-    console.log("📄 [PDF_GEN_END] Fin de la génération PDF (succès).");
-    return pdfBlob;
-
-  } catch (error) {
-    console.error('❌ [PDF_GEN_END_ERROR] Erreur majeure lors de la génération du PDF:', error);
-    console.log("📄 [PDF_GEN_END] Fin de la génération PDF (erreur).");
-    // Retourner un Blob vide ou rejeter la promesse en cas d'erreur critique
-    return new Blob([]); // Ou throw error;
+  };
+  
+  // Pré-traitement supplémentaire pour les signatures
+  try {
+    // 1. S'assurer que toutes les images sont chargées
+    const signatureImages = clonedElement.querySelectorAll('img');
+    for (let i = 0; i < signatureImages.length; i++) {
+      const img = signatureImages[i] as HTMLImageElement;
+      
+      // Si l'image a un alt qui contient "signature" ou "tampon", assurer qu'elle est correctement dimensionnée
+      if (img.alt && (img.alt.toLowerCase().includes('signature') || img.alt.toLowerCase().includes('tampon'))) {
+        // Appliquer des styles pour s'assurer que l'image s'affiche correctement dans le PDF
+        img.style.maxWidth = '100%';
+        img.style.maxHeight = '80px';
+        img.style.objectFit = 'contain';
+        img.setAttribute('crossorigin', 'anonymous');
+        
+        // Ajouter une classe pour faciliter les manipulations ultérieures
+        img.classList.add('signature-image-for-pdf');
+        
+        console.log(`📄 [PDF_GEN_SIG_IMAGE] Optimisation de l'image: ${img.alt}`);
+      }
+    }
+    
+    // 2. Supprimer les éléments interactifs ou non nécessaires pour le PDF
+    const elementsToRemove = clonedElement.querySelectorAll('button, input, .pdf-hide, [data-pdf-hide="true"]');
+    elementsToRemove.forEach(el => el.parentNode?.removeChild(el));
+    
+    console.log('📄 [PDF_GEN_CLEAN] Nettoyage des éléments interactifs terminé');
+  } catch (preprocessError) {
+    console.error('❌ [PDF_GEN_PREPROCESS_ERROR] Erreur lors du pré-traitement:', preprocessError);
+    // Continuer malgré l'erreur
   }
-};
+  
+  console.log('📄 [PDF_GEN_CLONE_SUCCESS] Élément HTML cloné.');
+
+  let positions: Record<string, SignaturePosition> | null = null;
+  // Appliquer le positionnement des signatures si nécessaire
+  if (documentType) {
+    try {
+      console.log(`📄 [PDF_GEN_POS_FETCH] Tentative de récupération des positions pour ${documentType}`);
+      positions = await getSignaturePositions(documentType);
+      if (positions && Object.keys(positions).length > 0) {
+        console.log(`📄 [PDF_GEN_POS_FOUND] Positions trouvées pour ${documentType}:`, JSON.stringify(positions, null, 2));
+        console.log(`📄 [PDF_GEN_POS_APPLY] Tentative d\'application des positions sur l\'élément cloné.`);
+        applySignaturePositions(clonedElement, positions);
+        console.log(`📄 [PDF_GEN_POS_APPLY_SUCCESS] Application des positions terminée.`);
+      } else {
+        console.log(`📄 [PDF_GEN_POS_NOT_FOUND] Aucune position de signature trouvée ou définie pour ${documentType}.`);
+      }
+    } catch (error) {
+      console.error(`❌ [PDF_GEN_POS_ERROR] Erreur lors de la récupération/application des positions pour ${documentType}:`, error);
+      // Continuer sans positionnement si erreur
+    }
+  } else {
+    console.log('📄 [PDF_GEN_POS_SKIP] Pas de type de document détecté, positionnement des signatures ignoré.');
+  }
+
+  // Générer le PDF avec html2pdf
+  console.log('📄 [PDF_GEN_CORE_START] Appel de html2pdf().set(pdfOptions).from(clonedElement).outputPdf(\'blob\')...');
+  
+  // Ajouter un délai pour permettre au navigateur de finaliser le rendu
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  const pdfBlob = await html2pdf().set(pdfOptions).from(clonedElement).outputPdf('blob');
+
+  console.log('📄 [PDF_GEN_CORE_SUCCESS] PDF Blob généré avec succès. Taille:', pdfBlob.size);
+  console.log("📄 [PDF_GEN_END] Fin de la génération PDF (succès).");
+  return pdfBlob;
+}
             
 /**
  * Génère un PDF et l'ouvre dans une fenêtre modale avec le PdfViewer

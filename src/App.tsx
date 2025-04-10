@@ -16,6 +16,8 @@ import { User } from '@supabase/supabase-js';
 import { LearnerDetail } from './components/admin/LearnerDetail';
 import { CompanyDetail } from './components/admin/CompanyDetail';
 import SignatureMigrationPage from './pages/SignatureMigrationPage';
+import { ToastContainer } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -118,6 +120,18 @@ function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <CookieConsent />
+      <ToastContainer
+        position="bottom-right"
+        autoClose={5000}
+        hideProgressBar={false}
+        newestOnTop
+        closeOnClick
+        rtl={false}
+        pauseOnFocusLoss
+        draggable
+        pauseOnHover
+        theme="light"
+      />
     </div>
   );
 }
