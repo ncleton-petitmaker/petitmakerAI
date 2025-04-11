@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AdminSidebar } from './AdminSidebar';
+import { AdminSidebar, ViewType } from './AdminSidebar';
 import { AdminHeader } from './AdminHeader';
 import { CompaniesView } from './CompaniesView';
 import { LearnersView } from './LearnersView';
@@ -9,14 +9,17 @@ import { DashboardView } from './DashboardView';
 import { TrainingsView } from './TrainingsView';
 import { QuestionnairesView } from './QuestionnairesView';
 import { TrainersView } from './TrainersView';
+import EmailTemplatesList from './EmailTemplatesList';
+import EmailTemplateForm from './EmailTemplateForm';
+import EmailErrorReport from './EmailErrorReport';
+import GoogleSettings from './GoogleSettings';
 import { useLocation } from 'react-router-dom';
-
-type ViewType = 'dashboard' | 'companies' | 'learners' | 'documents' | 'settings' | 'trainings' | 'questionnaires' | 'trainers';
 
 export const AdminDashboard = () => {
   console.log("AdminDashboard - Component initializing");
   const [currentView, setCurrentView] = useState<ViewType>('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [selectedTemplate, setSelectedTemplate] = useState<any>(null);
   const location = useLocation();
 
   useEffect(() => {
@@ -46,7 +49,25 @@ export const AdminDashboard = () => {
 
   useEffect(() => {
     console.log("AdminDashboard - Current view changed to:", currentView);
+    // Ne pas réinitialiser le template lorsqu'on passe à la vue d'édition
+    if (currentView !== 'email-create' && selectedTemplate) {
+      console.log("AdminDashboard - Clearing selected template");
+      setSelectedTemplate(null);
+    }
   }, [currentView]);
+
+  // Fonction spéciale pour gérer l'édition d'un modèle d'email
+  const handleEditEmailTemplate = (template: any) => {
+    console.log("AdminDashboard - handleEditEmailTemplate called with template:", template);
+    // Définir d'abord le template sélectionné
+    setSelectedTemplate(template);
+    
+    // Utiliser un petit délai pour garantir que le state est mis à jour avant de changer de vue
+    setTimeout(() => {
+      console.log("AdminDashboard - Changing view to email-create with template:", template.id);
+      setCurrentView('email-create');
+    }, 50);
+  };
 
   const renderView = () => {
     console.log("AdminDashboard - Rendering view:", currentView);
@@ -60,13 +81,25 @@ export const AdminDashboard = () => {
       case 'documents':
         return <DocumentsView />;
       case 'settings':
-        return <SettingsView />;
+        return <SettingsView setCurrentView={setCurrentView} />;
       case 'trainings':
         return <TrainingsView />;
       case 'questionnaires':
         return <QuestionnairesView />;
       case 'trainers':
         return <TrainersView />;
+      case 'email-templates':
+        return <EmailTemplatesList 
+          setCurrentView={setCurrentView} 
+          setSelectedTemplate={setSelectedTemplate}
+          onEditTemplate={handleEditEmailTemplate}
+        />;
+      case 'email-create':
+        return <EmailTemplateForm setCurrentView={setCurrentView} selectedTemplate={selectedTemplate} />;
+      case 'email-errors':
+        return <EmailErrorReport setCurrentView={setCurrentView} />;
+      case 'google-settings':
+        return <GoogleSettings setCurrentView={setCurrentView} />;
       default:
         return <DashboardView />;
     }
@@ -113,6 +146,14 @@ const getViewTitle = (view: ViewType): string => {
       return 'Questionnaires';
     case 'trainers':
       return 'Formateurs';
+    case 'email-templates':
+      return 'Modèles d\'emails';
+    case 'email-create':
+      return 'Créer/Modifier un modèle d\'email';
+    case 'email-errors':
+      return 'Rapport d\'erreurs d\'emails';
+    case 'google-settings':
+      return 'Connexion Google';
     default:
       return 'Tableau de bord';
   }

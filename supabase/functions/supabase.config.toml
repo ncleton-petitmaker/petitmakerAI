@@ -1,0 +1,12 @@
+[functions]
+[functions.google-oauth]
+entrypoint = "./google-oauth/index.ts"
+
+[functions.send-email]
+entrypoint = "./send-email/index.ts"
+
+[functions.scheduled-emails]
+entrypoint = "./scheduled-emails/index.ts"
+
+[functions.google-oauth-token-exchange]
+entrypoint = "./google-oauth-token-exchange/index.ts" 

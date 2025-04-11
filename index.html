@@ -189,8 +189,36 @@
         ]
       }
     </script>
+    <script>
+      // Capture les erreurs et les affiche même en cas de page blanche
+      window.onerror = function(message, source, lineno, colno, error) {
+        console.error('Erreur JavaScript:', message, 'à', source, lineno, colno);
+        document.body.innerHTML = '<div style="font-family: system-ui; padding: 20px; background: #f8f8f8;"><h2 style="color: #e53e3e;">Erreur JavaScript</h2><pre style="background: #fff; padding: 15px; border-radius: 5px; overflow: auto;">' + message + '\nà ' + source + ':' + lineno + ':' + colno + '</pre></div>';
+        return true;
+      };
+    </script>
+    <style>
+      /* Classe utilitaire pour inclure des animations */
+      .tailwind-animate-init {
+        animation: none;
+      }
+      .animate-zoom-in-95 {
+        animation: zoomIn95 0.2s ease-out forwards;
+      }
+      .animate-fade-in-0 {
+        animation: fadeIn0 0.2s ease-out forwards;
+      }
+      @keyframes zoomIn95 {
+        0% { opacity: 0; transform: scale(0.95); }
+        100% { opacity: 1; transform: scale(1); }
+      }
+      @keyframes fadeIn0 {
+        0% { opacity: 0; }
+        100% { opacity: 1; }
+      }
+    </style>
   </head>
-  <body>
+  <body class="tailwind-animate-init">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

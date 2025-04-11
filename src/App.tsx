@@ -18,6 +18,8 @@ import { CompanyDetail } from './components/admin/CompanyDetail';
 import SignatureMigrationPage from './pages/SignatureMigrationPage';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
+// Import temporaire pour le test des composants UI
+import { TestUIComponents } from './components/ui/test-imports';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -79,6 +81,9 @@ function App() {
         <Route path="/mentions-legales" element={<LegalNotices />} />
         <Route path="/politique-de-confidentialite" element={<PrivacyPolicy />} />
         <Route path="/cgu" element={<TermsOfUse />} />
+        
+        {/* Route temporaire pour tester les composants UI */}
+        <Route path="/test-ui" element={<TestUIComponents />} />
         
         {/* Student Space Routes */}
         <Route path="/espace-stagiaires" element={<StudentSpace />} />
